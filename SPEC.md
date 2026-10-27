@@ -439,15 +439,13 @@ safe kernel → `correct` + evals.
 1. **Repo location.** Proposed: `C:\Users\bmtrn\disciplined-data-analysis`
    (this folder), sibling to `disciplined-vibe-coding`, same layout and
    update contract (shipped read-only, `user/` overlay). Not yet `git init`.
-2. **Definitions registry home:** per-project folder vs. shared vault
-   notes (shared wins if metrics recur across projects).
-3. **Blocking hooks:** accept three blocking `pre_tool_call` hooks
+2. **Definitions registry home: DECIDED 2026-10-27 — per-project.**
+   Shared only when a second lane needs the same definitions.
+3. **Blocking hooks: DECIDED 2026-10-27 — blocking on the big four.** ~~accept~~ three blocking `pre_tool_call` hooks
    (`lockguard`, `rawguard`, `defguard`) plus `footercheck`, departing from
    the sibling's nudge-only stance? Alternative: ship all as advisory and
    rely on gates — weaker on gap 1.
-4. **Kernel implementation:** subprocess + uv venv (simplest), Jupyter
-   kernel (richer), or DuckDB-only sandbox (safest for tabular work).
-5. **Glance-rung lock:** keep auto-lock even for glances (proposed — it is
-   one line and keeps gap 1 closed everywhere), or exempt glances?
-6. **Goldfish execution:** delegated subagent (default) vs. second
-   profile (stronger isolation, more setup).
+4. **Kernel: DECIDED 2026-10-27 — Jupyter (fancy), full tool access.**
+5. **Glance-rung lock: DECIDED 2026-10-27 — always lock, even glances.**
+6. **Goldfish execution: DECIDED 2026-10-27 — temp subagent.**
+   Fresh context is the feature; full tool access in the brief.
