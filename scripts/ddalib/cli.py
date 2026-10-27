@@ -1,7 +1,8 @@
 """`dda` command-line interface.
 
 Implemented: init, status, start, release, hash, install, version (phase 1);
-lock, verify-chain, gate (G4), footer, abandon (phase 2).
+lock, verify-chain, gate (G4), footer, abandon (phase 2); meta, variant, run,
+gate G6 (phase 3).
 Everything else in the spec's command set is registered but fails closed
 (exit 3, "not implemented in this build") so a script or gate that calls
 it can never mistake a missing feature for a pass.
@@ -16,18 +17,18 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import __version__, binding, chain, footer, ledger, lockhash, lockstate
+from . import __version__, binding, chain, footer, kernel, ledger, lockhash, lockstate
 from .layout import LAYOUT_DIRS, LAYOUT_FILES, REPO_ROOT, TEMPLATES_DIR, DdaError, Workdir, dda_home
 
 EXIT_NOT_IMPLEMENTED = 3
 
 # Spec commands not yet built, with the build phase that delivers them (§14).
 PENDING = {
-    "meta": 3, "run": 3, "variant": 3, "approve": 4,
+    "approve": 4,
     "approved": 4, "doctor": 4, "gitcheck": 5, "evals": 9, "packet": 7,
     "review": 7, "profile": 8, "verify": 8,
 }
-# Gates and the phase that builds each one's checks (§3, §14). G4 is built in phase 2.
+# Gates and the phase that builds each one's checks (§3, §14). G4 and G6 are built.
 GATE_PHASE = {"G0": 5, "G1": 6, "G2": 4, "G3": 7, "G5": 8, "G6": 3, "G7": 8, "G8": 5, "G9": 5}
 
 BLOCKING_HOOKS = ("lockguard", "evidenceguard", "rawguard", "defguard", "footercheck")
@@ -185,6 +186,11 @@ def cmd_gate(args) -> int:
         ledger.write_wayfinder(wd, g, passed, reason)
         print(f"{g}: {'pass' if passed else 'fail'} — {reason}")
         return 0 if passed else 1
+    if g == "G6":
+        passed, reason, _ = ledger.gate_g6(wd)
+        ledger.write_wayfinder(wd, g, passed, reason)
+        print(f"{g}: {'pass' if passed else 'fail'} — {reason}")
+        return 0 if passed else 1
     if g in GATE_PHASE:
         print(f"dda gate {g}: not implemented in this build (arrives in build phase {GATE_PHASE[g]}, SPEC §14). "
               "Failing closed.", file=sys.stderr)
@@ -221,6 +227,68 @@ def cmd_abandon(args) -> int:
 
 def cmd_version(args) -> int:
     print(f"dda {__version__}")
+    return 0
+
+
+def cmd_meta(args) -> int:
+    wd = _wd(args)
+    text, _rec = kernel.do_meta(wd, args.alias, session=args.session or os.environ.get("HERMES_SESSION_ID") or "")
+    print(text, end="")
+    return 0
+
+
+def _parse_sets(pairs: list[str]) -> dict:
+    header = {}
+    for p in pairs or []:
+        if "=" not in p:
+            raise DdaError(f"bad --set {p!r} (want field=value; fields: {', '.join(kernel.HEADER_FIELDS)})")
+        k, v = p.split("=", 1)
+        k = k.strip().lower().replace("-", "_")
+        if k not in kernel.HEADER_FIELDS:
+            raise DdaError(f"unknown header field {k!r} (fields: {', '.join(kernel.HEADER_FIELDS)})")
+        header[k] = v.strip()
+    return header
+
+
+def cmd_variant(args) -> int:
+    wd = _wd(args)
+    if args.list:
+        regs = kernel.registrations(wd)
+        if not regs:
+            print("no variants registered")
+            return 0
+        locked = kernel.locked_variant_id(wd)
+        for vid in sorted(regs):
+            r = regs[vid]
+            frozen = kernel.frozen_hash(wd, vid)
+            nruns = len(kernel.run_entries(wd, vid))
+            mark = " [locked]" if vid == locked else ""
+            print(f"{vid}{mark}: key={(r.get('variant_key') or '')[:12]} label={r.get('label')} "
+                  f"frozen={frozen[:12] if frozen else '-'} runs={nruns} why={r.get('why')}")
+        return 0
+    if args.locked:
+        rec = kernel.mark_locked(wd, args.locked)
+        print(f"locked variant: {rec['variant']}")
+        return 0
+    if not args.id:
+        raise DdaError("usage: `dda variant <id> --why \"...\" [--parent P] [--label L] [--set k=v ...]`; "
+                       "`dda variant --locked <id>`; `dda variant --list`")
+    rec = kernel.register_variant(wd, args.id, parent=args.parent, why=args.why or "",
+                                  label=args.label, header=_parse_sets(args.set))
+    print(f"variant {rec['variant']}: key={rec['variant_key'][:12]} label={rec['label']}")
+    return 0
+
+
+def cmd_run(args) -> int:
+    wd = _wd(args)
+    rest = list(args.rest or [])
+    if rest[:1] == ["--"]:
+        rest = rest[1:]
+    rec = kernel.do_run(wd, args.variant, args.script, rest,
+                        session=args.session or os.environ.get("HERMES_SESSION_ID") or "",
+                        seed=args.seed)
+    print(f"run {rec['run_id']} (variant {rec['variant']}, seed {rec['seed']}): "
+          f"record runs/kernels/{rec['run_id']}.json, blob {rec['blob']}")
     return 0
 
 
@@ -279,11 +347,41 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_verify_chain)
 
-    s = sub.add_parser("gate", help="run a gate check and write its Wayfinder line (G4 built)")
+    s = sub.add_parser("gate", help="run a gate check and write its Wayfinder line (G4, G6 built)")
     s.add_argument("gate")
     s.add_argument("workdir", nargs="?")
     s.add_argument("--milestone")
     s.set_defaults(func=cmd_gate)
+
+    s = sub.add_parser("meta", help="metadata-only access to a data-root alias (names, types, counts)")
+    s.add_argument("alias")
+    s.add_argument("workdir", nargs="?")
+    s.add_argument("--milestone")
+    s.add_argument("--session")
+    s.set_defaults(func=cmd_meta)
+
+    s = sub.add_parser("variant", help="register an analytic variant (freeze-on-first-run)")
+    s.add_argument("id", nargs="?")
+    s.add_argument("workdir", nargs="?")
+    s.add_argument("--milestone")
+    s.add_argument("--why", default="")
+    s.add_argument("--parent")
+    s.add_argument("--label", choices=list(kernel.VARIANT_LABELS))
+    s.add_argument("--set", action="append", default=[], metavar="FIELD=value")
+    s.add_argument("--locked", metavar="ID")
+    s.add_argument("--list", action="store_true")
+    s.set_defaults(func=cmd_variant)
+
+    s = sub.add_parser("run", help="run a variant script in the locked-down kernel")
+    s.add_argument("--variant", required=True)
+    s.add_argument("script", help="variant script; dda options must come before this path")
+    s.add_argument("rest", nargs=argparse.REMAINDER, help="script arguments (after an optional `--`)")
+    # NOTE: REMAINDER swallows a trailing positional, so the workdir is a flag here.
+    s.add_argument("--workdir")
+    s.add_argument("--milestone")
+    s.add_argument("--session")
+    s.add_argument("--seed", type=int)
+    s.set_defaults(func=cmd_run)
 
     s = sub.add_parser("footer", help="print a provenance footer skeleton, or --check a report")
     s.add_argument("workdir", nargs="?")

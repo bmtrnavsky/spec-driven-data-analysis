@@ -5,6 +5,24 @@ The phase-0 harness (`python redteam/run.py`) is GREEN only when every
 gets through, why, and the mechanism or phase that narrows it. Entries are
 removed when the harness shows the case as prevented or detected.
 
+## Phase-3 kernel limits (expected, not a caveat)
+
+The sanctioned path is built, with the limits SPEC §10.1b discloses. The
+audit hook sees Python-level `open` and `socket.connect` only; duckdb,
+polars and pyarrow do their I/O in native code, so the bootstrap wraps
+them (§10.1b: `allowed_directories` + no extensions/external access +
+`lock_configuration` for duckdb; path/remote checks on the reader/writer
+entry points for polars/pyarrow). A determined agent can still reach native
+I/O another way (ctypes, an unwrapped library, a subprocess): those paths
+are detect-only at best — spawns are audit-logged, and the G6 audit
+cross-check reports data opens with no matching run as a hook fault or
+evasion. Each kernel run records per-library wrapper status in its kernel
+record; any unenforced path downgrades that run to `network policy:
+detect-only`. On this install the baseline data stack is absent, so the
+startup check correctly refuses to start the kernel (`dda run` fails
+closed); the harness asserts that refusal plus the stub-level wrapper
+checks rather than a live run.
+
 ## Missed today
 
 - **human-only.obfuscated-invocations** — the argv parser re-parses shell
@@ -110,5 +128,5 @@ unparseable payload while a workdir is active.
 `read.obfuscated-path` stays prevented because the hooks also match
 base64 decodings of tool-input tokens. That is a slip-catcher, not a
 guarantee: a path assembled at run time (string arithmetic, env vars,
-another encoding) is the §0.1 limit and is caught only by the phase-3
+another encoding) is the §0.1 limit and is caught by the phase-3
 kernel audit hook and the G6 orphan check.

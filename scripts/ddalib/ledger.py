@@ -417,6 +417,86 @@ def write_wayfinder(wd: Workdir, gate: str, passed: bool, reason: str) -> None:
         fh.write(line + "\n")
 
 
+def gate_g6(wd: Workdir) -> tuple[bool, str, dict]:
+    """Analyze gate (§3 stage 6): no orphan runs, frozen bodies, ledger reasons, heartbeat complete."""
+    from . import kernel as _kernel
+    problems: list[str] = []
+    lock = lockstate.read_lock(wd)
+    if not lock:
+        return False, "G6 fail: no spec.lock (run `dda lock` first)", {}
+    state, detail, live = lockstate.quick_status(wd)
+    if state != "valid":
+        return False, f"G6 fail: lock is not valid ({state}: {detail}); re-lock before Analyze", {}
+    comp = lockhash.compute(wd)
+    if comp.lock_hash != lock["lock_hash"]:
+        return False, "G6 fail: lock does not match the live spec/config (run `dda lock --amend \"<reason>\"`)", {}
+    last = last_lock_record(wd)
+    if not last or last.get("lock_hash") != lock["lock_hash"]:
+        return False, "G6 fail: no ledger lock entry for this lock hash", {}
+    chain_problems, _ = verify_all(wd)
+    if chain_problems:
+        problems.append(f"chains broken: {'; '.join(chain_problems[:3])}")
+    regs = _kernel.registrations(wd)
+    freezes = {r.get("variant"): r.get("frozen_hash")
+               for r in chain.read_records(specs_tried(wd)) if r.get("type") == "freeze"}
+    runs = [r for r in chain.read_records(specs_tried(wd)) if r.get("type") == "run"]
+    locked = _kernel.locked_variant_id(wd)
+    dones = [r for r in chain.read_records(runs_log(wd)) if r.get("type") == "done" and r.get("kind") == "data"]
+
+    orphans = sorted({str(r.get("variant") or "<none>") for r in dones if r.get("variant") not in regs})
+    if orphans:
+        problems.append(f"orphan runs: data reads with no registered variant ({', '.join(orphans)})")
+    for r in runs:
+        vid = r.get("variant")
+        if vid not in regs:
+            problems.append(f"orphan kernel run {r.get('run_id')} under unknown variant {vid!r}")
+        elif freezes.get(vid) and r.get("body_hash") != freezes.get(vid):
+            problems.append(f"variant {vid!r} ran body {str(r.get('body_hash'))[:12]} after freezing "
+                            f"{str(freezes.get(vid))[:12]}")
+        kp = wd.analysis / str(r.get("kernel") or "")
+        if not kp.is_file():
+            problems.append(f"run {r.get('run_id')} of variant {vid!r} has no kernel record")
+    reg_ledger = {(l.get("variant"), (l.get("why") or "").strip()) for l in chain.read_records(ledger_path(wd))
+                  if l.get("type") == "variant-registered"}
+    for vid in sorted(regs):
+        if not any(v == vid and w for v, w in reg_ledger):
+            problems.append(f"variant {vid!r} has no ledger entry with a reason")
+    # The kernel audit log is the independent second source (§6.8): every
+    # kernel data-open must map to a data `done` with the same run id.
+    run_ids = {str(r.get("call")) for r in dones if r.get("call")}
+    stray = set()
+    for r in chain.read_records(audit_log(wd)):
+        if r.get("type") == "audit" and r.get("event") in ("open", "duckdb-read", "polars-read", "pyarrow-read"):
+            if r.get("aliases") and str(r.get("run_id") or "") not in run_ids:
+                stray.add(str(r.get("run_id") or "<none>"))
+    if stray:
+        problems.append(f"audit log shows data opens with no matching run ({', '.join(sorted(stray))}): "
+                        "hook fault or evasion (§6.8)")
+    # Heartbeat complete: every session with runs.log lines has a verifiable
+    # heartbeat log, and every seen call id has a matching done.
+    sessions = {str(r.get("session") or "") for r in chain.read_records(runs_log(wd))} - {""}
+    for s in sorted(sessions):
+        hp = heartbeat_log(s)
+        if not hp.is_file():
+            problems.append(f"session {s}: runs.log lines but no heartbeat log (hook fault, §6.8)")
+        else:
+            problems += [f"heartbeat {s}: {p}" for p in chain.verify(hp)[:2]]
+    seen = {(str(r.get("session")), str(r.get("call"))) for r in chain.read_records(runs_log(wd))
+            if r.get("type") == "seen" and r.get("call")}
+    donekeys = {(str(r.get("session")), str(r.get("call"))) for r in chain.read_records(runs_log(wd))
+                if r.get("type") == "done" and r.get("call")}
+    missing = sorted(f"{s}/{c}" for s, c in seen - donekeys)
+    if missing:
+        problems.append(f"runs.log seen without done (hook fault): {', '.join(missing[:5])}")
+    info = {"variants": len(regs), "runs": len(runs), "locked": locked, "orphans": sorted(orphans)}
+    if problems:
+        return False, "G6 fail: " + "; ".join(problems[:6]), info
+    tried = len(regs) + ledger_summary(wd)["versions"]
+    return True, (f"G6 pass: {len(dones)} data run(s) under {len(regs)} registered variant(s) "
+                  f"({tried} tried incl. spec versions), locked variant {locked or 'none marked'}, "
+                  "heartbeat complete"), info
+
+
 def gate_g4(wd: Workdir) -> tuple[bool, str, dict]:
     wd.require_initialized()
     lock = lockstate.read_lock(wd)

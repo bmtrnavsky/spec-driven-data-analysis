@@ -379,7 +379,10 @@ class TestUnbound(Base):
         rc, out, _ = self.cli("gate", "G4", str(self.wd.root))
         self.assertEqual(rc, 1)
         self.assertIn("phase 4", out)
-        self.assertEqual(self.cli("gate", "G6", str(self.wd.root))[0], cli.EXIT_NOT_IMPLEMENTED)
+        # G6 (phase 3) is built: a fresh lock with no data runs passes vacuously.
+        rc, out, _ = self.cli("gate", "G6", str(self.wd.root))
+        self.assertEqual(rc, 0, out)
+        self.assertIn("G6 pass", out)
 
 
 if __name__ == "__main__":

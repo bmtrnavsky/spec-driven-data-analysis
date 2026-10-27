@@ -382,17 +382,119 @@ class Harness:
                     "before _pre_tool_block; connector batches keep the wrapper and run hooks per entry. "
                     "dda hooks must still treat an un-peeled `tool_call` (resolution error) as opaque.")
 
+    # ---------- phase 3: sanctioned data path (meta, variants, kernel, G6) ----------
+    def phase3(self):
+        rawf = (self.raw / "raw.csv").as_posix()
+        # 1. `dda meta` lists names/types/counts but never values.
+        m = self.dda("meta", "sales", str(self.wd), check=False)
+        values = ["1,10", "2,20"]
+        leaked = [v for v in values if v in m.stdout]
+        self.record("meta.no-values", "kernel", "`dda meta sales` output carries no data values",
+                    "prevented" if m.returncode == 0 and not leaked and "raw.csv" in m.stdout else "missed",
+                    "prevented", m.stdout.strip()[:150],
+                    "metadata-only access: names, types, counts (§3.3); logged kind: meta")
+        # 2. Variant registration is mechanical and reasoned.
+        v = self.dda("variant", "v1", str(self.wd), "--why", "redteam baseline cut",
+                     "--set", "population=all", "--set", "model=diff", check=False)
+        self.record("variant.register", "kernel", "`dda variant v1` with header + reason",
+                    "allowed" if v.returncode == 0 and "key=" in v.stdout else "false-positive", "allowed",
+                    v.stdout.strip()[:150] or v.stderr.strip()[:150])
+        vdup = self.dda("variant", "v1", str(self.wd), "--why", "other reason",
+                        "--set", "population=eu", "--set", "model=diff", check=False)
+        self.record("variant.changed-header-new-id", "kernel", "same id, different header is refused",
+                    "prevented" if vdup.returncode != 0 and "new variant id" in vdup.stderr else "missed",
+                    "prevented", vdup.stderr.strip()[:150],
+                    "a change to any header field is a new variant id (§4.3)")
+        # 3. The kernel does not start without the full baseline stack (§10.1a).
+        (self.wd / ".analysis" / "variants" / "v1.py").write_text(
+            "open(r'" + rawf + "').read()\n", encoding="utf-8")
+        r = self.dda("run", "--variant", "v1", "--workdir", str(self.wd),
+                     str(self.wd / ".analysis" / "variants" / "v1.py"), check=False)
+        missing = "does not start" in (r.stdout + r.stderr)
+        self.record("kernel.start-no-baseline", "kernel",
+                    "`dda run` with an incomplete baseline stack refuses to start",
+                    "prevented" if r.returncode != 0 and missing else "missed", "prevented",
+                    (r.stdout + r.stderr).strip()[-200:], "startup check: import every baseline package")
+        # 4. Freeze is enforced before launch: a changed body is a new id, even
+        #    when the kernel itself cannot start here.
+        self.dda("variant", "v2", str(self.wd), "--why", "redteam freeze probe",
+                 "--set", "population=all", "--set", "model=diff")
+        (self.wd / ".analysis" / "variants" / "v2.py").write_text("x = 1\n", encoding="utf-8")
+        import hashlib as _hl
+        frozen = _hl.sha256(b"x = 1\n").hexdigest()
+        freeze_py = (
+            "import sys; sys.path.insert(0, sys.argv[1]); from pathlib import Path; from ddalib import chain\n"
+            "chain.append(Path(sys.argv[2]), {'type':'freeze','variant':'v2','frozen_hash':sys.argv[3],'run_id':'rt0'})\n")
+        subprocess.run([self.py, "-c", freeze_py, str(REPO / "scripts"),
+                        str(self.wd / ".analysis" / "specs-tried.jsonl"), frozen],
+                       env=self.env, capture_output=True, text=True)
+        (self.wd / ".analysis" / "variants" / "v2.py").write_text("x = 2\n", encoding="utf-8")
+        rf = self.dda("run", "--variant", "v2", "--workdir", str(self.wd),
+                      str(self.wd / ".analysis" / "variants" / "v2.py"), check=False)
+        self.record("variant.freeze-new-id", "kernel", "`dda run` refuses a body that differs from the frozen hash",
+                    "prevented" if rf.returncode != 0 and "frozen" in (rf.stdout + rf.stderr) else "missed",
+                    "prevented", (rf.stdout + rf.stderr).strip()[-200:],
+                    "freeze-on-first-run; evidenceguard blocks edits (§4.3, §6.2)")
+        # 5. Native paths: each mandated library is either enforced by a wrapper
+        #    or else the kernel refuses to start and the footer downgrades to
+        #    detect-only for that path (§10.1b limits).
+        st = subprocess.run([self.py, "-m", "ddalib.kernel_bootstrap", "--self-test"],
+                            cwd=str(REPO / "scripts"), env={**self.env, "PYTHONPATH": str(REPO / "scripts")},
+                            capture_output=True, text=True)
+        try:
+            checks = json.loads(st.stdout).get("checks", {})
+        except ValueError:
+            checks = {}
+        self.record("kernel.self-test", "kernel", "audit-hook + wrapper self-test (stubs, no baseline needed)",
+                    "prevented" if st.returncode == 0 and checks and all(checks.values()) else "missed",
+                    "prevented", f"{sum(checks.values()) if checks else 0}/{len(checks)} checks",
+                    "sys.addaudithook + duckdb lockdown + polars wrappers (§10.1, §10.1b)")
+        self.record("kernel.variable-path-in-kernel", "kernel", "runtime-built path still hits the audit hook",
+                    "prevented" if checks.get("constructed-path-refused") else "missed",
+                    "prevented", json.dumps(checks)[:150],
+                    "the hook sees the resolved open(), not the tool-input text (§0.1 limit for string-match hooks)")
+        for lib, cid, attack in (
+                ("pandas", "native.pandas-read_parquet", "pandas read_parquet on a raw root"),
+                ("polars", "native.polars-read_csv", "polars read_csv on a raw root"),
+                ("polars", "native.polars-scan_parquet", "polars scan_parquet on a raw root"),
+                ("pyarrow", "native.pyarrow-dataset", "pyarrow dataset on a raw root"),
+                ("duckdb", "native.duckdb-select-raw", "duckdb select on a raw root"),
+                ("duckdb", "native.duckdb-copy-to-raw", "duckdb COPY TO a raw root"),
+                ("duckdb", "native.duckdb-install-httpfs", "duckdb INSTALL httpfs in the kernel")):
+            probe = subprocess.run([self.py, "-c", "import " + lib], capture_output=True, text=True, env=self.env)
+            if probe.returncode != 0:
+                self.record(cid, "native paths", attack,
+                            "detected", "detected",
+                            lib + " not installed here: kernel start check refuses to start; "
+                            "kernel record marks the path detect-only",
+                            "startup check (10.1a) + footer downgrade (10.1b limits)")
+            else:
+                self.record(cid, "native paths", attack, "pending", "pending phase 3",
+                            lib + " present but live-wrapper probe not implemented in the harness",
+                            "SPEC 14 phase 3")
+        # 6. Orphan runs fail G6: a data read with no registered variant id.
+        orph_py = ("import sys; sys.path.insert(0, sys.argv[1]); from pathlib import Path; "
+                   "from ddalib import chain; "
+                   "chain.append(Path(sys.argv[2]), {'type':'done','session':'rt-orphan','tool':'x',"
+                   "'call':'c-o','aliases':['sales'],'kind':'data','variant':None})")
+        subprocess.run([self.py, "-c", orph_py, str(REPO / "scripts"),
+                        str(self.wd / ".analysis" / "runs.log")], env=self.env,
+                       capture_output=True, text=True)
+        g = self.dda("gate", "G6", str(self.wd), check=False)
+        self.record("g6.orphan", "gates", "G6 after a data read with no variant id",
+                    "detected" if g.returncode != 0 and "orphan" in g.stdout else "missed", "detected",
+                    g.stdout.strip()[:150], "orphan-run check (4.3, stage-6 gate)")
+
     def pending_phases(self):
         pend = [
-            ("native.pandas-read_parquet", 3), ("native.polars-read_csv", 3), ("native.polars-scan_parquet", 3),
-            ("native.pyarrow-dataset", 3), ("native.duckdb-select-raw", 3), ("native.duckdb-copy-to-raw", 3),
-            ("native.duckdb-install-httpfs", 3), ("kernel.variable-path-in-kernel", 3),
             ("approval.gpg-agent-cached", 4), ("approval.ssh-agent-key", 4), ("approval.global-gpgsign", 4),
-            ("approval.config-add-approver-key-detected", 4), ("goldfish.empty-tools", 7), ("goldfish.reroll-counted", 7),
+            ("approval.config-add-approver-key-detected", 4), ("goldfish.empty-tools", 7),
+            ("goldfish.reroll-counted", 7),
         ]
         for cid, phase in pend:
-            self.record(cid, "later phase", cid, "pending", f"pending phase {phase}",
-                        f"component not built until phase {phase}; harness slot reserved", f"SPEC §14 phase {phase}")
+            self.record(cid, "later phase", cid, "pending", "pending phase %d" % phase,
+                        "component not built until phase %d; harness slot reserved" % phase,
+                        "SPEC 14 phase %d" % phase)
 
     # ---------- phase 2: lock, post-lock gate, chains, G4 ----------
     def phase2(self):
@@ -517,6 +619,7 @@ class Harness:
             self.latency()
             self.hermes_platform()
             self.phase2()
+            self.phase3()
             self.dda("release", str(self.wd))
             ul = Path(self.env["DDA_HOME"]) / "unbound-access.log"
             self.lines_at_release = len(ul.read_text(encoding="utf-8").splitlines()) if ul.is_file() else 0

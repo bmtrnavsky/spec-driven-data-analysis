@@ -52,12 +52,13 @@ def expected(wd: Workdir) -> dict | None:
     if not lock:
         return None
     summ = ledger.ledger_summary(wd)
-    variants = [r for r in chain.read_records(ledger.specs_tried(wd)) if r.get("type", "variant") == "variant"]
+    tried = {r.get("variant") for r in chain.read_records(ledger.specs_tried(wd))
+             if r.get("type", "variant") == "variant" and r.get("variant")}
     return {
         "lock_hash": lock["lock_hash"], "version": lock["version"], "label": summ["effective_label"] or lock["label"],
         "tier": lock.get("tier"), "pins": sorted(lock.get("pins") or []), "aliases": sorted(lock.get("aliases") or []),
         "amendments": summ["amendments"], "post_data_amendments": summ["post_data_amendments"],
-        "n_tried": len(variants) + summ["versions"], "locked_at": lock.get("locked_at"),
+        "n_tried": len(tried) + summ["versions"], "locked_at": lock.get("locked_at"),
     }
 
 
