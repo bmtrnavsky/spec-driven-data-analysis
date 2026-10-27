@@ -558,9 +558,26 @@ plugin must not block any of that.
   `~/.hermes-home/dda/sessions/<session-id>.json`. One binding per
   session; rebinding a session that has data reads needs `dda start
   --rebind`, which is logged in both workdirs' ledgers. If Hermes exposes
-  the parent session id or the post-compression session lineage in the
-  hook payload (phase 0 checks), the binding follows it; otherwise the
-  new session id must run `dda start` again.
+  the post-compression session lineage in the hook payload (phase 0
+  checks), the binding follows it; otherwise the new session id must run
+  `dda start` again.
+- **Subagents inherit the parent binding.** Subagents are allowed. A
+  child session whose parent session id is visible to `dda` (hook
+  payload, or session lineage; phase 0 checks which) inherits the
+  parent's binding unchanged: same workdir, same milestone, same lock
+  hash, same ledger. The child gets no lock, ledger, or binding of its
+  own and cannot rebind; every hook judges it exactly as it judges the
+  parent, and its runs land in the parent workdir's `runs.log` with the
+  child session id and `parent: <session-id>`. `dda start` from a child
+  is refused.
+- **Unbound children stay unbound.** A child that cannot be linked to a
+  bound parent is treated as any unbound session: hooks do not block it,
+  and `runlog` records its root matches in the unbound-access log. There
+  is no late binding. The gate flags its output post-data: G4 labels the
+  lock **post-data (unbound access)** if the child read a locked alias,
+  and G6/G8 label any result, variant, or report claim that draws on an
+  unbound child's output **post-data (unbound child)**, naming the child
+  session in the footer.
 - **Unbound sessions are never blocked.** For a session with no binding,
   every blocking hook returns `{}`. `runlog` alone still runs: if the
   tool input matches a root declared by an **active** workdir, it appends
@@ -1142,6 +1159,10 @@ hook false-positive blocks left unfixed.
    with disclosed unverified approvals and PUBLISH parks.
 8. **Second-goldfish model: OPEN.** Which second model or provider gives
    PUBLISH-tier independence (§5.0).
+9. **Subagents: DECIDED 2026-10-27 — allowed, inherit the parent
+   binding.** A linked child shares the parent's lock hash and ledger and
+   is hooked as the parent. An unbound child stays unbound, and the gate
+   labels its output post-data (§6.0).
 
 ## Appendix A. Blind review (deleg_1df92e5a) → changes
 
