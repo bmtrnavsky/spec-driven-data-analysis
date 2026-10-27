@@ -606,6 +606,8 @@ Rules:
 The execution environment for Profile, Analyze, and Verify. Decision 4
 (Jupyter) stands, but "full tool access" is narrowed to "full Python
 inside the kernel": the kernel is the only post-lock data path (§6.1).
+The narrowing is about data access paths, not tools: the kernel's
+isolated environment always carries the full data stack (§10.1a).
 
 ### 10.1 Kernel policy
 
@@ -625,6 +627,43 @@ inside the kernel": the kernel is the only post-lock data path (§6.1).
   and the footer reports `network policy: audit-enforced`.
 - Pinned environment (uv lockfile); its hash goes in the footer.
 - Seeded randomness; the seed goes in the footer.
+
+### 10.1a Kernel environment: full data stack, always
+
+The kernel runs in an **isolated** Python environment (its own uv-managed
+venv, separate from Hermes's and the user's interpreters). Isolation is
+about *where* the tools run, never about *which* tools are available.
+The isolated environment MUST ship the full data-analysis stack; a
+trimmed, minimal, or "just what this analysis needs" subset is
+non-conformant.
+
+- **Required baseline (always installed, pinned in the lockfile):**
+  - data handling: `pandas`, `numpy`, `pyarrow`, `polars`, `duckdb`;
+  - statistics and modelling: `scipy`, `statsmodels`, `scikit-learn`;
+  - plotting: `matplotlib`, `seaborn`;
+  - file formats: `openpyxl`, `xlrd` (Excel), plus the parquet and CSV
+    support that comes with the above;
+  - kernel: `ipykernel`, `ipython`, `jupyter_client`.
+- **Never trimmed.** `dda` must not drop baseline packages to save
+  install time, disk, or startup cost, and must not build per-analysis
+  minimal environments. If a baseline package fails to install, the
+  kernel does not start: `dda run` stops and reports the failure. It
+  never silently falls back to a reduced stack.
+- **Additions, not substitutions.** Projects may add packages (connector
+  drivers, domain libraries) via `config.yaml`; additions go through the
+  lockfile and change the environment hash. Baseline packages can be
+  version-bumped but not removed.
+- **Startup check.** At kernel start `dda run` imports every baseline
+  package and records the resolved versions in the kernel record. A
+  missing or unimportable baseline package fails the start; it is not a
+  warning.
+- **Footer.** The environment hash already covers the full package set;
+  the kernel record lists baseline versions so a reader can see the
+  stack was complete.
+- **Security is unchanged.** The full stack runs under the same audit
+  hook, data-root guards, network allowlist, and display masking
+  (§10.1, §10.2). Network-capable libraries in the stack do not widen
+  network access; the allowlist still governs every `socket.connect`.
 
 ### 10.2 Output and PII
 
@@ -788,8 +827,11 @@ hook false-positive blocks left unfixed.
    `lockguard`, `evidenceguard`, `rawguard`, `defguard`, `footercheck`.
 4. **Kernel: DECIDED 2026-10-27 — Jupyter.** Revised after review: "full
    tool access" now means full Python inside an audit-hooked kernel that
-   is the only post-lock data path (§10). **Needs Brad's confirmation of
-   the revision.**
+   is the only post-lock data path (§10). The kernel's isolated
+   environment ships the full data stack (pandas, numpy, scipy,
+   scikit-learn, matplotlib, etc.), never a trimmed subset (§10.1a),
+   per Brad 2026-10-27. **Needs Brad's confirmation of the rest of the
+   revision.**
 5. **Glance-rung lock: DECIDED 2026-10-27 — always lock, even glances.**
    To offset the friction, a DECIDE glance uses the reduced review row
    (§5.3).
