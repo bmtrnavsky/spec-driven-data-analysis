@@ -120,6 +120,50 @@ def _locator_set(loc: dict) -> set[str]:
     return out
 
 
+def _release_line_sessions(workdir_path) -> set[str]:
+    """Sessions named by `release` / `abandon` records in a workdir's ledger.
+
+    A release unbinds sessions that may have no `done` line of their own
+    (seen-only reads, suppressed post hooks); the release line keeps the
+    laundering step attributable (spec §6.0). Reads the top-level ledger
+    and any milestone ledgers (releases land in the bound scope's ledger).
+    """
+    out: set[str] = set()
+    base = Path(workdir_path) / ".analysis"
+    cands = [base / "ledger.md"]
+    try:
+        ms = base / "milestones"
+        if ms.is_dir():
+            cands += sorted(p / "ledger.md" for p in ms.iterdir() if p.is_dir())
+    except OSError:
+        pass
+    for cand in cands:
+        try:
+            recs = chain.read_records(cand)
+        except OSError:
+            continue
+        for rec in recs:
+            if rec.get("type") in ("release", "abandon"):
+                for s in rec.get("sessions") or []:
+                    if isinstance(s, str):
+                        out.add(s)
+    return out
+
+
+def _scan_workdirs() -> dict:
+    """Active workdirs plus released ones (released keep their runs.log
+    visible to exposure even though hooks no longer match their roots)."""
+    from .binding import read_registry
+    try:
+        reg = read_registry()
+    except DdaError:
+        return {}
+    workdirs = dict(reg.get("workdirs") or {})
+    for wid, w in (reg.get("released") or {}).items():
+        workdirs.setdefault(wid, w)
+    return workdirs
+
+
 def exposure(wd: Workdir, aliases: list[str], watermarks: dict | None, locked_ts: float | None) -> dict:
     """Reads of `aliases` attributable to this workdir, plus hopping signals.
 
@@ -155,12 +199,12 @@ def exposure(wd: Workdir, aliases: list[str], watermarks: dict | None, locked_ts
         if hits:
             found["unbound"].append({"seq": rec.get("seq"), "session": rec.get("session"), "tool": rec.get("tool"),
                                      "aliases": sorted({m["alias"] for m in hits})})
-    # Workdir hopping: other active workdirs declaring the same locators (§6.0).
-    from .binding import read_registry
-    try:
-        reg = read_registry()["workdirs"]
-    except DdaError:
-        reg = {}
+    mine_sessions |= _release_line_sessions(wd.root)  # ever bound here, even if since released
+    # Workdir hopping: other workdirs declaring the same locators (§6.0).
+    # Released workdirs stay in the scan (registry `released` section): a
+    # finished analysis still counts as prior exposure for later workdirs,
+    # otherwise a release launders the reads out of the active set.
+    reg = _scan_workdirs()
     mine = {}
     try:
         cfg = load_config(wd)
@@ -185,29 +229,44 @@ def exposure(wd: Workdir, aliases: list[str], watermarks: dict | None, locked_ts
     # shared locator — hopped between workdirs. No upper time bound: a hop
     # after the lock counts, because that is the laundering case.
     other_data: set = set()
+    other_sessions: set = set()
     other_done: list = []
     if mine_sessions:
         for wid, w in reg.items():
             if wid == wd.id:
                 continue
             other = Path(w["path"]) / ".analysis" / "runs.log"
-            if not other.is_file():
-                continue
-            for rec in chain.read_records(other):
-                if rec.get("type") != "done" or not rec.get("session"):
-                    continue
-                if rec.get("kind") == "data":
-                    other_data.add(rec.get("session"))
-                if rec.get("kind") in ("data", "other"):
-                    other_done.append({"workdir": w["path"], "seq": rec.get("seq"),
-                                       "session": rec.get("session"), "kind": rec.get("kind"),
-                                       "aliases": rec.get("aliases")})
+            if other.is_file():
+                for rec in chain.read_records(other):
+                    if rec.get("type") != "done" or not rec.get("session"):
+                        continue
+                    other_sessions.add(rec.get("session"))
+                    if rec.get("kind") == "data":
+                        other_data.add(rec.get("session"))
+                    if rec.get("kind") in ("data", "other"):
+                        other_done.append({"workdir": w["path"], "seq": rec.get("seq"),
+                                           "session": rec.get("session"), "kind": rec.get("kind"),
+                                           "aliases": rec.get("aliases")})
+            # Release/abandon lines attribute sessions to the workdir even
+            # when its runs.log has no `done` line for them (seen-only reads,
+            # suppressed post hooks) — read the release lines (§6.0).
+            other_sessions |= _release_line_sessions(w["path"])
     # The session must have read data somewhere (here or another workdir's
     # log): mere `dda status` cross-talk without any data read is not hopping.
     carried = data_sessions | other_data
     for f in other_done:
         if f["session"] in mine_sessions and f["session"] in carried:
             found["session_history"].append(f)
+    # Release-attributed sessions with no `done` line of their own: bound to
+    # another workdir (named in its release line) and data-reads elsewhere.
+    seen_done = {f["session"] for f in other_done}
+    for s in sorted(other_sessions - seen_done):
+        if s in mine_sessions and s in carried:
+            for wid, w in reg.items():
+                if wid != wd.id and s in _release_line_sessions(w["path"]):
+                    found["session_history"].append({"workdir": w["path"], "seq": None, "session": s,
+                                                      "kind": "release", "aliases": []})
+                    break
     for rec in chain.read_records(ledger_path(wd)):
         if rec.get("type") == "rebind" and rec.get("session") in carried:
             found["rebind"].append({"seq": rec.get("seq"), "session": rec.get("session"),

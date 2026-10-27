@@ -8,6 +8,7 @@ Hooks string-match tool inputs: they stop slips, not determined evasion
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 from pathlib import Path
@@ -450,32 +451,69 @@ def write_blob(wd: Workdir, text: str) -> tuple[str, str]:
     return h, f"runs/blobs/{h}"
 
 
+_BLOCKED_EXACT = ("block", "blocked")
+
+
+def _status_is_blocked(v) -> bool:
+    return isinstance(v, str) and v.strip().lower() in _BLOCKED_EXACT
+
+
+def _result_body_blocked(res) -> bool:
+    """A tool-result body (dict or its JSON string) naming a block.
+
+    Hermes delivers the result as a JSON *string*; a blocked call's body is
+    `{"error": <block message>}`. Plain tool errors (status "error", no
+    block marker) never count: the tool ran, the call was not blocked.
+    """
+    if isinstance(res, str):
+        s = res.strip()
+        if not s.startswith("{"):
+            return False
+        try:
+            res = json.loads(s)
+        except Exception:
+            return False
+    if not isinstance(res, dict):
+        return False
+    if res.get("blocked") is True:
+        return True
+    for key in ("status", "action", "decision", "outcome"):
+        if _status_is_blocked(res.get(key)):
+            return True
+    err = res.get("error")
+    return isinstance(err, str) and "block" in err.lower()
+
+
 def _was_blocked(payload: dict) -> bool:
-    """Did a sibling hook block this tool call? A blocked call still reaches
-    runlog's post hook in some transports, so runlog must not mislabel the
-    attempt as data: it is logged kind=blocked and exposure ignores it."""
+    """post_tool_call fired but the tool never ran (a sibling hook blocked it).
+
+    Real Hermes shape (`_blocked_tool_result` → post hook → shell-hook
+    payload): the block signal is `extra.status == "blocked"` ("block" never
+    occurs on the wire) and `extra.result` is the JSON *string*
+    `{"error": msg}`. Older/synthetic payloads may carry top-level
+    `blocked: true` or a dict result body — those still count. A blocked
+    call is logged kind=blocked and exposure ignores it.
+    """
     if not isinstance(payload, dict):
         return False
     if payload.get("blocked") is True:
         return True
     for key in ("decision", "hook_decision", "hook_action", "outcome", "status", "action"):
-        if str(payload.get(key) or "").lower() == "block":
+        if _status_is_blocked(payload.get(key)):
             return True
     extra = payload.get("extra")
     if isinstance(extra, dict):
         if extra.get("blocked") is True:
             return True
         for key in ("decision", "hook_decision", "hook_action", "outcome", "status", "action"):
-            if str(extra.get(key) or "").lower() == "block":
+            if _status_is_blocked(extra.get(key)):
+                return True
+        for rkey in ("tool_result", "result", "tool_output", "output", "function_result"):
+            if _result_body_blocked(extra.get(rkey)):
                 return True
     for rkey in ("tool_result", "result", "tool_output", "output"):
-        res = payload.get(rkey)
-        if isinstance(res, dict):
-            if res.get("blocked") is True or str(res.get("action") or "").lower() == "block":
-                return True
-            err = res.get("error")
-            if isinstance(err, str) and "block" in err.lower():
-                return True
+        if _result_body_blocked(payload.get(rkey)):
+            return True
     err = payload.get("error")
     return isinstance(err, str) and "block" in err.lower() and "dda" in err.lower()
 

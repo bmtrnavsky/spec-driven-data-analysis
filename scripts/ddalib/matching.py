@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 
 # ---------- text and path normalisation ----------
 
@@ -359,15 +360,76 @@ def signing_violation(view: ToolView) -> str | None:
     return None
 
 
-_HUMAN_ONLY = re.compile(r"\bdda(?:\.py|\.cmd|\.bat|\.exe)?['\"]?\s+(release|abandon)\b", re.IGNORECASE)
+# Keep in sync with hookentry.is_clean_dda_invocation's argv parsing.
+_DDA_NAMES = frozenset({"dda", "dda.cmd", "dda.bat", "dda.exe"})
+_PYTHON_RE = re.compile(r"^python(3(\.\d+)?)?(\.exe)?$")
+_HUMAN_ONLY_SUBS = frozenset({"release", "abandon"})
+
+
+def _dda_base(tok: str) -> str:
+    return re.split(r"[\\/]", tok.strip("'\""))[-1].lower()
+
+
+def _dda_next_words(tokens: list[str]) -> list[str]:
+    """Subcommand-position word after every dda invocation in a token stream.
+
+    Same recognition as `is_clean_dda_invocation` (bare `dda` / `dda.cmd` /
+    ... or `python[.exe] <path/>dda.py`, quotes stripped) but every
+    invocation in the stream is inspected, so `dda status && dda release`
+    still hits.
+    """
+    out: list[str] = []
+    n = len(tokens)
+    for i, tok in enumerate(tokens):
+        b = _dda_base(tok)
+        if b in _DDA_NAMES:
+            if i + 1 < n:
+                out.append(tokens[i + 1].strip("'\"").lower())
+        elif _PYTHON_RE.match(b):
+            for j in range(i + 1, n):
+                bj = _dda_base(tokens[j])
+                if bj == "dda.py":
+                    if j + 1 < n:
+                        out.append(tokens[j + 1].strip("'\"").lower())
+                    break
+                if tokens[j].startswith("-"):
+                    continue  # `python -u dda.py ...`
+                break
+    return out
+
+
+def _argv_tokens(text: str) -> list[str]:
+    try:
+        return [t.strip("'\"") for t in shlex.split(text, posix=False)]
+    except ValueError:
+        return []
+
+
+def _word_tokens(text: str) -> list[str]:
+    # Backstop for non-shell texts (execute_code python API, JSON leaves):
+    # `subprocess.call(["dda", "release"])` never survives shlex as argv.
+    return re.findall(r"[A-Za-z0-9_.:/\\-]+", text.lower())
 
 
 def human_only_violation(view: ToolView) -> str | None:
-    """`dda release` / `dda abandon` are human-only (§6.0): an agent must ask Brad, never run them."""
+    """`dda release` / `dda abandon` are human-only (§6.0): an agent must ask Brad, never run them.
+
+    Parses argv like `is_clean_dda_invocation` instead of regexing the blob:
+    `dda "release"` (quoted subcommand) and `dda status && dda release`
+    (chained) both hit; `dda lock --amend "release notes"` does not (only
+    the subcommand-position word after `dda` counts, not a later flag value).
+    """
     if view.tool not in CODE_TOOLS:
         return None
-    m = _HUMAN_ONLY.search("\n".join(view.texts))
-    return m.group(1).lower() if m else None
+    texts = list(view.texts)
+    if len(texts) > 1:
+        texts.append(" ".join(texts))
+    for text in texts:
+        for toks in (_argv_tokens(text), _word_tokens(text)):
+            for nxt in _dda_next_words(toks):
+                if nxt in _HUMAN_ONLY_SUBS:
+                    return nxt
+    return None
 
 
 # ---------- evidence path table (§6.2) ----------

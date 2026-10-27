@@ -606,8 +606,11 @@ plugin must not block any of that.
   roots leave the active set, so a re-lock afterwards looks clean). The
   release itself is ledgered — one `release` / `abandon` line naming the
   unbound sessions — so the laundering step stays in the chain.
-  Inactive workdirs' roots are no longer matched by anything,
-  so a finished analysis leaves no trace on later sessions. `dda status`
+  Inactive workdirs' roots are no longer matched by hooks, but the
+  released workdir stays listed (registry `released` section) and its
+  runs.log plus its release lines stay in the exposure/G4 scan: a
+  finished analysis still counts as prior exposure for later sessions.
+  `dda status`
   lists active workdirs and bound sessions; `dda doctor` warns about
   workdirs active for more than 14 days with no runs.
 - **Fast exit.** The first thing every hook does is check
@@ -718,8 +721,10 @@ plugin must not block any of that.
   every tool call. Post: appends the matching `done` line with timestamp,
   tool, code/query hash, blob pointer, data-root **aliases** referenced,
   variant id if any, and kind (`meta | data | other | blocked`). A post
-  that carries a sibling hook's block signal (`blocked: true`,
-  `decision/action: block`, or a block error) is logged `blocked` with
+  that carries a sibling hook's block signal — on the wire
+  `extra.status: "blocked"` with the JSON-string result `{"error": msg}`
+  (older/synthetic payloads: `blocked: true`, `decision/action: block`, or
+  a block error) — is logged `blocked` with
   empty aliases: a blocked attempt never executed, so it must never count
   as exposure.
 - Records aliases, never paths containing credentials or connection

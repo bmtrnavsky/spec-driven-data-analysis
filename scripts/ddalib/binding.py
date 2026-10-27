@@ -69,6 +69,8 @@ def read_registry() -> dict:
     reg = _read_json(registry_path(), {"workdirs": {}})
     if not isinstance(reg, dict) or not isinstance(reg.get("workdirs"), dict):
         raise DdaError(f"{registry_path()} is corrupt")
+    if not isinstance(reg.get("released"), dict):
+        reg["released"] = {}
     return reg
 
 
@@ -120,6 +122,8 @@ def start(wd: Workdir, session_id: str, rebind: bool = False) -> dict:
         "roots": _roots_from_config(cfg),
         "registered_at": reg["workdirs"].get(wd.id, {}).get("registered_at") or _now(),
     }
+    if isinstance(reg.get("released"), dict):
+        reg["released"].pop(wd.id, None)  # re-activated: scanned as active again
     write_json_atomic(registry_path(), reg)
     write_json_atomic(sf, binding)
     return binding
@@ -145,6 +149,11 @@ def release(wd: Workdir, cause: str = "release", reason: str | None = None) -> l
     the active set, so a re-lock afterwards looks clean. `cause` is
     "release" (G9) or "abandon" (dropped work). Only a human runs these;
     every blocking hook refuses them from agent tool calls.
+
+    The workdir is remembered under `released` (path + roots snapshot), so
+    exposure/G4 keep scanning its runs.log: a finished analysis still counts
+    as prior exposure for later workdirs. Hooks never match released roots
+    (only `read_registry()["workdirs"]` is hook-visible).
     """
     released = []
     sdir = sessions_dir()
@@ -155,7 +164,14 @@ def release(wd: Workdir, cause: str = "release", reason: str | None = None) -> l
                 f.unlink()
                 released.append(b.get("session_id", f.stem))
     reg = read_registry()
-    if reg["workdirs"].pop(wd.id, None) is not None or released:
+    entry = reg["workdirs"].pop(wd.id, None)
+    if entry is not None or released:
+        kept = dict(entry) if isinstance(entry, dict) else {}
+        kept.update({"path": str(wd.root), "released_at": _now(),
+                     "cause": cause, "sessions": sorted(released)})
+        if reason:
+            kept["reason"] = reason
+        reg.setdefault("released", {})[wd.id] = kept
         write_json_atomic(registry_path(), reg)
     if cause not in ("release", "abandon"):
         raise DdaError(f"unknown release cause {cause!r}")
