@@ -176,6 +176,10 @@ class HumanOnlyTests(Base):
             "terminal", {"command": f"py {REPO.as_posix()}/scripts/dda.py status"}))
         self.assertFalse(is_clean_dda_invocation(
             "terminal", {"command": f"py {REPO.as_posix()}/scripts/dda.py release {self.wd.root}"}))
+        self.assertTrue(is_clean_dda_invocation(
+            "terminal", {"command": "python -m ddalib.cli status"}))
+        self.assertFalse(is_clean_dda_invocation(
+            "terminal", {"command": f"python -m ddalib.cli release {self.wd.root}"}))
 
     def test_mentioning_release_in_prose_is_allowed(self):
         self.bind("h-2")
@@ -207,6 +211,16 @@ class HumanOnlyTests(Base):
             "`echo dda` abandon WD --reason x",
             'bash -c "dda status && dda release WD"',
             'powershell -Command "dda status; dda abandon WD --reason x"',
+            "bash -lc 'dda release WD'",
+            "sh -ic 'dda abandon WD --reason x'",
+            'bash --command "dda release WD"',
+            "d''da release WD",
+            'bash -c \'sh -c "dda release WD"\'',
+            'bash -c "dda release WD>out.txt"',
+            "dda release WD>out.txt",
+            "python -m ddalib.cli release WD",
+            "python -m ddalib.cli abandon WD --reason x",
+            "python scripts/ddalib/cli.py release WD",
         ]
         for raw in cmds:
             cmd = raw.replace("WD", str(self.wd.root))
@@ -220,7 +234,11 @@ class HumanOnlyTests(Base):
         for cmd in ('bash -c "dda status"',
                     "cmd /c dda status",
                     '(dda status)',
-                    'echo "ask Brad to run dda release"'):
+                    'echo "ask Brad to run dda release"',
+                    'python -m ddalib.cli status',
+                    'python -c "print(1 if a<b else 2)"',
+                    'echo "a>b"',
+                    'dda status > C:/x/notes.txt'):
             for h in ("lockguard", "evidenceguard", "rawguard", "defguard", "footercheck"):
                 b, _ = self.blocked(h, "terminal", {"command": cmd}, session="h-5")
                 self.assertFalse(b, f"{h} blocked {cmd!r}")

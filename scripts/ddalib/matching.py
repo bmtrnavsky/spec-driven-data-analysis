@@ -372,12 +372,35 @@ _SHELL_BASES = frozenset({
     "cmd", "cmd.exe", "powershell", "powershell.exe", "pwsh", "pwsh.exe",
 })
 _WRAPPER_FLAGS = frozenset({
-    "-c", "/c", "/k", "-k", "-command", "/command",
+    "-c", "/c", "/k", "-k", "-command", "/command", "--command",
 })
+# `python -m <mod>` module invocations that run the dda CLI.
+_DDA_MODULES = frozenset({"dda", "ddalib", "ddalib.cli"})
+
+# sh-family shells accept bundled short flags (`bash -lc '...'`).
+_SH_BUNDLED_C = frozenset({
+    "bash", "bash.exe", "sh", "sh.exe", "dash", "zsh", "ksh",
+})
+_BUNDLED_C_RE = re.compile(r"^-[A-Za-z]{1,4}$")
+
+
+def _is_command_flag(shell_base: str, flag: str) -> bool:
+    if flag in _WRAPPER_FLAGS:
+        return True
+    return (shell_base in _SH_BUNDLED_C and bool(_BUNDLED_C_RE.match(flag))
+            and flag.endswith("c") and flag != "-c")
 
 
 def _dda_base(tok: str) -> str:
-    return re.split(r"[\\/]", tok.strip("'\""))[-1].lower()
+    # Quote-spliced names (`d''da`, `d"da"`, `"dd"a`) group as one argv word,
+    # so every quote char is removed — not just the surrounding pair.
+    tok = tok.replace("'", "").replace('"', "")
+    return re.split(r"[\\/]", tok)[-1].lower()
+
+
+def _unquoted_word(tok: str) -> str:
+    """Subcommand-position word with all quote chars removed and lowered."""
+    return tok.replace("'", "").replace('"', "").lower()
 
 
 def _dda_next_words(tokens: list[str]) -> list[str]:
@@ -394,13 +417,18 @@ def _dda_next_words(tokens: list[str]) -> list[str]:
         b = _dda_base(tok)
         if b in _DDA_NAMES:
             if i + 1 < n:
-                out.append(tokens[i + 1].strip("'\"").lower())
+                out.append(_unquoted_word(tokens[i + 1]))
         elif _PYTHON_RE.match(b):
             for j in range(i + 1, n):
                 bj = _dda_base(tokens[j])
-                if bj == "dda.py":
+                if bj == "dda.py" or (bj == "cli.py" and "dda" in tokens[j].lower()):
                     if j + 1 < n:
-                        out.append(tokens[j + 1].strip("'\"").lower())
+                        out.append(_unquoted_word(tokens[j + 1]))
+                    break
+                if tokens[j].strip("'\"").lower() == "-m" and j + 1 < n:
+                    if tokens[j + 1].strip("'\"").lower() in _DDA_MODULES:
+                        if j + 2 < n:
+                            out.append(_unquoted_word(tokens[j + 2]))
                     break
                 if tokens[j].startswith("-"):
                     continue  # `python -u dda.py ...`
@@ -409,16 +437,22 @@ def _dda_next_words(tokens: list[str]) -> list[str]:
 
 
 def _argv_tokens(text: str) -> list[str]:
-    try:
-        return [t.strip("'\"") for t in shlex.split(text, posix=False)]
-    except ValueError:
-        return []
+    # posix=True joins quote-spliced words the way a real shell does
+    # (`"dd"a` -> `dda`); posix=False is the fallback for texts whose
+    # backslashes or quotes only lex in literal mode.
+    for mode in (True, False):
+        try:
+            return [t.strip("'\"") for t in shlex.split(text, posix=mode)]
+        except ValueError:
+            continue
+    return []
 
 
 def _split_unquoted(text: str) -> list[str]:
     """Split on unquoted shell separators: `;`, `&&`, `||`, `|`, `&`,
-    newlines, and parens. Quotes (single/double) are respected; the
-    separators themselves are discarded."""
+    redirects (`>`, `<`, `2>`), newlines, and parens. Quotes
+    (single/double) are respected; the separators themselves are
+    discarded, so `dda release>out.txt` still parses as `dda release`."""
     parts: list[str] = []
     buf: list[str] = []
     quote: str | None = None
@@ -432,7 +466,7 @@ def _split_unquoted(text: str) -> list[str]:
         elif c in ("'", '"'):
             quote = c
             buf.append(c)
-        elif c in (";", "\n", "\r", "(", ")"):
+        elif c in (";", "<", ">", "\n", "\r", "(", ")"):
             parts.append("".join(buf))
             buf = []
         elif c == "&" or c == "|":
@@ -523,7 +557,8 @@ def _wrapper_inners(tokens: list[str]) -> list[str]:
     bare `dda` argv — so the string argument after the flag is re-parsed
     as its own command line. An unquoted tail (`cmd /c dda release`)
     joins the remaining tokens. `VAR=x` assignments and `sudo`/`env`
-    prefixes before the shell are skipped.
+    prefixes before the shell are skipped. Bundled sh flags (`-lc`) and
+    `--command` / `-command=<str>` count as command flags.
     """
     inners: list[str] = []
     start = 0
@@ -533,12 +568,13 @@ def _wrapper_inners(tokens: list[str]) -> list[str]:
         start += 1
     for i in range(start, len(tokens)):
         if _dda_base(tokens[i]) in _SHELL_BASES and i + 1 < len(tokens):
+            shell = _dda_base(tokens[i])
             # Skip pass-through flags (`powershell -NoProfile -Command ...`,
             # `bash -x -c ...`): the first `-c`/`/c`/`-Command` after the
             # shell owns the rest of the line as its command string.
             for j in range(i + 1, len(tokens)):
                 flag = tokens[j].strip("'\"").lower()
-                if flag in _WRAPPER_FLAGS and j + 1 < len(tokens):
+                if _is_command_flag(shell, flag) and j + 1 < len(tokens):
                     if len(tokens) == j + 2:
                         inners.append(tokens[j + 1])
                     else:
@@ -548,11 +584,25 @@ def _wrapper_inners(tokens: list[str]) -> list[str]:
                     break
         flag = tokens[i].strip("'\"")
         low = flag.lower()
-        if low.startswith("-command=") or low.startswith("/command="):
+        if low.startswith(("-command=", "/command=", "--command=")):
             _, _, val = flag.partition("=")
             if val:
                 inners.append(val)
     return inners
+
+
+def _unquote(s: str) -> str:
+    """Strip layers of surrounding quotes left over from wrapper parsing.
+
+    A `-c` inner arrives with its quoting intact (`'"dda release X"'`
+    from nested `bash -c 'sh -c "dda release X"'`); without stripping,
+    the next fixpoint round lexes it as one opaque token and the nested
+    invocation is missed.
+    """
+    s = s.strip()
+    while len(s) >= 2 and s[0] == s[-1] and s[0] in ("'", '"'):
+        s = s[1:-1].strip()
+    return s
 
 
 def _expand_shell_texts(text: str, limit: int = 24) -> list[str]:
@@ -564,18 +614,24 @@ def _expand_shell_texts(text: str, limit: int = 24) -> list[str]:
     while queue and len(seen) < limit:
         cur = queue.pop(0)
         for seg in _split_unquoted(cur):
+            seg = _unquote(seg)
             if seg not in seen and len(seen) < limit:
                 seen.add(seg)
                 queue.append(seg)
         for variant in _substitute_expansions(cur):
+            variant = _unquote(variant)
             if variant not in seen and len(seen) < limit:
                 seen.add(variant)
                 queue.append(variant)
         try:
-            toks = [t.strip("'\"") for t in shlex.split(cur, posix=False)]
+            # One matched quote layer only: blanket stripping would eat
+            # the inner quotes of a nested wrapper
+            # (`'sh -c "dda release"'` must keep its `"` pair).
+            toks = [_unquote(t) for t in shlex.split(cur, posix=False)]
         except ValueError:
             continue
         for inner in _wrapper_inners(toks):
+            inner = _unquote(inner)
             if inner not in seen and len(seen) < limit:
                 seen.add(inner)
                 queue.append(inner)
@@ -595,9 +651,12 @@ def human_only_violation(view: ToolView) -> str | None:
     `dda "release"` (quoted subcommand) and `dda status && dda release`
     (chained) both hit; `dda lock --amend "release notes"` does not (only
     the subcommand-position word after `dda` counts, not a later flag value).
-    Shell wrappers are re-parsed: `-c`/`-Command` string arguments
-    (`bash -c`, `cmd /c`, `powershell -Command`), unquoted `;`/`&&`/`|`
-    separators, parens, and `$(...)`/backtick expansions.
+    Shell wrappers are re-parsed: `-c`/`/c`/`-Command` string arguments
+    (including bundled sh flags like `-lc` and `--command`), nested
+    wrappers (`bash -c 'sh -c "dda release"'`), quote-spliced names
+    (`d''da`), redirect-attached words (`dda release>out.txt`), and
+    `python -m ddalib.cli`, plus unquoted `;`/`&&`/`|`/`>` separators,
+    parens, and `$(...)`/backtick expansions.
 
     The word-token backstop (for non-shell texts such as
     `subprocess.call(["dda", "release"])`, which never survives shlex as

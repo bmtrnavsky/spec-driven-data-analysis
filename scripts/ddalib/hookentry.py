@@ -52,8 +52,25 @@ def is_clean_dda_invocation(tool_name: str, tool_input: dict | None) -> bool:
     base = lambda t: re.split(r"[\\/]", t)[-1].lower()  # noqa: E731
     if base(tokens[0]) in _DDA_NAMES:
         rest = tokens[1:]
-    elif _PYTHON_RE.match(base(tokens[0])) and len(tokens) > 1 and base(tokens[1]) == "dda.py":
-        rest = tokens[2:]
+    elif _PYTHON_RE.match(base(tokens[0])):
+        # `python [-u] dda.py ...`, `python [-u] <path/>ddalib/cli.py ...`,
+        # or `python [-u] -m dda|ddalib|ddalib.cli ...` — same recognition
+        # as matching._dda_next_words (keep in sync).
+        rest = None
+        for k in range(1, len(tokens)):
+            bk = base(tokens[k])
+            if bk == "dda.py" or (bk == "cli.py" and "dda" in tokens[k].lower()):
+                rest = tokens[k + 1:]
+                break
+            if tokens[k].strip("\"'").lower() == "-m" and k + 1 < len(tokens):
+                if tokens[k + 1].strip("\"'").lower() in ("dda", "ddalib", "ddalib.cli"):
+                    rest = tokens[k + 2:]
+                break
+            if tokens[k].startswith("-"):
+                continue
+            break
+        if rest is None:
+            return False
     else:
         return False
     # `dda approve`, `dda release`, and `dda abandon` are human-only (§6.0, §4.5): never pass them through.

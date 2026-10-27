@@ -190,7 +190,14 @@ class Harness:
                          ("human-only.semicolon-release", f"dda status; dda abandon {self.wd} --reason x"),
                          ("human-only.paren-release", f"(dda release {self.wd})"),
                          ("human-only.subst-release", f"$(echo dda) release {self.wd}"),
-                         ("human-only.wrapper-chain", f"bash -c 'dda status && dda release {self.wd}'")):
+                         ("human-only.wrapper-chain", f"bash -c 'dda status && dda release {self.wd}'"),
+                         ("human-only.bundled-flag-release", f"bash -lc 'dda release {self.wd}'"),
+                         ("human-only.bundled-flag-abandon", f"sh -ic 'dda abandon {self.wd} --reason x'"),
+                         ("human-only.quote-splice-release", f"d''da release {self.wd}"),
+                         ("human-only.nested-wrapper", f"bash -c 'sh -c \"dda release {self.wd}\"'"),
+                         ("human-only.redirect-attached", f"dda release {self.wd}>out.txt"),
+                         ("human-only.module-release", f"python -m ddalib.cli release {self.wd}"),
+                         ("human-only.module-abandon", f"py -m ddalib.cli abandon {self.wd} --reason x")):
             blocked, res = self.all_blocking(BOUND, "terminal", {"command": cmd})
             by = [h for h, r in res.items() if r["blocked"]]
             self.record(cid, "bound pre-lock", cmd,
