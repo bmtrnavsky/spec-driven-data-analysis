@@ -1,10 +1,10 @@
 ---
 name: disciplined-data-analysis
-status: spec draft, reshaped after blind review (no code yet)
-version: 0.2.0-spec
+status: spec draft, second reshape after blind re-review (no code yet)
+version: 0.3.0-spec
 date: 2026-10-27
 sibling: C:\Users\bmtrn\disciplined-vibe-coding (v0.2.0)
-sources: Turing pipeline structure (disciplined-vibe-coding), Elephant-Goldfish Model (Google, Apache 2.0), ponytail economy (DietrichGebert/ponytail, MIT), gap survey deleg_6fc04e39, blind review deleg_1df92e5a (22 findings, all addressed — see Appendix A)
+sources: Turing pipeline structure (disciplined-vibe-coding), Elephant-Goldfish Model (Google, Apache 2.0), ponytail economy (DietrichGebert/ponytail, MIT), gap survey deleg_6fc04e39, blind review deleg_1df92e5a (22 findings, all addressed — see Appendix A), blind re-review deleg_37619031 (8 blockers, all addressed — see Appendix B)
 ---
 
 # Disciplined Data Analysis — plugin spec
@@ -23,7 +23,7 @@ Ranked gaps from the survey, each mapped to the mechanism that closes it:
 |---|---|---|
 | 1 | Spec written (or rewritten) after seeing data | Lock + spec hash + `lockguard` + kernel audit hook + prior-exposure declaration (§3, §4.1, §6.1, §10) |
 | 2 | Silent forking paths: only the winning cut is reported | Variant scripts + specs-tried ledger + orphan-run check + footer counts (§4.3, §8) |
-| 3 | Reviewer shares the analyst's context and blind spots | Goldfish review with read-only packet tools and a templated brief (§5) |
+| 3 | Reviewer shares the analyst's context and blind spots | Goldfish review as a one-shot, no-tools model call on an inlined packet and a templated brief (§5) |
 | 4 | No checkpoint between stages | Per-stage gates G0–G9, computed by script where possible (§3) |
 | 5 | Report cannot be traced back to its inputs | Provenance footer whose values are recomputed, not just present (§8, §6.5) |
 | 6 | Agent quietly redefines "active user", "revenue", etc. | Human-owned registry, content-hashed pins, `defguard` (§7) |
@@ -39,9 +39,15 @@ to defeat the plugin.
 
 - Hooks string-match tool inputs. They **prevent slips**, not determined
   evasion (variables, `os.environ`, `cd` plus relative paths, symlinks).
-- Evasion is made **detectable**: the kernel audit hook logs real file
-  opens and socket connects regardless of tool-input text (§10.1), evidence
-  files are hash-chained (§4.4), and locks are git commits (§4.2).
+- Evasion is made **detectable**: the kernel audit hook and reader
+  wrappers log real file opens and socket connects regardless of tool-input
+  text (§10.1), evidence files are hash-chained under a file lock (§4.4),
+  and locks are git commits (§4.2).
+- Native code that is neither wrapped nor locked down (§10.1b) is outside
+  both prevention and detection, and the footer says so.
+- Hooks bite only sessions bound to a workdir with `dda start` (§6.0).
+  Everything else Brad does in Hermes is untouched; reads of a project's
+  roots from unbound sessions are logged and labelled, not blocked.
 - Whatever is neither prevented nor detected is **disclosed** in the footer
   as a caveat. The spec never claims prevention where only detection exists.
 - Phase 0 of the build (§14) is a red-team test that measures which of
@@ -51,12 +57,14 @@ to defeat the plugin.
 
 - **Elephant** — the analyst (you plus the agent with full conversation
   context). Drafts the spec, runs the analysis.
-- **Goldfish** — sees only the packet files: spec, lock, definitions,
+- **Goldfish** — a one-shot model call with no tools, made by `dda`. It
+  sees only the packet, inlined into the prompt: spec, lock, definitions,
   specs-tried ledger, outputs, provenance. Never the chat, memory, RAG, or
-  data. Catches unstated assumptions and story-fitting.
+  data, because nothing else is in the request. Catches unstated
+  assumptions and story-fitting.
 - **Human** — owns definitions and `config.yaml`, confirms tier at DECIDE+,
-  approves the spec at DECIDE+, signs off at PUBLISH, and is the only
-  source of corrections. Human acts are recorded as artifacts the agent
+  approves the spec and the config at DECIDE+, signs off at PUBLISH, and
+  is the only source of corrections. Human acts are recorded as artifacts the agent
   cannot produce (§4.5).
 - **`dda` CLI** — the plugin's deterministic scripts. Besides the hooks,
   it is the only writer of evidence files under `.analysis/`.
@@ -147,13 +155,13 @@ judgment), G (goldfish), H (human artifact, §4.5), K (hook).
 | 0 | Intake | `intake` | intake block | G0: question stated as one sentence; decision it informs named (or "none — EXPLORE") | A |
 | 1 | Define | `define`, `definitions` | `.analysis/spec.md` | G1: every metric resolves to a registry pin `name@version#hash` and the hash recomputes; sources named by config alias; hypotheses, "what would change the answer", exclusions, and prior exposure stated; no inline formulas | S, K |
 | 2 | Economy+Tier | `define` | two sentences in spec | G2: rung and tier declared; overrides and tier triggers applied (§2.2); human tier confirmation present when required | S, H |
-| 3 | Teardown (pre-data) | `goldfish-review` | `.analysis/reviews/teardown.md` | G3: tier-scaled rounds recorded from real goldfish sessions (§5); at DECIDE+, a verified human spec approval for this spec hash | S, G, H |
-| 4 | Lock | `lock` | `specs/vN.md`, `spec.lock`, ledger entry, git commit | G4: lock hash recomputes (spec + definition pins + config hash + source aliases); evidence chains verify; `runs.log` and the audit log show no non-metadata data reads before this lock, otherwise the lock is labelled post-data | S, K |
+| 3 | Teardown (pre-data) | `goldfish-review` | `.analysis/reviews/goldfish/teardown.md` | G3: tier-scaled rounds recorded from `dda review run` calls (§5.0); at DECIDE, a human spec approval for this spec hash (verified, or unverified and disclosed); at PUBLISH, verified only (§4.5) | S, G, H |
+| 4 | Lock | `lock` | `specs/vN.md`, `spec.lock`, ledger entry, git commit | G4: lock hash recomputes (spec + definition pins + config hash + source aliases); a `config` approval exists for this config hash, signed through the approver chain (§4.5; verified required at DECIDE+, unapproved config disclosed at EXPLORE); evidence chains verify; `runs.log`, the audit log, and the unbound-access log (§6.0) show no non-metadata reads of these aliases before this lock, otherwise the lock is labelled post-data | S, K, H |
 | 5 | Profile (first data contact) | `profile` | `.analysis/profile.md` | G5: snapshot or fingerprint recorded per source (§10.3); schema compared with declared expectations; mismatch filed as amendment | S, A |
 | 6 | Analyze | `analyze` | variant scripts, outputs, `runs.log`, `specs-tried.jsonl` | G6: every data-touching run maps to a variant id (no orphan runs); every variant beyond the locked one has a ledger entry with a reason; hook heartbeat complete (§6.8) | S, K |
 | 7 | Verify | `verify`, `goldfish-review`, `correct` | `.analysis/verify.md` | G7: locked variant reproduces from its saved script in a fresh kernel within declared tolerance against the snapshot; source drift recorded separately (§10.3); matched correction evals pass; post-result goldfish rounds recorded (§5.2) | S, G |
 | 8 | Report | `report` | `reports/<slug>.md` or `.analysis/answer.md` | G8: footer values recompute from lock, ledgers, runs, profile, reviews, approvals (§8); `exploratory` and `post-data-locked` labels present at point of claim; at PUBLISH, verified human sign-off for this report hash | S, K, H |
-| 9 | Archive | `report` | ledger closed, commit, push | G9: spec, lock, ledger, verify, report committed together; `dda gitcheck` finds no data or secrets staged (§11); evidence chains verify; Wayfinder closed | S |
+| 9 | Archive | `report` | ledger closed, commit, push | G9: spec, lock, ledger, verify, report committed together; `dda gitcheck` finds no data or secrets staged (§11); evidence chains verify; Wayfinder closed; `dda release` unbinds every session and deregisters the workdir's roots (§6.0) | S |
 
 ### 3.1 Amendments (the honest loop back)
 
@@ -195,6 +203,9 @@ editing the spec is not.
    pass.
 8. An evidence chain fails to verify (§4.4) or a hook fault is detected
    (§6.8).
+9. A PUBLISH gate (G3 or G8) has only an unverified approval (§4.5).
+10. The approver chain fails to verify, or `dda doctor` downgrades
+    approvals because a signing key is reachable from the agent (§4.5).
 
 Everything else proceeds with stated assumptions, recorded in the spec.
 
@@ -223,7 +234,7 @@ make a lock post-data.
 Workdir layout. `C` = committed, `X` = never committed (§11).
 
 ```text
-.analysis/                    guarded: agent writes blocked except spec.md and wayfinder.md (§6.2)
+.analysis/                    guarded: agent writes allowed only on the paths marked `agent` in §6.2
   config.yaml          C  data-root aliases, kernel policy, PII columns, default tier, publish channels, approver keys (human-owned)
   spec.md              C  current spec (working copy, agent-editable)
   specs/vN.md          C  every locked version, written only by `dda lock`
@@ -233,10 +244,14 @@ Workdir layout. `C` = committed, `X` = never committed (§11).
   runs.log             C  every tool call and kernel execution, append-only, hash-chained, no data values
   runs/blobs/<hash>    C  exact code/query text of each run, secrets scrubbed
   variants/<id>.py|sql C  runnable script per variant (what Verify replays)
-  approvals/           C  human approval records (§4.5)
-  profile.md           C  aggregate snapshot facts only — no rows, no samples
-  reviews/             C  goldfish outputs, recorded by `dda review record`
-  verify.md            C  reproduction evidence, drift, eval results
+  audit.log            C  kernel audit and reader-wrapper events, hash-chained, aliases only (§10.1)
+  approvals/           C  one signed file per human approval, committed by the human (§4.5)
+  approvals.index.jsonl C verified-approval index written by `dda approved`, hash-chained
+  profile.md           C  aggregate snapshot facts only, written by `dda profile` — no rows, no samples
+  reviews/goldfish/    C  goldfish outputs, written by `dda review run`
+  reviews/self/        C  EXPLORE self re-reads, written by the agent, labelled `self`
+  notes/               C  agent prose: profile and verify interpretation, scratch reasoning
+  verify.md            C  reproduction evidence, drift, eval results, written by `dda verify`
   answer.md            C  glance answer plus short footer
   wayfinder.md         C  stage + gate lines
   milestones/<m>/      C  study rung only: its own spec.md, specs/, spec.lock, ledger
@@ -291,6 +306,11 @@ roots.
   is a new variant — a mechanical rule, not a judgment call.
 - Not a new variant: formatting, chart styling, renaming, or re-running
   the same key. A change to any header field is a new variant.
+- **Freeze on first run.** The agent writes `variants/<id>.py|sql`.
+  The first `dda run` under that id records the script's body hash in
+  `specs-tried.jsonl`, and from then on `evidenceguard` blocks edits to
+  that file. A changed script is a new variant id. `dda gate G6` fails
+  any run whose script body hash differs from the frozen one.
 - A `specs-tried.jsonl` entry holds: id, parent id, variant key, header
   diff, why, label (`locked | post-data-locked | exploratory`), output
   pointer, run ids. It is written by `dda variant`, which `analyze` calls.
@@ -307,12 +327,36 @@ roots.
 
 ### 4.4 Evidence integrity
 
-- `runs.log`, `ledger.md`, `specs-tried.jsonl`, and `approvals/` are
-  append-only JSON lines. Each line carries `prev`, the SHA-256 of the
-  previous line. `dda verify-chain` checks every chain.
+- `runs.log`, `audit.log`, `ledger.md`, `specs-tried.jsonl`, and
+  `approvals.index.jsonl` are append-only JSON lines. Each line carries
+  `seq` and `prev`, the SHA-256 of the previous line. `dda verify-chain`
+  checks every chain. (`approvals/` itself is not a chain: it holds one
+  human-committed file per approval, §4.5.)
+- **One appender, one lock.** Hermes runs batched tool calls
+  concurrently, so several hooks and the kernel can append at the same
+  moment. Every writer (hooks, `dda`, the kernel audit hook) appends
+  through the same function, `dda.chain.append(file, record)`, which:
+  1. takes an exclusive OS lock on `<file>.lock` (`msvcrt.locking` on
+     Windows, `fcntl.flock` elsewhere), waiting at most 2 seconds;
+  2. reads the last line, sets `seq = last.seq + 1` and
+     `prev = sha256(last line)`;
+  3. writes the line with one `write` call, flushes, fsyncs;
+  4. updates the heads mirror while still holding the lock, then
+     releases it.
+- Lock timeout: a `pre_tool_call` hook that cannot get the lock blocks
+  the call with "evidence log busy, retry" (fail closed for bound
+  sessions). A `post_tool_call` hook or the kernel writes the record to
+  `<file>.spill/<pid>-<n>.json` instead. `dda` merges spill files into the
+  chain under the lock on its next run and logs the merge. A spill file
+  that is still unmerged at a gate is a hook fault (§6.8).
+- The kernel writes to `audit.log`, not `runs.log`, so hook traffic and
+  kernel traffic do not contend for one lock.
 - On each append, the chain heads are mirrored to
   `~/.hermes-home/dda/heads/<workdir-id>.json`, which is also guarded. A
-  truncated or edited log fails verification against the mirror.
+  truncated or edited log fails verification against the mirror. The
+  mirror sits in the same trust domain as the logs, so it catches slips,
+  not a deliberate rewrite of both; the pushed git history (G9) is the
+  stronger backstop.
 - `evidenceguard` (§6.2) blocks agent writes to all of the above. Hooks
   and `dda` are the only writers.
 - A chain failure is a stop-and-ask case (§3.2) and a footer caveat.
@@ -321,48 +365,118 @@ roots.
 
 An approval must be something the agent cannot produce.
 
-- An approval is a git commit, made by an approver, that adds
-  `.analysis/approvals/<kind>-<artifact-hash>.json` and is **signed** with
-  an SSH or GPG key listed in `config.yaml` under `approvers`. Kinds:
-  `tier`, `spec`, `amendment`, `signoff`, `definition`, `correction`,
-  `config`.
-- The signing key must need a passphrase on each use, or must not be
-  loaded in any agent reachable from the Hermes shell. `dda doctor` warns
-  if `ssh-agent` or `gpg-agent` holds an approver key.
-- `dda approved <kind> <artifact>` checks the signature
-  (`git verify-commit`), the signer fingerprint against config, and that
-  the artifact hash matches the current artifact. An approval of spec v2
-  does not cover v3.
-- `lockguard` blocks agent runs of `git commit -S`, `git tag -s`, and
-  `dda approve`, and `evidenceguard` blocks agent writes to `approvals/`.
-- Fallback if Brad has no signing key set up: the approval is recorded as
-  **unverified**, and the footer says so. It never counts as verified.
+- **Format.** An approval is a git commit, made by an approver in their
+  own terminal with `dda approve <kind> <artifact>`, that adds exactly one
+  file, `.analysis/approvals/<kind>-<artifact-hash>.json`, and is
+  **signed**. Kinds: `tier`, `spec`, `amendment`, `signoff`,
+  `definition`, `correction`, `config`. These files are not a hash chain.
+  When `dda approved` verifies one, it appends the commit sha, signer
+  fingerprint, kind, and artifact hash to the chained
+  `approvals.index.jsonl` (§4.4), so a later deletion is visible.
+- **Approver chain (root of trust).** Approver keys live in
+  `config.yaml` under `approvers`, which only a string-match hook guards,
+  so the key list is never trusted on its own:
+  - The first `config` approval is trust-on-first-use. `dda init` prints
+    the approver fingerprints, Brad confirms them, and he signs that
+    first config approval himself. The fingerprints also go in every
+    footer, so a foreign key shows up where Brad reads.
+  - Every later config whose `approvers` block differs must be approved
+    by a key from the **previous** approved set. `dda approved` walks the
+    chain from the first config approval to the current config hash; a
+    key added without a signature from an earlier key fails the walk.
+  - G4 requires a `config` approval for the exact config hash being
+    locked (§3). A slipped config edit changes the hash, so data reads
+    block until a human approves the new config.
+  - Kernel package additions (§10.1a) live in `kernel.yaml`, outside the
+    config hash, so adding a library needs neither a config approval nor
+    a re-lock. The kernel environment hash still goes in the footer.
+- **Keys the agent cannot use.** A verified approval needs a signing key
+  that the agent cannot drive. Preferred: an SSH `ed25519-sk` (FIDO2)
+  key that needs a physical touch for every signature. Otherwise a GPG
+  key with a passphrase and no cache. `dda doctor` checks this and,
+  where it fails, **downgrades every approval to unverified** (a fail,
+  not a warning) until fixed:
+  - `gpg-agent`: the effective config (`gpgconf --list-options
+    gpg-agent`) must have `ignore-cache-for-signing`, or
+    `default-cache-ttl 0` and `max-cache-ttl 0`. The default 600-second
+    cache fails.
+  - `ssh-agent`: `ssh-add -L` must not list a non-`-sk` approver key on
+    any agent the Hermes shell can reach: `SSH_AUTH_SOCK`, the Windows
+    OpenSSH agent service (`\\.\pipe\openssh-ssh-agent`), Pageant, and
+    1Password's agent. A running Windows `ssh-agent` service holding the
+    key fails.
+  - Git signing config: `commit.gpgsign` and `tag.gpgSign` must be
+    false (or unset) in every scope that applies to the workdir, and
+    `user.signingkey` must not name an approver key in those scopes.
+    Auto-signing would sign agent commits without `-S`, which `lockguard`
+    cannot see. `dda approve` passes `-S` and the key explicitly, so the
+    human loses nothing.
+- **`dda`'s own commits** (`dda lock`, G9) always run as
+  `git -c commit.gpgsign=false -c tag.gpgSign=false commit …`, so they
+  never prompt, never hang under cron, and never borrow an approver key.
+- `dda approved <kind> <artifact>` checks: the signature
+  (`git verify-commit`); the signer against the approver chain; that the
+  commit adds only that one approval file; that it is reachable from the
+  current branch; that the artifact hash matches the current artifact
+  (an approval of spec v2 does not cover v3); and that `dda doctor`'s
+  key checks pass now.
+- `lockguard` blocks agent runs of `git commit -S`, `git tag -s`,
+  `git -c commit.gpgsign=true`, and `dda approve`, and `evidenceguard`
+  blocks agent writes to `approvals/` and `approvals.index.jsonl`.
+- **Unverified approvals.** With no key, or after a doctor downgrade,
+  an approval file can be committed unsigned. It is recorded as
+  **unverified** and the footer says "human approval unverified (agent
+  could have produced it)". Unverified satisfies G3 and G4 at DECIDE,
+  with that disclosure. It **never** satisfies any gate at PUBLISH: a
+  PUBLISH analysis with only unverified approvals parks (§3.2, case 9).
 
 ## 5. Review rounds (elephant / goldfish)
 
 ### 5.0 Goldfish isolation
 
-- **Packet.** `dda packet <stage>` copies a fixed file set into a packet
-  directory under the scratch dir: spec, lock, definition excerpts, plus
-  (post-result) profile, specs-tried ledger, aggregate outputs, draft
-  report, and footer. No data files, no `derived/`, no raw rows. The
-  packet hash is recorded.
-- **Toolset.** The goldfish subagent gets read-only packet tools only:
-  `read_file` and `search_files`, scoped to the packet directory. No
-  terminal, code execution, web, memory, `chat_history_lookup`, RAG, or
-  `tool_call`. `lockguard` also applies to subagent sessions (verified in
-  phase 0, §14).
-- **Brief.** The brief is the `goldfish-packet.md` template. `dda packet`
-  fills in only the packet path, the stage, and the round list. The
-  elephant cannot add prose. The brief hash is recorded.
-- **Recording.** `dda review record <delegation-id>` pulls the goldfish's
-  final output from Hermes session state, not from the elephant, and
-  writes it to `reviews/` with the session id, packet hash, brief hash,
-  and model.
-- **Independence.** The two goldfish at PUBLISH are two sessions on
+Hermes's `delegate_task` cannot restrict a subagent's tools: children
+inherit the parent's toolsets minus a short fixed list, so a delegated
+goldfish would have terminal, code execution, web, `tool_call`,
+`chat_history_lookup`, and RAG. The goldfish is therefore **not a Hermes
+subagent**. It is a single model request made by `dda`, with no tools in
+the request at all. Isolation comes from what is in the request, not from
+policing what a session does.
+
+- **Packet.** `dda packet <stage>` assembles a fixed file set: spec, lock,
+  definition excerpts, plus (post-result) profile, specs-tried ledger,
+  aggregate outputs, draft report, and footer. No data files, no
+  `derived/`, no raw rows. The packet is stored under
+  `.analysis/packets/<packet-hash>/` (committed, so it outlives scratch
+  pruning) and its hash is recorded. A packet over the size cap (config
+  `goldfish_max_tokens`, default 150k tokens) fails with the file list
+  and sizes; the agent trims outputs or splits rounds, it never drops
+  the spec or lock.
+- **Call.** `dda review run <stage> [--model <id>]` sends one request to
+  the provider API directly (not through the Hermes agent loop):
+  system prompt = the `goldfish-packet.md` template, user message = the
+  packet inlined as delimited files, `tools` empty, no memory, no
+  context files, no hooks, no prior turns. The API key comes from the
+  Hermes vault or env by name (§10.4). There is nothing for the goldfish
+  to call, so there is nothing to scope.
+- **Brief.** `dda` fills the template with only the stage and the round
+  list (including matched correction-eval questions, §5.1). The elephant
+  cannot add prose. Because `dda` builds the request, the recorded
+  brief hash is the hash of the bytes actually sent.
+- **Recording.** `dda review run` writes the full request hash, response,
+  model id, provider request id, packet hash, brief hash, and token
+  counts to `reviews/goldfish/` and appends a `review` line to
+  `runs.log`. **Every** call is recorded, including failed or
+  unfavourable ones. G3 and G7 count every call for the packet and
+  stage, so the elephant cannot re-roll until it gets a pass ("goldfish
+  shopping"): a round passes only if the latest call passes and every
+  earlier call's objections are answered in the review file.
+- **Independence.** The two goldfish at PUBLISH are two calls to
   **different models** when available (config `goldfish_models`). With
   only one model, the footer says "second goldfish: same model —
   correlated blind spots possible".
+- **Fallback.** If no provider key is reachable from `dda`, goldfish
+  rounds cannot run. Below PUBLISH they degrade to `self` re-reads with a
+  footer caveat; at PUBLISH the analysis parks.
 
 ### 5.1 Pre-data teardown (stage 3) — reviews the plan, not results
 
@@ -399,17 +513,19 @@ eval (§9) to the round list.
 | Tier | Rung | Pre-data | Post-result | Human |
 |---|---|---|---|---|
 | EXPLORE | any | rounds 1 and 3, self cold re-read | rounds 1 and 2, self | none |
-| DECIDE | glance | rounds 1 and 3, one goldfish session | rounds 1 and 2, one goldfish session | tier + spec approval (one signed commit) |
-| DECIDE | quick-cut and up | all 5 rounds, goldfish session | all 5 rounds, goldfish session | tier + spec approval before lock |
-| PUBLISH | quick-cut and up | all 5, goldfish + second goldfish on round 3 | all 5, two goldfish sessions | tier + spec approval; signed report sign-off |
+| DECIDE | glance | rounds 1 and 3, one goldfish call | rounds 1 and 2, one goldfish call | tier + spec approval (one signed commit) |
+| DECIDE | quick-cut and up | all 5 rounds, goldfish call | all 5 rounds, goldfish call | tier + spec + config approval before lock |
+| PUBLISH | quick-cut and up | all 5, goldfish + second goldfish on round 3 | all 5, two goldfish calls | tier + spec + config approval; signed report sign-off (all verified) |
 
-Self re-reads are written to `reviews/` by the agent and labelled `self`
-in the footer.
+Self re-reads are written to `reviews/self/` by the agent (the one
+`reviews/` path `evidenceguard` allows) and labelled `self` in the footer.
+Goldfish rows in this table mean `dda review run` calls (§5.0), not
+sessions.
 
 Round failure: fix the spec (pre-data) or the report/analysis
 (post-result), and re-run only the failed round, at most once per round.
 A second failure is a stop-and-ask case. Each round leaves one line in
-`reviews/`.
+`reviews/goldfish/` or `reviews/self/`.
 
 ## 6. Hooks
 
@@ -427,17 +543,48 @@ rule is re-checked by a gate**, and hook faults are detected by heartbeat
 
 Unlike the sibling (nudge-only by choice), this plugin uses blocking
 `pre_tool_call` hooks where a false negative corrupts the conclusion.
-Each is scoped by `.analysis/config.yaml` to keep false positives rare,
-and every block message says exactly how to unblock.
+Each fires only in bound sessions and is scoped by
+`.analysis/config.yaml` to keep false positives rare, and every block
+message says exactly how to unblock.
 
-**Scope and concurrency.** Hooks never infer the workdir from `cwd`.
-`dda start <workdir> [--milestone <m>]` binds a session id to one workdir
-(and, for studies, one active milestone) in
-`~/.hermes-home/dda/sessions/<session-id>.json`. A data read by session S
-is judged only against the lock of S's bound workdir, and only for roots
-that lock lists. Two workdirs may analyze the same root; workdir A's lock
-never unlocks reads for B. A session with no binding that touches a root
-declared by any registered workdir is blocked with "run `dda start`".
+**Scope: hooks bite only bound sessions.** Hermes hooks are
+profile-wide, so they see every session Brad runs: morning-brief,
+`bt-post-publisher`, GA and WordPress stats, ordinary vault notes. The
+plugin must not block any of that.
+
+- **Binding.** Hooks never infer the workdir from `cwd`.
+  `dda start <workdir> [--milestone <m>]` binds a session id to one
+  workdir (and, for studies, one active milestone) in
+  `~/.hermes-home/dda/sessions/<session-id>.json`. One binding per
+  session; rebinding a session that has data reads needs `dda start
+  --rebind`, which is logged in both workdirs' ledgers. If Hermes exposes
+  the parent session id or the post-compression session lineage in the
+  hook payload (phase 0 checks), the binding follows it; otherwise the
+  new session id must run `dda start` again.
+- **Unbound sessions are never blocked.** For a session with no binding,
+  every blocking hook returns `{}`. `runlog` alone still runs: if the
+  tool input matches a root declared by an **active** workdir, it appends
+  a line (session id, tool, alias, time) to
+  `~/.hermes-home/dda/unbound-access.log`. It never blocks.
+- **Detection instead.** G4 reads the unbound-access log. A read of one
+  of the lock's aliases after the workdir was registered labels the lock
+  **post-data (unbound access)**, and the footer names the sessions. This
+  also catches workdir hopping: G4 checks the bound session's history
+  and the logs of other active workdirs that declare the same aliases.
+- **Bound sessions.** A data read by bound session S is judged only
+  against the lock of S's workdir, and only for roots that lock lists.
+  Two workdirs may analyze the same root; workdir A's lock never unlocks
+  reads for B.
+- **Release.** `dda release` (run by G9, or `dda abandon` for dropped
+  work) unbinds every session bound to the workdir and marks it
+  inactive. Inactive workdirs' roots are no longer matched by anything,
+  so a finished analysis leaves no trace on later sessions. `dda status`
+  lists active workdirs and bound sessions; `dda doctor` warns about
+  workdirs active for more than 14 days with no runs.
+- **Fast exit.** The first thing every hook does is check
+  `sessions/<session-id>.json` and the active-roots cache. An unbound
+  session with no root match returns in well under the time budget
+  (§6.9).
 
 ### 6.1 `lockguard` — pre_tool_call, BLOCKS
 
@@ -456,19 +603,48 @@ declared by any registered workdir is blocked with "run `dda start`".
   `hash(spec.md)` and the config hash match the lock. Direct
   `read_file`/`search_files` on data roots stays blocked after lock,
   because that output would bypass masking (§10.2).
-- Also blocks agent `git commit -S`, `git tag -s`, and `dda approve`.
+- Also blocks agent `git commit -S`, `git tag -s`,
+  `git -c commit.gpgsign=true`, and `dda approve` (§4.5).
+- Applies to bound sessions only (§6.0). It never computes the lock hash
+  on the hot path; it reads the cached lock state (§6.9).
 - The block message names the fix: "Lock the spec (`dda lock`)",
-  "Re-lock after your spec edit", "Use `dda run`", or "Run `dda start`".
+  "Re-lock after your spec edit", "Use `dda run`", or "Approve the
+  config (`dda approve config`)".
 
 ### 6.2 `evidenceguard` — pre_tool_call, BLOCKS
 
 - Blocks agent writes, moves, deletes, and in-place edits (through
   `write_file`, `patch`, `terminal`, or `execute_code`) under
-  `.analysis/**` except `spec.md` and `wayfinder.md`, and under
-  `~/.hermes-home/dda/**`. This covers `config.yaml`, `runs.log`,
-  `spec.lock`, `specs/`, ledgers, and `approvals/`.
+  `.analysis/**` and `~/.hermes-home/dda/**`, except the paths marked
+  `agent` below. Every other file has exactly one named writer.
+
+| Path | Writer | Check |
+|---|---|---|
+| `spec.md` | agent | lock hash (§4.2) |
+| `wayfinder.md` (status prose) | agent | gate lines are recomputed by `dda gate`, never trusted (G9 reruns every gate) |
+| `variants/<id>.py\|sql` | agent, until first run | frozen after first run (§4.3) |
+| `answer.md` | agent | `footercheck` (§6.5) |
+| `reviews/self/` | agent | labelled `self` in the footer |
+| `notes/` | agent | not evidence; never cited by a gate |
+| `profile.md` | `dda profile` | G5 |
+| `verify.md` | `dda verify` | G7 |
+| `reviews/goldfish/`, `packets/` | `dda review run`, `dda packet` | packet and brief hashes (§5.0) |
+| `runs.log`, `runs/blobs/` | `runlog` hook, `dda` | chain (§4.4) |
+| `audit.log` | kernel | chain (§4.4) |
+| `spec.lock`, `specs/`, `ledger.md` | `dda lock` | lock commit, chain |
+| `specs-tried.jsonl` | `dda variant`, `dda run` | chain |
+| `approvals/` | human, via `dda approve` in their own terminal | signature (§4.5) |
+| `approvals.index.jsonl` | `dda approved` | chain |
+| `config.yaml` | human | config approval chain (§4.5) |
+| `kernel.yaml` | agent or human | env hash in footer; outside the lock hash |
+| `~/.hermes-home/dda/**` | `dda`, hooks | heads mirror, session bindings |
+
 - `dda` subcommands pass through; they enforce their own rules.
-- Detection backstop: chain verification (§4.4) and lock commits (§4.2).
+- Applies to bound sessions only (§6.0); an unbound session writing into
+  an active workdir's `.analysis/` is logged to the unbound-access log
+  and fails the next chain or gate check.
+- Detection backstop: chain verification (§4.4), lock commits (§4.2), and
+  the config approval chain (§4.5).
 
 ### 6.3 `rawguard` — pre_tool_call, BLOCKS
 
@@ -488,6 +664,14 @@ declared by any registered workdir is blocked with "run `dda start`".
 - Matcher: writes to `reports/` and `.analysis/answer.md`, plus every
   **publish channel** declared in config (vault note writes,
   `bt-post-publisher` and WordPress tool calls, Drive publishing).
+- Scope: bound sessions only (§6.0). Within a bound session, a
+  publish-channel call is checked only when its content or source path
+  contains a report or answer from the bound workdir (matched by report
+  slug, lock hash, or file path). An ordinary vault note in an unbound
+  session, or an unrelated note in a bound one, is never touched.
+- In a bound session, a publish-channel call carrying the workdir's
+  report is also blocked when the tier is below PUBLISH or the verified
+  sign-off is missing ("raise the tier and get sign-off first").
 - Blocks when the footer is missing, a field is empty, or a recomputable
   field is wrong: lock hash, spec version, lock label, N/K counts,
   definition pins, snapshot hashes, approval status. It calls
@@ -512,12 +696,13 @@ declared by any registered workdir is blocked with "run `dda start`".
 
 ### 6.8 Hook-fault detection (heartbeat)
 
-- Every hook appends to a per-session heartbeat with a sequence counter.
+- Every hook appends to a per-session heartbeat with a sequence counter,
+  through the locked appender (§4.4).
 - `dda gate` compares, per session, Hermes's recorded tool-call count
   (from session state) with `runlog`'s `seen` lines, `done` lines, and
   `lockguard` decisions. Any gap is a **hook fault** naming the hook and
   the tool calls it missed.
-- The kernel audit log (§10.1) is an independent second source: a file
+- The kernel audit log (§10.1, including reader-wrapper events, §10.1b) is an independent second source: a file
   open on a data root with no matching `runs.log` entry is reported as a
   hook fault or an evasion.
 - A gate that passes despite a hook fault is recorded as
@@ -527,10 +712,42 @@ declared by any registered workdir is blocked with "run `dda start`".
 
 Hooks are declared in the profile `config.yaml` like the sibling's.
 Install docs state: blocking hooks need first-use approval; gateway and
-cron need auto-accept; `hermes hooks doctor` flags edits. All hooks are
-dependency-free shell (no jq), and every exit path prints valid JSON.
-`dda doctor` checks hook registration, approver key setup, and that the
-heartbeat is live.
+cron need auto-accept; `hermes hooks doctor` flags edits.
+
+**Runtime and interpreter.** The hooks are not shell. `lockguard` needs
+the lock state (normalized spec, definition content hashes, YAML config)
+and `footercheck` calls `dda`, so all hooks are **Python**, in one entry
+point `hooks/dda_hook.py <hook-name>` that shares code with `dda`.
+
+- **Interpreter.** `dda install` creates the plugin's own uv venv
+  (`<plugin>/.venv`, Python ≥ 3.11, PyYAML pinned; separate from the
+  kernel venv in §10.1a) and writes each hook command with the
+  **absolute** interpreter path, e.g.
+  `C:/…/disciplined-data-analysis/.venv/Scripts/python.exe
+  C:/…/hooks/dda_hook.py lockguard`. Nothing relies on `python3` or
+  `python` on PATH (on this host `python3` does not exist, and a hook
+  whose interpreter is missing fails open).
+- **Fail closed inside, detect outside.** The entry point wraps every
+  hook in a catch-all. For a bound session, an internal error in a
+  blocking hook returns `block` with "dda hook error: <class>; run
+  `dda doctor`"; for an unbound session it returns `{}`. Every exit path
+  prints valid JSON. What the script cannot catch (interpreter missing,
+  Hermes timeout) fails open in Hermes; the heartbeat (§6.8) detects it,
+  and `dda doctor` verifies the interpreter path, the venv imports, and a
+  dry-run of each hook.
+- **Time budget.** Hook timeout is 5 seconds (as in the sibling). Target
+  under 300 ms per call, measured in phase 0. Hooks never hash the spec,
+  config, or definitions on the hot path. `dda` keeps a lock-state cache
+  at `~/.hermes-home/dda/state/<workdir-id>.json`: lock hash, expected
+  file hashes, and the mtime and size of `spec.md`, `config.yaml`, and
+  every pinned definition. A hook recomputes a hash only for a file
+  whose mtime or size changed, then updates the cache under the chain
+  lock. An unbound session with no root match exits after two small file
+  reads (§6.0).
+
+`dda doctor` checks hook registration, the interpreter path, approver
+key setup (§4.5), the active-workdir list, and that the heartbeat is
+live.
 
 ## 7. Human-owned definitions
 
@@ -563,9 +780,9 @@ An empty or wrong field fails G8 and is blocked by `footercheck`.
 | Variants: N tried (incl. spec versions), K reported, locked variant id; labels present | specs-tried, report text |
 | Definitions: pins `name@version#hash`, provisional flagged | registry |
 | Data: source alias, as-of, row count, snapshot hash or fingerprint per source; drift since snapshot | profile, verify |
-| Kernel: environment lock hash, seed, network policy, audit-hook status | kernel record |
+| Kernel: environment lock hash, seed, network policy (enforced or detect-only, per library), audit-hook and wrapper status | kernel record |
 | Reproduce: one `dda` command that regenerates outputs from the locked variant | variants/ |
-| Review: rounds run, by whom (self / goldfish session ids and models / human) | reviews/ |
+| Review: rounds run, by whom (self / goldfish request ids and models / human), approver fingerprints, config approval status | reviews/, approvals.index.jsonl |
 | Approvals: kinds present, verified or unverified | approvals/ |
 | Correction evals: matched, run, passed | verify.md |
 | Hook faults and chain status | heartbeat, verify-chain |
@@ -620,13 +837,63 @@ isolated environment always carries the full data stack (§10.1a).
     write-mode `open` on raw roots and snapshots;
   - refuses `socket.connect` to hosts not on the config allowlist;
   - logs subprocess spawns. Native extensions and subprocesses can
-    bypass Python audit hooks; this limit is disclosed, and spawns are at
-    least visible.
+    bypass Python audit hooks; spawns are at least visible.
+- The audit hook alone does **not** cover the mandated data stack:
+  duckdb, polars, and pyarrow open files and sockets in native code that
+  `sys.addaudithook` never sees. Those libraries are the main data path,
+  so they get their own controls (§10.1b).
 - On Windows this design has no OS-level read-only mount or firewall.
-  Read-only and network-off are enforced by the audit hook and `rawguard`,
-  and the footer reports `network policy: audit-enforced`.
+  Read-only and network-off are enforced by the audit hook, the native
+  lockdown and wrappers (§10.1b), and `rawguard`. The footer reports
+  `network policy: audit+wrapper-enforced` only when phase 0 and the
+  kernel start check both pass; otherwise it reports `network policy:
+  detect-only (runs.log/audit.log)` and names the unenforced path.
 - Pinned environment (uv lockfile); its hash goes in the footer.
 - Seeded randomness; the seed goes in the footer.
+
+### 10.1b Native data libraries: lockdown and reader wrappers
+
+The kernel bootstrap (`dda`'s kernel startup file, run before any user
+code) applies these and records each one in the kernel record. A step
+that fails stops the kernel, like a missing baseline package (§10.1a).
+
+- **duckdb.** The bootstrap replaces `duckdb.connect`, `duckdb.sql`,
+  `duckdb.query`, `duckdb.read_*`, and `duckdb.default_connection` with
+  versions that return a connection configured, in this order:
+  1. `SET allowed_directories = [<bound workdir's raw roots>, derived/,
+     outputs/]` (only when the lock is valid; otherwise only `derived/`
+     and `outputs/` of this workdir);
+  2. `SET autoinstall_known_extensions = false`,
+     `SET autoload_known_extensions = false` (no `httpfs`, no `INSTALL`);
+  3. `SET enable_external_access = false` (no other files, no network);
+  4. `SET lock_configuration = true` (user code cannot undo 1–3).
+
+  The wrapper also logs each statement's referenced paths to
+  `audit.log` as aliases, and refuses `COPY … TO`, `EXPORT DATABASE`, and
+  `ATTACH` whose target resolves under a raw root or snapshot (duckdb
+  cannot make one allowed directory read-only). Raw-root mutation that
+  slips past this is caught by the G7 snapshot re-check.
+- **polars and pyarrow.** The bootstrap wraps the readers and writers
+  that do their own I/O: `pl.read_*`, `pl.scan_*`, `DataFrame.write_*`,
+  `LazyFrame.sink_*`; `pyarrow.parquet.read_table`/`ParquetFile`/
+  `write_table`, `pyarrow.dataset.dataset`/`write_dataset`,
+  `pyarrow.csv.read_csv`/`open_csv`, `pyarrow.feather.*`, and the
+  `pyarrow.fs` remote filesystem constructors. Each wrapper resolves the
+  path, checks lock validity and root membership exactly like the audit
+  hook, logs to `audit.log`, refuses writes onto raw roots and snapshots,
+  and refuses remote URLs (`s3://`, `gs://`, `http(s)://`, `az://`)
+  whose host is not on the allowlist. pandas readers that route through
+  pyarrow (`read_parquet`, `read_feather`, `engine="pyarrow"`) are
+  covered by the same wrappers.
+- **Belt.** The kernel process starts with `HTTP_PROXY`/`HTTPS_PROXY`
+  pointing at a closed local port and `NO_PROXY` set to the allowlist,
+  which many native HTTP clients honour. This is defence in depth, not a
+  claim.
+- **Limits, disclosed.** A cooperative agent uses these paths; a
+  determined one can reach native I/O another way (ctypes, an unwrapped
+  library, a subprocess). Those paths are detect-only at best and are
+  listed in `threat-model.md`. Phase 0 tests every path named here; any
+  that escapes downgrades the footer to `detect-only` for that library.
 
 ### 10.1a Kernel environment: full data stack, always
 
@@ -650,8 +917,10 @@ non-conformant.
   kernel does not start: `dda run` stops and reports the failure. It
   never silently falls back to a reduced stack.
 - **Additions, not substitutions.** Projects may add packages (connector
-  drivers, domain libraries) via `config.yaml`; additions go through the
-  lockfile and change the environment hash. Baseline packages can be
+  drivers, domain libraries) via `.analysis/kernel.yaml`; additions go
+  through the lockfile and change the environment hash, not the config
+  hash (§4.5), so they never force a re-lock. A new library that does
+  native I/O is detect-only until it has a wrapper (§10.1b). Baseline packages can be
   version-bumped but not removed.
 - **Startup check.** At kernel start `dda run` imports every baseline
   package and records the resolved versions in the kernel record. A
@@ -660,10 +929,10 @@ non-conformant.
 - **Footer.** The environment hash already covers the full package set;
   the kernel record lists baseline versions so a reader can see the
   stack was complete.
-- **Security is unchanged.** The full stack runs under the same audit
-  hook, data-root guards, network allowlist, and display masking
-  (§10.1, §10.2). Network-capable libraries in the stack do not widen
-  network access; the allowlist still governs every `socket.connect`.
+- **Security.** The full stack runs under the same audit hook,
+  data-root guards, network allowlist, and display masking (§10.1,
+  §10.2), plus the native lockdown and wrappers (§10.1b), which exist
+  because the audit hook cannot see native I/O.
 
 ### 10.2 Output and PII
 
@@ -730,11 +999,11 @@ sibling: `skills/*/SKILL.md`, `plugins/disciplined-data-analysis/SKILL.md`,
 
 | Skill | Owns | Key rule |
 |---|---|---|
-| `disciplined-data-analysis` (orchestrator) | stage map, gates, friction contract, `dda start` | no data before lock; scripts check, agents don't grade themselves |
+| `disciplined-data-analysis` (orchestrator) | stage map, gates, friction contract, `dda start` / `dda release` | no data before lock; scripts check, agents don't grade themselves; hooks bite only bound sessions |
 | `intake` | stage 0 | question + decision in one sentence each |
 | `define` | stages 1–2, spec template, rung/tier, prior exposure | metrics by pin only; tier triggers apply |
 | `definitions` | registry lookup and proposals | agent never edits the registry |
-| `goldfish-review` | stages 3 and 7, packet, brief, recording | packet files only, read-only tools, templated brief |
+| `goldfish-review` | stages 3 and 7, packet, `dda review run`, recording | one-shot no-tools call, packet inlined, templated brief, every call recorded |
 | `lock` | stage 4, hash, ledger, amendments, `dda meta` | post-data locks are labelled post-data |
 | `profile` | stage 5, snapshot or fingerprint | aggregates only; mismatch becomes amendment |
 | `analyze` | stage 6, kernel use, variant scripts, ledger, ponytail economy | every data run carries a variant id |
@@ -761,22 +1030,24 @@ References: `economy-tier-ladder.md`, `review-rounds.md`,
 
 | Rule | Prevent (hook/kernel) | Detect (gate; S unless noted) | Disclose (footer) |
 |---|---|---|---|
-| No data before lock | `lockguard` (all tools), kernel audit hook | G4 scan of `runs.log` and audit log | lock label, prior exposure |
+| No data before lock | `lockguard` (all tools, bound sessions), kernel audit hook, native lockdown and wrappers (§10.1b) | G4 scan of `runs.log`, `audit.log`, unbound-access log | lock label, prior exposure |
 | Spec edits after lock are amendments | `lockguard` hash match, `driftnudge` | G4 recompute, lock commits | amendment and post-data counts |
 | Evidence not edited | `evidenceguard` | chain verify against mirrored heads | chain status |
-| Config not edited to dodge rules | `evidenceguard` | config hash in lock | via lock hash |
+| Config not edited to dodge rules | `evidenceguard` | config hash in lock; G4 config approval through the approver chain | config approval status, approver fingerprints |
 | All variants logged | `runlog`, kernel-only data path | G6 orphan-run check | N tried / K reported |
 | Definitions human-owned | `defguard` | content-hash pins at G1/G4/G8; G7 round 4 (G) | pins, provisional flag |
-| Raw data immutable | `rawguard`, audit hook | G7 snapshot re-check | snapshot hashes |
-| Approvals genuine | `lockguard` and `evidenceguard` on signing and `approvals/` | `dda approved` signature check | verified / unverified |
+| Raw data immutable | `rawguard`, audit hook, duckdb/polars/pyarrow write refusals | G7 snapshot re-check | snapshot hashes |
+| Approvals genuine | `lockguard` and `evidenceguard` on signing and `approvals/`; `dda doctor` key checks downgrade on failure | `dda approved` signature, approver chain, reachability | verified / unverified |
 | Tier honest | G2 triggers | human tier approval (H) | tier confirmed by |
-| Goldfish isolated | read-only packet tools, templated brief | recorded from session state with packet and brief hashes | goldfish session ids, models |
+| Goldfish isolated | one-shot call with no tools, packet inlined, templated brief built by `dda` | every call recorded with request, packet, and brief hashes; G3/G7 count all calls | goldfish request ids, models |
 | Reports carry true provenance | `footercheck` (reports, `answer.md`, publish channels) | G8 value recompute | the footer itself |
 | Review depth matches risk | — | G3/G7 round records vs tier table | review field |
 | Corrections not repeated | — | mechanical match + G7 replay | eval counts |
 | Reproducible | kernel pinning, saved variant scripts | G7 fresh-kernel replay within tolerance | env hash, seed, reproduce command, drift |
 | No data or secrets in git | `.gitignore`, blob scrubber | `dda gitcheck` at lock and G9 | — |
-| Hooks actually ran | — | heartbeat vs session tool-call count; audit-log cross-check | hook faults |
+| Hooks actually ran | absolute-path interpreter, fail-closed entry point | heartbeat vs session tool-call count; audit-log cross-check; unmerged spill files | hook faults |
+| Evidence chains intact under concurrency | locked appender (§4.4) | `dda verify-chain` | chain status |
+| Brad's other sessions unaffected | hooks no-op for unbound sessions; `dda release` at G9 | unbound-access log feeds G4 | post-data (unbound access) label |
 
 Bypass handling: any gate that passes despite a detected hook fault is
 recorded `pass (hook fault: <name>)` and appears as a footer caveat. An
@@ -796,21 +1067,44 @@ hook false-positive blocks left unfixed.
    `terminal`, `execute_code`, `read_file`, `search_files`, `web_extract`,
    `tool_call`, the browser, a kernel variable path, and a `config.yaml`
    edit; editing `runs.log` and `spec.lock`; forging an approval file and
-   an unsigned approval commit; a goldfish subagent reaching chat history
-   or data. It also checks whether hooks fire in subagent sessions and
-   whether `tool_call` exposes the inner tool name to hooks. Each outcome
-   is recorded as prevented, detected, or missed. Every miss gets a
+   an unsigned approval commit; an approval signed through a cached
+   `gpg-agent` passphrase, a loaded `ssh-agent` key, and global
+   `commit.gpgsign=true`; a config edit that adds an approver key. It
+   also checks whether hooks fire in subagent sessions, whether
+   `tool_call` exposes the inner tool name to hooks, and whether the
+   payload carries parent-session or compression lineage. Added for
+   v0.3:
+   - **Native I/O:** `pd.read_parquet`, `pl.read_csv`, `pl.scan_parquet`,
+     `pyarrow.dataset`, `duckdb.sql("select * from 'raw.csv'")`, duckdb
+     `COPY TO` onto a raw root, duckdb `INSTALL httpfs` and a remote read,
+     each before and after lock (§10.1b).
+   - **Concurrency:** 50 batched tool calls plus a kernel writing
+     `audit.log` at the same time; `dda verify-chain` must pass with no
+     forked `prev`, no duplicate `seq`, and no lost spill file (§4.4).
+   - **Hook runtime:** hook latency per call (target < 300 ms), a missing
+     interpreter path, and an exception inside a blocking hook (§6.9).
+   - **Scope:** an unbound session reading GA/WordPress stats, writing a
+     vault note, and running `bt-post-publisher` while a workdir is
+     active: zero blocks, unbound-access lines written; the same after
+     `dda release`: zero lines (§6.0).
+   - **Goldfish:** `dda review run` request has an empty tool list and
+     no context beyond the packet; re-roll attempts are all counted.
+   Each outcome is recorded as prevented, detected, or missed. Every miss gets a
    mechanism or becomes a documented caveat in `threat-model.md`.
-1. Orchestrator, templates, config, and `dda start` (session binding).
-2. `lock`, `runlog` with heartbeat, `lockguard`, `evidenceguard`, and
-   hash chains (gap 1 first).
-3. Kernel runner with audit hook, `dda meta`, variants, specs-tried
-   ledger, and the orphan check.
-4. Approvals (`dda approve` / `dda approved`, signing setup in
-   `dda doctor`).
+1. Orchestrator, templates, config, `dda install` (plugin venv, absolute
+   hook paths), the Python hook entry point, `dda start` / `dda release`
+   (session binding and scoping).
+2. `lock`, the locked chain appender, `runlog` with heartbeat,
+   `lockguard`, `evidenceguard` with its writer table, and the lock-state
+   cache (gap 1 first).
+3. Kernel runner with audit hook, native lockdown and reader wrappers,
+   `dda meta`, variants with freeze-on-first-run, specs-tried ledger, and
+   the orphan check.
+4. Approvals (`dda approve` / `dda approved`, approver chain, config
+   approval at G4, key checks in `dda doctor`).
 5. `footercheck`, `dda footer --check`, `report`, and `dda gitcheck`.
 6. `definitions`, `defguard`, and content-hashed pins.
-7. `goldfish-review` (packet, toolset, recording).
+7. `goldfish-review` (packet, `dda review run` one-shot call, recording).
 8. `verify` (snapshots, fingerprints, replay, drift).
 9. `correct` and evals.
 
@@ -835,13 +1129,17 @@ hook false-positive blocks left unfixed.
 5. **Glance-rung lock: DECIDED 2026-10-27 — always lock, even glances.**
    To offset the friction, a DECIDE glance uses the reduced review row
    (§5.3).
-6. **Goldfish execution: DECIDED 2026-10-27 — temp subagent.** Revised
-   after review: read-only packet tools, templated brief, output recorded
-   from session state (§5.0), instead of full tool access. **Needs Brad's
-   confirmation of the revision.**
-7. **Approval mechanism: OPEN.** Proposed: signed git commits with a key
-   that needs a passphrase on each use (§4.5). Brad either sets up a key
-   or accepts that approvals are recorded as unverified.
+6. **Goldfish execution: REVISED 2026-10-27 — one-shot no-tools call.**
+   The temp-subagent decision cannot be built: `delegate_task` gives
+   children the parent's tools (re-review deleg_37619031, blocker 1).
+   The goldfish is now a single provider request made by `dda`, with the
+   packet inlined and no tools (§5.0). It keeps the intent of the
+   original decision (a fresh, context-free reviewer) without the tool
+   surface. **Needs Brad's confirmation.**
+7. **Approval mechanism: OPEN.** Proposed: signed git commits through an
+   approver chain, with an `ed25519-sk` touch key (preferred) or a GPG
+   key with signing cache disabled (§4.5). Without a key, DECIDE runs
+   with disclosed unverified approvals and PUBLISH parks.
 8. **Second-goldfish model: OPEN.** Which second model or provider gives
    PUBLISH-tier independence (§5.0).
 
@@ -872,3 +1170,32 @@ hook false-positive blocks left unfixed.
 | 21 | Concurrency and scope undefined | Session binding, per-workdir locks, milestone directories (§6.0, §12) |
 | 22 | Credentials in logs | Aliases only, scrubbed blobs, vault/env references (§10.4) |
 | Low | Stale text | Decision 1 marked decided; stale §7/§10 cross-references removed; decision 3 cleaned up; EXPLORE rounds named; principle headings fixed |
+
+## Appendix B. Blind re-review (deleg_37619031) → changes
+
+The re-review found 8 blockers. All are addressed below. Its partial-fix
+and smaller items are not all addressed in v0.3; the ones folded in are
+noted.
+
+| # | Blocker | Resolution |
+|---|---|---|
+| 1 | `delegate_task` cannot restrict subagent tools, so the goldfish inherits terminal, web, `tool_call`, chat history, RAG; packet scoping and brief hash unenforced | Goldfish is a one-shot provider call by `dda review run` with no tools and the packet inlined; brief hash is of the bytes sent; every call recorded and counted (closes "goldfish shopping"); packets committed, not in scratch (§1, §5.0, decision 6) |
+| 2 | duckdb, polars, pyarrow do native I/O the audit hook never sees; `audit-enforced` footer would be false | Kernel bootstrap: duckdb `allowed_directories`, extension autoinstall/autoload off, `enable_external_access=false`, `lock_configuration=true`, COPY/EXPORT/ATTACH refusals; polars/pyarrow reader and writer wrappers; footer downgrades to `detect-only` for any path that escapes phase 0 (§10.1, §10.1b, §14) |
+| 3 | `evidenceguard` blocks variants, `answer.md`, `profile.md`, `verify.md`, self reviews | Writer table: every `.analysis/` path has one named writer; agent paths are `spec.md`, `wayfinder.md`, variants until first run, `answer.md`, `reviews/self/`, `notes/`; `profile.md`/`verify.md` written by `dda` (§4, §4.3, §6.2) |
+| 4 | Approver keys and config hash sit in a hook-guarded file; no gate needs a config approval | G4 needs a `config` approval for the exact config hash; approver chain (TOFU root, later key changes signed by a previous key); fingerprints in every footer; kernel packages moved to `kernel.yaml` outside the config hash (§3, §4.5, §10.1a) |
+| 5 | `gpg-agent` cache, Windows `ssh-agent`, global `commit.gpgsign`, contradictory approvals format, unverified at PUBLISH unspecified | Doctor key checks downgrade approvals (fail, not warn); `ed25519-sk` preferred; `dda` commits with signing forced off; `lockguard` blocks `-c commit.gpgsign=true`; per-approval files plus a chained index; unverified ok at DECIDE with disclosure, never at PUBLISH (§4.4, §4.5, §3.2) |
+| 6 | Hooks can't be dependency-free shell; interpreter unnamed; `python3` missing here; 5 s timeout | Python hooks in one entry point, absolute interpreter path into the plugin's own uv venv, fail-closed catch-all for bound sessions, lock-state cache keyed on mtime/size, 300 ms target (§6.9) |
+| 7 | Concurrent hooks and the kernel fork the hash chain | One locked appender (`msvcrt.locking`/`flock`), `seq` assigned under the lock, spill files on timeout merged by `dda`, kernel writes a separate `audit.log`; phase 0 concurrency test (§4.4, §14) |
+| 8 | Profile-wide hooks block Brad's everyday sessions; no workdir release; vault matcher too broad | Hooks no-op for unbound sessions; unbound reads of active roots logged and labelled post-data at G4 (also catches workdir hopping); `dda release` at G9; `footercheck` matches publish calls only when they carry the bound workdir's report; rebinding logged (§6.0, §6.5, §3) |
+
+Folded in from the partial/smaller lists: goldfish shopping (#4),
+workdir hopping and rebinding (#6/9), publish-channel tier check (#7),
+variant body-hash freeze (#18), stop-and-ask additions for unverified
+PUBLISH approvals (#16), config-hash churn from kernel packages, heads
+mirror overclaim, wayfinder gate lines recomputed, packet pruning.
+Still open from the re-review: definition pins tied to signed approval
+hashes (#11), as-of-bounded replay and float/row-order tolerance (#12),
+connector `tool_call` variant ids and masking (#15, #18), PII scrubbing
+of blobs, history-rewrite blocking before push, tier triggers that rely
+on agent-written fields (#7), `dda meta` for URL roots, and the §3.1
+hash wording.
