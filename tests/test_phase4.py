@@ -187,6 +187,44 @@ class HumanOnlyTests(Base):
                 b, _ = self.blocked(h, "terminal", {"command": cmd}, session="h-2")
                 self.assertFalse(b, f"{h} blocked {cmd!r}")
 
+    def test_shell_wrapper_release_blocked(self):
+        self.bind("h-4")
+        cmds = [
+            'bash -c "dda release WD"',
+            "bash -c 'dda abandon WD --reason x'",
+            "sh -c 'dda release WD'",
+            "cmd /c dda release WD",
+            "cmd.exe /c dda abandon WD --reason x",
+            'powershell -Command "dda release WD"',
+            'powershell -NoProfile -Command "dda abandon WD --reason x"',
+            'pwsh -c "dda release WD"',
+            "sudo bash -c 'dda release WD'",
+            "dda status && dda release WD",
+            "dda status; dda abandon WD --reason x",
+            "dda status | cat; dda release WD",
+            "(dda release WD)",
+            "$(echo dda) release WD",
+            "`echo dda` abandon WD --reason x",
+            'bash -c "dda status && dda release WD"',
+            'powershell -Command "dda status; dda abandon WD --reason x"',
+        ]
+        for raw in cmds:
+            cmd = raw.replace("WD", str(self.wd.root))
+            for h in ("lockguard", "evidenceguard", "rawguard", "defguard", "footercheck"):
+                b, msg = self.blocked(h, "terminal", {"command": cmd}, session="h-4")
+                self.assertTrue(b, f"{h} missed {cmd!r}")
+                self.assertIn("human-only", msg)
+
+    def test_shell_wrapper_status_still_allowed(self):
+        self.bind("h-5")
+        for cmd in ('bash -c "dda status"',
+                    "cmd /c dda status",
+                    '(dda status)',
+                    'echo "ask Brad to run dda release"'):
+            for h in ("lockguard", "evidenceguard", "rawguard", "defguard", "footercheck"):
+                b, _ = self.blocked(h, "terminal", {"command": cmd}, session="h-5")
+                self.assertFalse(b, f"{h} blocked {cmd!r}")
+
     def test_execute_code_subprocess_list_still_blocked(self):
         self.bind("h-3")
         b, msg = self.blocked(

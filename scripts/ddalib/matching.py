@@ -365,6 +365,16 @@ _DDA_NAMES = frozenset({"dda", "dda.cmd", "dda.bat", "dda.exe"})
 _PYTHON_RE = re.compile(r"^(python(3(\.\d+)?)?|py)(\.exe)?$")
 _HUMAN_ONLY_SUBS = frozenset({"release", "abandon"})
 
+# Shell wrappers whose `-c` / `-Command` string argument must be re-parsed
+# as its own command line (§0.1: hooks stop slips, not determined evasion).
+_SHELL_BASES = frozenset({
+    "bash", "bash.exe", "sh", "sh.exe", "dash", "zsh", "fish", "ksh",
+    "cmd", "cmd.exe", "powershell", "powershell.exe", "pwsh", "pwsh.exe",
+})
+_WRAPPER_FLAGS = frozenset({
+    "-c", "/c", "/k", "-k", "-command", "/command",
+})
+
 
 def _dda_base(tok: str) -> str:
     return re.split(r"[\\/]", tok.strip("'\""))[-1].lower()
@@ -405,6 +415,173 @@ def _argv_tokens(text: str) -> list[str]:
         return []
 
 
+def _split_unquoted(text: str) -> list[str]:
+    """Split on unquoted shell separators: `;`, `&&`, `||`, `|`, `&`,
+    newlines, and parens. Quotes (single/double) are respected; the
+    separators themselves are discarded."""
+    parts: list[str] = []
+    buf: list[str] = []
+    quote: str | None = None
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        if quote:
+            buf.append(c)
+            if c == quote:
+                quote = None
+        elif c in ("'", '"'):
+            quote = c
+            buf.append(c)
+        elif c in (";", "\n", "\r", "(", ")"):
+            parts.append("".join(buf))
+            buf = []
+        elif c == "&" or c == "|":
+            parts.append("".join(buf))
+            buf = []
+            while i + 1 < n and text[i + 1] == c:
+                i += 1
+        else:
+            buf.append(c)
+        i += 1
+    parts.append("".join(buf))
+    return parts
+
+
+def _substitute_expansions(text: str) -> list[str]:
+    """Variants of `text` with `$(...)` / backtick / `(...)` groups replaced
+    by their inner content, plus the inner contents themselves.
+
+    Catches `$(echo dda) release` (expands to `dda release`) and
+    `(dda release)` without trying to emulate a real shell.
+    """
+    out: list[str] = []
+    quote: str | None = None
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        if quote:
+            if c == quote:
+                quote = None
+            i += 1
+            continue
+        if c in ("'", '"'):
+            quote = c
+            i += 1
+            continue
+        if c == "$" and i + 1 < n and text[i + 1] == "(":
+            depth = 0
+            j = i + 1
+            while j < n:
+                if text[j] == "(":
+                    depth += 1
+                elif text[j] == ")":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                j += 1
+            if j < n:
+                inner = text[i + 2:j]
+                out.append(inner)
+                out.append(text[:i] + inner + text[j + 1:])
+            i = j + 1 if j < n else n
+            continue
+        if c == "`":
+            j = text.find("`", i + 1)
+            if j > i:
+                inner = text[i + 1:j]
+                out.append(inner)
+                out.append(text[:i] + inner + text[j + 1:])
+                i = j + 1
+                continue
+            i += 1
+            continue
+        if c == "(":
+            depth = 0
+            j = i
+            while j < n:
+                if text[j] == "(":
+                    depth += 1
+                elif text[j] == ")":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                j += 1
+            if j < n:
+                inner = text[i + 1:j]
+                out.append(inner)
+                out.append(text[:i] + inner + text[j + 1:])
+            i = j + 1 if j < n else n
+            continue
+        i += 1
+    return out
+
+
+def _wrapper_inners(tokens: list[str]) -> list[str]:
+    """Inner command strings passed via shell `-c` / `/c` / `-Command`.
+
+    `bash -c "dda release"` lexes as `['bash', '-c', 'dda release']` — no
+    bare `dda` argv — so the string argument after the flag is re-parsed
+    as its own command line. An unquoted tail (`cmd /c dda release`)
+    joins the remaining tokens. `VAR=x` assignments and `sudo`/`env`
+    prefixes before the shell are skipped.
+    """
+    inners: list[str] = []
+    start = 0
+    while start < len(tokens) and (
+            tokens[start].lower() in ("sudo", "env")
+            or ("=" in tokens[start] and not tokens[start].startswith("-"))):
+        start += 1
+    for i in range(start, len(tokens)):
+        if _dda_base(tokens[i]) in _SHELL_BASES and i + 1 < len(tokens):
+            # Skip pass-through flags (`powershell -NoProfile -Command ...`,
+            # `bash -x -c ...`): the first `-c`/`/c`/`-Command` after the
+            # shell owns the rest of the line as its command string.
+            for j in range(i + 1, len(tokens)):
+                flag = tokens[j].strip("'\"").lower()
+                if flag in _WRAPPER_FLAGS and j + 1 < len(tokens):
+                    if len(tokens) == j + 2:
+                        inners.append(tokens[j + 1])
+                    else:
+                        inners.append(" ".join(tokens[j + 1:]))
+                    break
+                if not flag.startswith(("-", "/")) and j > i + 1:
+                    break
+        flag = tokens[i].strip("'\"")
+        low = flag.lower()
+        if low.startswith("-command=") or low.startswith("/command="):
+            _, _, val = flag.partition("=")
+            if val:
+                inners.append(val)
+    return inners
+
+
+def _expand_shell_texts(text: str, limit: int = 24) -> list[str]:
+    """All command-line candidates hidden inside one shell text: segments
+    split on unquoted separators, `$(...)`/backtick/paren expansions,
+    and `-c`/`-Command` wrapper arguments — expanded to fixpoint."""
+    seen: set[str] = {text}
+    queue = [text]
+    while queue and len(seen) < limit:
+        cur = queue.pop(0)
+        for seg in _split_unquoted(cur):
+            if seg not in seen and len(seen) < limit:
+                seen.add(seg)
+                queue.append(seg)
+        for variant in _substitute_expansions(cur):
+            if variant not in seen and len(seen) < limit:
+                seen.add(variant)
+                queue.append(variant)
+        try:
+            toks = [t.strip("'\"") for t in shlex.split(cur, posix=False)]
+        except ValueError:
+            continue
+        for inner in _wrapper_inners(toks):
+            if inner not in seen and len(seen) < limit:
+                seen.add(inner)
+                queue.append(inner)
+    return list(seen)
+
+
 def _word_tokens(text: str) -> list[str]:
     # Backstop for non-shell texts (execute_code python API, JSON leaves):
     # `subprocess.call(["dda", "release"])` never survives shlex as argv.
@@ -418,6 +595,9 @@ def human_only_violation(view: ToolView) -> str | None:
     `dda "release"` (quoted subcommand) and `dda status && dda release`
     (chained) both hit; `dda lock --amend "release notes"` does not (only
     the subcommand-position word after `dda` counts, not a later flag value).
+    Shell wrappers are re-parsed: `-c`/`-Command` string arguments
+    (`bash -c`, `cmd /c`, `powershell -Command`), unquoted `;`/`&&`/`|`
+    separators, parens, and `$(...)`/backtick expansions.
 
     The word-token backstop (for non-shell texts such as
     `subprocess.call(["dda", "release"])`, which never survives shlex as
@@ -432,7 +612,8 @@ def human_only_violation(view: ToolView) -> str | None:
     if len(texts) > 1:
         texts.append(" ".join(texts))
     for text in texts:
-        token_lists = [_argv_tokens(text)]
+        candidates = [text] if view.tool == "execute_code" else _expand_shell_texts(text)
+        token_lists = [_argv_tokens(c) for c in candidates]
         if view.tool == "execute_code":
             token_lists.append(_word_tokens(text))
         for toks in token_lists:

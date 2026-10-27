@@ -181,7 +181,16 @@ class Harness:
         # be blocked from laundering reads through release. The human runs it in
         # their own terminal, where no hook fires.
         for cid, cmd in (("block.dda-release-agent", f"python {DDA.as_posix()} release {self.wd}"),
-                         ("block.dda-abandon-agent", f"python {DDA.as_posix()} abandon {self.wd} --reason x")):
+                         ("block.dda-abandon-agent", f"python {DDA.as_posix()} abandon {self.wd} --reason x"),
+                         ("human-only.bash-c-release", f"bash -c 'dda release {self.wd}'"),
+                         ("human-only.bash-c-abandon", f"bash -c 'dda abandon {self.wd} --reason x'"),
+                         ("human-only.cmd-c-release", f"cmd /c dda release {self.wd}"),
+                         ("human-only.powershell-command", f"powershell -Command \"dda release {self.wd}\""),
+                         ("human-only.chain-release", f"dda status && dda release {self.wd}"),
+                         ("human-only.semicolon-release", f"dda status; dda abandon {self.wd} --reason x"),
+                         ("human-only.paren-release", f"(dda release {self.wd})"),
+                         ("human-only.subst-release", f"$(echo dda) release {self.wd}"),
+                         ("human-only.wrapper-chain", f"bash -c 'dda status && dda release {self.wd}'")):
             blocked, res = self.all_blocking(BOUND, "terminal", {"command": cmd})
             by = [h for h, r in res.items() if r["blocked"]]
             self.record(cid, "bound pre-lock", cmd,
