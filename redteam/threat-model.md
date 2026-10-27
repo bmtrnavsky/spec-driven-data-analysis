@@ -7,6 +7,36 @@ removed when the harness shows the case as prevented or detected.
 
 ## Missed today
 
+- **human-only.obfuscated-invocations** — the argv parser sees through
+  quoting, chaining (`&&`, `;`), `cmd /c`, `bash -c`, `powershell -c`,
+  `uv run`, and the `py` launcher, but shell-level obfuscation still gets
+  through: quote-spliced `d''da release`, variable indirection
+  (`x=dda; $x release`), and `python -c "...cli.main(['release', ...])"`
+  (the release hides inside a `-c` string, not argv). Same §0.1 limit as
+  obfuscated paths: hooks stop slips, a runtime-built command is caught
+  only if it resolves to a blocked tool call at the kernel hook.
+- **human-only.in-process-api** — `execute_code` that calls the Python API
+  directly (`binding.release(...)`, `ddalib.cli.main(["release", ...])`)
+  instead of a `dda` CLI invocation is not flagged: there is no `dda`
+  argv to parse, and the word-token backstop only fires on a `dda`
+  token. The CLI path is the enforced path; in-process calls from agent
+  code are a code-review finding, not a hook finding.
+- **human-only.word-token-backstop scope** — the word-token pass runs for
+  `execute_code` only. On `terminal` it false-positived on prose that
+  merely mentions the command (`git commit -m "prep for dda release"`,
+  `echo "ask Brad to run dda release"`); the argv parse is authoritative
+  there. Cost: a `terminal` command that embeds a second `dda release`
+  inside a single non-argv word (e.g. inside a quoted blob passed to
+  another program) is missed — accepted, that shape is evasion (§0.1),
+  not a slip.
+- **blocked-fallback.heuristics** — `extra.status` is authoritative when
+  present (`blocked` ⟺ blocked; `error`/`ok` ⟹ ran). Without it (older
+  or synthetic payloads) the result-body/error-text fallbacks apply, and
+  those are heuristic: a body error naming a block word counts as
+  blocked. A deleted released workdir likewise drops out of exposure
+  (its runs.log is gone) and reads pre-data — destroying evidence is a
+  human action outside the hook threat model.
+
 - **platform.subagent-binding** — A bound session can `delegate_task` a
   data read to a subagent and the subagent's tool calls are not blocked.
   Hooks do fire in children (the plugin manager is process-global), but

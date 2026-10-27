@@ -452,6 +452,7 @@ def write_blob(wd: Workdir, text: str) -> tuple[str, str]:
 
 
 _BLOCKED_EXACT = ("block", "blocked")
+_BLOCK_WORD_RE = re.compile(r"\bblock(?:ed|ing)?\b")
 
 
 def _status_is_blocked(v) -> bool:
@@ -481,7 +482,7 @@ def _result_body_blocked(res) -> bool:
         if _status_is_blocked(res.get(key)):
             return True
     err = res.get("error")
-    return isinstance(err, str) and "block" in err.lower()
+    return isinstance(err, str) and bool(_BLOCK_WORD_RE.search(err.lower()))
 
 
 def _was_blocked(payload: dict) -> bool:
@@ -493,15 +494,23 @@ def _was_blocked(payload: dict) -> bool:
     `{"error": msg}`. Older/synthetic payloads may carry top-level
     `blocked: true` or a dict result body — those still count. A blocked
     call is logged kind=blocked and exposure ignores it.
+
+    `extra.status` is authoritative when present: a tool that ran and
+    reported `status == "error"` (e.g. `BlockingIOError`, or user code that
+    raised on the word "blocked") is a tool error, not a blocked call, even
+    if the error text contains a block-like word. Only when `extra` carries
+    no status do the result-body / error-text fallbacks apply.
     """
     if not isinstance(payload, dict):
         return False
     if payload.get("blocked") is True:
         return True
+    extra = payload.get("extra")
+    if isinstance(extra, dict) and "status" in extra:
+        return _status_is_blocked(extra.get("status"))
     for key in ("decision", "hook_decision", "hook_action", "outcome", "status", "action"):
         if _status_is_blocked(payload.get(key)):
             return True
-    extra = payload.get("extra")
     if isinstance(extra, dict):
         if extra.get("blocked") is True:
             return True
@@ -515,7 +524,8 @@ def _was_blocked(payload: dict) -> bool:
         if _result_body_blocked(payload.get(rkey)):
             return True
     err = payload.get("error")
-    return isinstance(err, str) and "block" in err.lower() and "dda" in err.lower()
+    return (isinstance(err, str) and "dda" in err.lower()
+            and bool(_BLOCK_WORD_RE.search(err.lower())))
 
 
 def runlog(ctx: Ctx) -> tuple[dict, int]:

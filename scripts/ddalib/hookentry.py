@@ -29,7 +29,7 @@ def _implemented() -> dict[str, Any]:
 IMPLEMENTED: dict[str, Any] = _implemented()
 
 _DDA_NAMES = frozenset({"dda", "dda.cmd", "dda.bat", "dda.exe"})
-_PYTHON_RE = re.compile(r"^python(3(\.\d+)?)?(\.exe)?$")
+_PYTHON_RE = re.compile(r"^(python(3(\.\d+)?)?|py)(\.exe)?$")
 _SHELL_META_RE = re.compile(r"[;&|`<>\n\r]|\$\(")
 
 

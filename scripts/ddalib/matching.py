@@ -362,7 +362,7 @@ def signing_violation(view: ToolView) -> str | None:
 
 # Keep in sync with hookentry.is_clean_dda_invocation's argv parsing.
 _DDA_NAMES = frozenset({"dda", "dda.cmd", "dda.bat", "dda.exe"})
-_PYTHON_RE = re.compile(r"^python(3(\.\d+)?)?(\.exe)?$")
+_PYTHON_RE = re.compile(r"^(python(3(\.\d+)?)?|py)(\.exe)?$")
 _HUMAN_ONLY_SUBS = frozenset({"release", "abandon"})
 
 
@@ -418,6 +418,13 @@ def human_only_violation(view: ToolView) -> str | None:
     `dda "release"` (quoted subcommand) and `dda status && dda release`
     (chained) both hit; `dda lock --amend "release notes"` does not (only
     the subcommand-position word after `dda` counts, not a later flag value).
+
+    The word-token backstop (for non-shell texts such as
+    `subprocess.call(["dda", "release"])`, which never survives shlex as
+    argv) applies to `execute_code` only. Applied to `terminal` it
+    false-positives on prose that merely mentions the command
+    (`git commit -m "prep for dda release"`, `echo "ask Brad to run dda
+    release"`), where the argv parse correctly finds no `dda` invocation.
     """
     if view.tool not in CODE_TOOLS:
         return None
@@ -425,7 +432,10 @@ def human_only_violation(view: ToolView) -> str | None:
     if len(texts) > 1:
         texts.append(" ".join(texts))
     for text in texts:
-        for toks in (_argv_tokens(text), _word_tokens(text)):
+        token_lists = [_argv_tokens(text)]
+        if view.tool == "execute_code":
+            token_lists.append(_word_tokens(text))
+        for toks in token_lists:
             for nxt in _dda_next_words(toks):
                 if nxt in _HUMAN_ONLY_SUBS:
                     return nxt
