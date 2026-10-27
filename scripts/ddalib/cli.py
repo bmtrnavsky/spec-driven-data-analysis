@@ -1,6 +1,7 @@
-"""`dda` command-line interface (phase 1 skeleton).
+"""`dda` command-line interface.
 
-Implemented: init, status, start, release, hash, install, version.
+Implemented: init, status, start, release, hash, install, version (phase 1);
+lock, verify-chain, gate (G4), footer, abandon (phase 2).
 Everything else in the spec's command set is registered but fails closed
 (exit 3, "not implemented in this build") so a script or gate that calls
 it can never mistake a missing feature for a pass.
@@ -15,17 +16,19 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import __version__, binding, lockhash
+from . import __version__, binding, chain, footer, ledger, lockhash, lockstate
 from .layout import LAYOUT_DIRS, LAYOUT_FILES, REPO_ROOT, TEMPLATES_DIR, DdaError, Workdir, dda_home
 
 EXIT_NOT_IMPLEMENTED = 3
 
 # Spec commands not yet built, with the build phase that delivers them (§14).
 PENDING = {
-    "lock": 2, "verify-chain": 2, "gate": 2, "meta": 3, "run": 3, "variant": 3, "approve": 4,
-    "approved": 4, "doctor": 4, "footer": 5, "gitcheck": 5, "evals": 9, "packet": 7,
-    "review": 7, "profile": 8, "verify": 8, "abandon": 2,
+    "meta": 3, "run": 3, "variant": 3, "approve": 4,
+    "approved": 4, "doctor": 4, "gitcheck": 5, "evals": 9, "packet": 7,
+    "review": 7, "profile": 8, "verify": 8,
 }
+# Gates and the phase that builds each one's checks (§3, §14). G4 is built in phase 2.
+GATE_PHASE = {"G0": 5, "G1": 6, "G2": 4, "G3": 7, "G5": 8, "G6": 3, "G7": 8, "G8": 5, "G9": 5}
 
 BLOCKING_HOOKS = ("lockguard", "evidenceguard", "rawguard", "defguard", "footercheck")
 
@@ -142,6 +145,81 @@ def cmd_install(args) -> int:
     return 0
 
 
+def cmd_lock(args) -> int:
+    wd = _wd(args)
+    lock = ledger.do_lock(wd, amend=args.amend)
+    if lock.get("noop"):
+        print(f"spec unchanged: lock v{lock['version']} {lock['lock_hash'][:12]} already current ({lock['label']})")
+        return 0
+    kind = "amendment" if args.amend else "lock"
+    print(f"{kind} v{lock['version']} {lock['lock_hash'][:12]} — {lock['label']}")
+    exp = {k: len(v) for k, v in lock["exposure"].items() if v}
+    if exp:
+        print(f"  prior data reads found: {json.dumps(exp, sort_keys=True)}")
+    print(f"  committed {lock['commit'][:12]}")
+    return 0
+
+
+def cmd_verify_chain(args) -> int:
+    wd = _wd(args)
+    wd.require_initialized()
+    problems, merged = ledger.verify_all(wd, merge=not args.no_merge)
+    out = {"ok": not problems, "problems": problems, "merged_spills": merged,
+           "chains": [str(p) for p in ledger.workdir_chains(wd) + [ledger.unbound_log()] if p.exists()]}
+    if args.json:
+        print(json.dumps(out, indent=2))
+    else:
+        if merged:
+            print(f"merged {merged} spill file(s)")
+        for p in problems:
+            print(f"FAIL {p}")
+        print("chains: ok" if not problems else "chains: FAILED — stop and ask (§3.2 case 8)")
+    return 0 if not problems else ledger.EXIT_CHAIN
+
+
+def cmd_gate(args) -> int:
+    wd = _wd(args)
+    g = args.gate.upper()
+    if g == "G4":
+        passed, reason, _ = ledger.gate_g4(wd)
+        ledger.write_wayfinder(wd, g, passed, reason)
+        print(f"{g}: {'pass' if passed else 'fail'} — {reason}")
+        return 0 if passed else 1
+    if g in GATE_PHASE:
+        print(f"dda gate {g}: not implemented in this build (arrives in build phase {GATE_PHASE[g]}, SPEC §14). "
+              "Failing closed.", file=sys.stderr)
+        return EXIT_NOT_IMPLEMENTED
+    raise DdaError(f"unknown gate {args.gate!r} (G0-G9)")
+
+
+def cmd_footer(args) -> int:
+    wd = _wd(args)
+    wd.require_initialized()
+    if args.check:
+        path = Path(args.check)
+        text = path.read_text(encoding="utf-8")
+        short = args.short or footer.is_short_target(path.resolve())
+        problems = footer.check(wd, text, short=short)
+        for p in problems:
+            print(f"FAIL {p}")
+        print("footer: ok" if not problems else "footer: FAILED")
+        return 0 if not problems else 1
+    sk = footer.skeleton(wd, short=args.short)
+    if not sk:
+        raise DdaError("no lock yet; run `dda lock` first")
+    sys.stdout.write(sk)
+    return 0
+
+
+def cmd_abandon(args) -> int:
+    wd = _wd(args)
+    wd.require_initialized()
+    chain.append(ledger.ledger_path(wd), {"type": "abandon", "reason": args.reason})
+    released = binding.release(wd)
+    print(f"abandoned {wd.root}: {len(released)} session(s) unbound; workdir inactive")
+    return 0
+
+
 def cmd_version(args) -> int:
     print(f"dda {__version__}")
     return 0
@@ -188,6 +266,38 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--venv", action="store_true", help="create <plugin>/.venv with uv first")
     s.add_argument("--print", action="store_true", help="print only (default)")
     s.set_defaults(func=cmd_install)
+
+    s = sub.add_parser("lock", help="lock the spec (git commit + ledger entry)")
+    s.add_argument("workdir", nargs="?")
+    s.add_argument("--milestone")
+    s.add_argument("--amend", metavar="REASON", help="re-lock a changed spec as an amendment")
+    s.set_defaults(func=cmd_lock)
+
+    s = sub.add_parser("verify-chain", help="merge spill files and verify every evidence chain")
+    s.add_argument("workdir", nargs="?")
+    s.add_argument("--milestone")
+    s.add_argument("--no-merge", action="store_true", help="verify only; unmerged spills count as faults")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_verify_chain)
+
+    s = sub.add_parser("gate", help="run a gate check and write its Wayfinder line (G4 built)")
+    s.add_argument("gate")
+    s.add_argument("workdir", nargs="?")
+    s.add_argument("--milestone")
+    s.set_defaults(func=cmd_gate)
+
+    s = sub.add_parser("footer", help="print a provenance footer skeleton, or --check a report")
+    s.add_argument("workdir", nargs="?")
+    s.add_argument("--milestone")
+    s.add_argument("--check", metavar="FILE")
+    s.add_argument("--short", action="store_true", help="glance footer (answer.md)")
+    s.set_defaults(func=cmd_footer)
+
+    s = sub.add_parser("abandon", help="record abandonment in the ledger and release the workdir")
+    s.add_argument("workdir", nargs="?")
+    s.add_argument("--milestone")
+    s.add_argument("--reason", required=True)
+    s.set_defaults(func=cmd_abandon)
 
     s = sub.add_parser("version")
     s.set_defaults(func=cmd_version)

@@ -180,9 +180,32 @@ def load_config(wd: Workdir) -> dict:
         conn = spec.get("conn")
         if conn is not None and not (isinstance(conn, str) and re.match(r"^(env|vault):[A-Za-z_][A-Za-z0-9_]*$", conn)):
             errors.append(f"data_roots.{alias}.conn: must be env:NAME or vault:NAME (never a literal secret)")
+    channels = cfg.get("publish_channels")
+    if channels is None:
+        channels = {}
+    if not isinstance(channels, dict):
+        errors.append("publish_channels must be a mapping of name -> {tool_patterns, paths}")
+        channels = {}
+    for name, spec in channels.items():
+        if not isinstance(spec, dict):
+            errors.append(f"publish_channels.{name}: must be a mapping")
+            continue
+        unknown = set(spec) - {"tool_patterns", "paths"}
+        if unknown:
+            errors.append(f"publish_channels.{name}: unknown keys {sorted(unknown)}")
+        for key in ("tool_patterns", "paths"):
+            val = spec.get(key) or []
+            if not isinstance(val, list) or not all(isinstance(v, str) and v for v in val):
+                errors.append(f"publish_channels.{name}.{key}: must be a list of non-empty strings")
+        for pat in spec.get("tool_patterns") or []:
+            try:
+                re.compile(pat)
+            except re.error as exc:
+                errors.append(f"publish_channels.{name}.tool_patterns: bad regex {pat!r}: {exc}")
     if errors:
         raise DdaError("config.yaml invalid:\n  - " + "\n  - ".join(errors))
     cfg["data_roots"] = roots
+    cfg["publish_channels"] = channels
     return cfg
 
 

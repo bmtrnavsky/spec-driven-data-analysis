@@ -1,10 +1,10 @@
 """Bound-session hook dispatch (spec §6). Called only by hooks/dda_hook.py
 after it has established the session is bound to a workdir.
 
-Phase 1 ships the dispatch skeleton. The real gate logic for each blocking
-hook lands in later build phases (§14). Until a hook is implemented it is
-**fail-closed**: in a bound session it blocks every tool call except a
-clean `dda` invocation (so `dda status` / `dda release` still work).
+Phase 2 replaces the phase-1 fail-closed stubs with real logic
+(ddalib.hooks). A hook name listed in BLOCKING but missing from
+IMPLEMENTED stays fail-closed: in a bound session it blocks every tool call
+except a clean `dda` invocation.
 """
 from __future__ import annotations
 
@@ -18,8 +18,15 @@ from .layout import DdaError
 BLOCKING = ("lockguard", "evidenceguard", "rawguard", "defguard", "footercheck")
 SIDE_EFFECT = ("runlog", "driftnudge")
 
+
+
+def _implemented() -> dict[str, Any]:
+    from . import hooks
+    return {h: (lambda p, b, h=h: hooks.run_bound(h, p, b)) for h in hooks.HOOKS}
+
+
 # Hooks with real logic in this build. Everything else in BLOCKING is a fail-closed stub.
-IMPLEMENTED: dict[str, Any] = {}
+IMPLEMENTED: dict[str, Any] = _implemented()
 
 _DDA_NAMES = frozenset({"dda", "dda.cmd", "dda.bat", "dda.exe"})
 _PYTHON_RE = re.compile(r"^python(3(\.\d+)?)?(\.exe)?$")
@@ -59,6 +66,13 @@ def dispatch(hook: str, payload: dict, binding: dict) -> tuple[dict, int]:
     tool_input = payload.get("tool_input")
     if os.environ.get("DDA_HOOK_FAULT_INJECT") == hook:
         raise RuntimeError("injected fault (red-team)")
+    if hook == "runlog":
+        from . import hooks
+        try:
+            hooks.run_bound("runlog", payload, binding)
+        except Exception:
+            pass  # side effect only: never blocks; a missing seen/done line is a hook fault at the gate (§6.8)
+        return {}, 0
     if hook in SIDE_EFFECT:
         return {}, 0
     if hook not in BLOCKING:

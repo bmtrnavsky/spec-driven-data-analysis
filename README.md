@@ -2,7 +2,7 @@
 
 Spec-first data analysis for Hermes: lock the plan before the data, block
 the shortcuts with hooks, re-check every hook rule at a gate. The design is
-in [SPEC.md](SPEC.md). This tree contains build phases 0 and 1 (SPEC §14).
+in [SPEC.md](SPEC.md). This tree contains build phases 0–2 (SPEC §14).
 
 ## Status
 
@@ -10,7 +10,8 @@ in [SPEC.md](SPEC.md). This tree contains build phases 0 and 1 (SPEC §14).
 |---|---|---|
 | 0 | Red-team harness (`redteam/`) | built; GREEN on this install |
 | 1 | Workdir layout, `dda` CLI skeleton, lock hashing, hook entry point, session binding | built |
-| 2+ | lock/chain, real gate logic, kernel, approvals, footer, definitions, goldfish, verify, evals | not built; commands fail closed (exit 3) |
+| 2 | `dda lock` (git commit + ledger), hash-chained append-only logs with a locked appender, spill files and a heads mirror; lock-state cache; real `lockguard`, `evidenceguard`, `rawguard`, `defguard` (path rules), `footercheck` (recomputable fields), `runlog` + heartbeat; unbound-access log; G4 | built |
+| 3+ | kernel, approvals, gitcheck, definitions pins at gates, goldfish, verify, evals | not built; commands fail closed (exit 3) |
 
 ## Use
 
@@ -21,7 +22,18 @@ python scripts/dda.py start <workdir> --session <id>   # bind a session (default
 python scripts/dda.py status
 python scripts/dda.py release <workdir>
 python scripts/dda.py install [--venv]        # print the Hermes hooks block
+python scripts/dda.py lock <workdir> [--amend "<reason>"]   # lock (or amend) the spec; git commit
+python scripts/dda.py verify-chain <workdir> [--json]       # merge spills, verify every chain (exit 4 = broken)
+python scripts/dda.py gate G4 <workdir>       # lock recompute, chain verify, exposure scan, relabel
+python scripts/dda.py footer <workdir> [--check FILE] [--short]
+python scripts/dda.py abandon <workdir> --reason "..."
 ```
+
+Evidence lives in `.analysis/` (`ledger.md`, `runs.log`, `audit.log`,
+`specs-tried.jsonl`, `approvals.index.jsonl`; one canonical-JSON record per
+line, each carrying `seq` and the SHA-256 of the previous line) and in dda
+home (`heads/` mirror, `state/` lock-state cache, `heartbeat/<session>.log`,
+`unbound-access.log`). A workdir must be inside a git repo to lock.
 
 `scripts/dda.cmd` wraps the same on Windows. Everything is stdlib-only
 Python ≥ 3.11; `config.yaml` is read by a strict YAML subset parser that
@@ -30,7 +42,7 @@ rejects anything it doesn't understand.
 ## Tests
 
 ```
-python -m unittest discover -s tests      # phase-1 unit tests
+python -m unittest discover -s tests      # phase-1 and phase-2 unit tests
 python redteam/run.py [--json out.json]   # phase-0 red-team; exit 0 = GREEN
 ```
 
@@ -40,9 +52,10 @@ The red-team harness never touches the live Hermes profile: it points
 expected prevention held, no unbound-session false positive, and every miss
 is a documented caveat in [redteam/threat-model.md](redteam/threat-model.md).
 
-## Hooks are not installed
+## Before installing the hooks
 
-Phase 1's blocking hooks are fail-closed stubs: in a bound session they
-block every tool call except a clean `dda` command. Don't add the
-`dda install` block to a live profile until phase 2 replaces the stubs, or
-any bound session can do nothing but run `dda`.
+Phase 2's hooks are real, but data reads after lock are only allowed
+through `dda run` and declared connector tools, and `dda run` (the kernel)
+arrives in phase 3. Until then a bound session can lock and plan but has
+no sanctioned way to read locked data except a declared connector. Config
+approval at G4 is phase 4, so G4 fails closed at DECIDE and PUBLISH.

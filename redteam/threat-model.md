@@ -14,9 +14,13 @@ removed when the harness shows the case as prevented or detected.
   strips `parent_session_id` from the shell-hook payload
   (`_TOP_LEVEL_PAYLOAD_KEYS` in `agent/shell_hooks.py`) and does not pass
   it on `pre_tool_call` at all. The child is therefore unbound and
-  §6.0 says unbound sessions are never blocked. *Narrowed by:* runlog's
-  unbound-access log plus G4 labelling the lock post-data (build phase 2),
-  which turns this into **detected**. *Prevention would need:* Hermes to
+  §6.0 says unbound sessions are never blocked. *Narrowed by (built in
+  phase 2):* runlog's unbound-access log plus the lock-time and G4
+  exposure scans, which label the lock **post-data (unbound access)** and
+  name the child session — the harness shows this as
+  `subagent.unbound-child-detected` / `g4.unbound-access` = detected. If a
+  future Hermes forwards `parent_session_id`, `dda_hook.py` already
+  inherits the parent binding (§6.0) and this becomes prevented. *Prevention would need:* Hermes to
   forward parent lineage on `pre_tool_call` (upstream ask), or a policy
   that treats any unbound session touching an active workdir's declared
   roots as blocking — rejected for now because it breaks the §6.0 scope
@@ -42,16 +46,28 @@ removed when the harness shows the case as prevented or detected.
   tool name and arguments. Connector batches keep the wrapper and run
   hooks per entry. A bridge call that fails to resolve reaches hooks as
   `tool_call`; phase-2 lockguard must treat that as opaque and inspect
-  the nested `calls[*].arguments` (the phase-1 stub already blocks it).
+  the nested `calls[*].arguments` — phase-2 lockguard matches both the
+  `calls[*].name` against declared tool patterns and every nested string
+  against the declared locators.
 - **Hook payload shape** (observed via `run_once`): `hook_event_name`,
   `tool_name`, `tool_input`, `session_id`, `cwd`, `profile`, `extra`
   (`task_id`, `tool_call_id`, `turn_id`, `api_request_id`). No parent or
   compression lineage.
 
-## Phase-1 stub behaviour (expected, not a caveat)
+## Phase-2 hook behaviour (expected, not a caveat)
 
-All five blocking hooks are fail-closed stubs: in a bound session they
-block every tool call except one clean `dda` command (no shell chaining,
-no background, never `dda approve`). This is deliberately over-blocking:
-it proves the gate path fails closed before any real gate logic exists.
-Phases 2–6 replace each stub with its real rule.
+The phase-1 fail-closed stubs are replaced by real rules: lockguard
+(declared roots by path, host, URL prefix and tool-name pattern; signing
+commands), evidenceguard (the §6.2 writer table, dda home, plugin code),
+rawguard, defguard (path rules; content pins arrive in phase 6) and
+footercheck (value checks for the fields recomputable today; publish
+channels park until phase-4 sign-off). Bound sessions doing ordinary work
+that touches no declared root now pass every hook (`allow.*` cases).
+Hooks still fail closed on any exception, unreadable binding, or
+unparseable payload while a workdir is active.
+
+`read.obfuscated-path` stays prevented because the hooks also match
+base64 decodings of tool-input tokens. That is a slip-catcher, not a
+guarantee: a path assembled at run time (string arithmetic, env vars,
+another encoding) is the §0.1 limit and is caught only by the phase-3
+kernel audit hook and the G6 orphan check.

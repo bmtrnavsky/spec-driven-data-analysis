@@ -21,8 +21,11 @@ def spec(command, fail_closed, timeout=5, event="pre_tool_call"):
     return sh.ShellHookSpec(event=event, command=command, timeout=timeout, fail_closed=fail_closed)
 
 
+READ_PATH = os.environ.get("DDA_PROBE_READ_PATH", "x")  # a declared data root (phase 2 hooks are real)
+
+
 def run(command, *, fail_closed, timeout=5, session=bound_sid, tool="read_file", args=None):
-    kwargs = {"tool_name": tool, "args": args or {"path": "x"}, "session_id": session}
+    kwargs = {"tool_name": tool, "args": args or {"path": READ_PATH}, "session_id": session}
     t0 = time.monotonic()
     r = sh.run_once(spec(command, fail_closed, timeout), kwargs)
     return {"parsed": r.get("parsed"), "error": r.get("error"), "timed_out": r.get("timed_out"),
@@ -72,6 +75,6 @@ if len(sys.argv) > 5:
     # Fire the parsed lockguard spec itself (exact command string from dda install).
     lg = [s for s in specs if s.command.endswith(" lockguard")]
     if lg:
-        r = sh.run_once(lg[0], {"tool_name": "read_file", "args": {"path": "x"}, "session_id": bound_sid})
+        r = sh.run_once(lg[0], {"tool_name": "read_file", "args": {"path": READ_PATH}, "session_id": bound_sid})
         out["install_lockguard_parsed"] = r.get("parsed")
 print(json.dumps(out))

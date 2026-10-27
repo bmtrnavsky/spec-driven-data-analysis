@@ -4,8 +4,8 @@ State lives under dda_home():
   sessions/<session-id>.json   {"session_id", "workdir", "workdir_id", "milestone", "bound_at"}
   active.json                  {"workdirs": {<workdir-id>: {"path", "aliases", "roots", "registered_at"}}}
 
-Phase 1 writes these atomically (temp file + os.replace). The hash-chained
-ledgers and the locked appender arrive in phase 2.
+Both are written atomically (temp file + os.replace). A rebind is logged
+to both workdirs' ledgers through the chain appender (phase 2).
 """
 from __future__ import annotations
 
@@ -104,6 +104,15 @@ def start(wd: Workdir, session_id: str, rebind: bool = False) -> dict:
     }
     if existing and rebind:
         binding["rebound_from"] = {k: existing.get(k) for k in ("workdir", "milestone", "bound_at")}
+    if existing and rebind and (existing.get("workdir_id") != wd.id or existing.get("milestone") != wd.milestone):
+        from . import chain, ledger
+        rec = {"type": "rebind", "session": session_id,
+               "from": {"workdir": existing.get("workdir"), "milestone": existing.get("milestone")},
+               "to": {"workdir": str(wd.root), "milestone": wd.milestone}}
+        old = Workdir.at(existing["workdir"], existing.get("milestone")) if existing.get("workdir") else None
+        if old is not None and old.analysis.is_dir():
+            chain.append(ledger.ledger_path(old), rec)
+        chain.append(ledger.ledger_path(wd), rec)
     reg = read_registry()
     reg["workdirs"][wd.id] = {
         "path": str(wd.root),
@@ -114,6 +123,18 @@ def start(wd: Workdir, session_id: str, rebind: bool = False) -> dict:
     write_json_atomic(registry_path(), reg)
     write_json_atomic(sf, binding)
     return binding
+
+
+def refresh_registry(wd: Workdir) -> None:
+    """Re-read config roots into the registry entry if the workdir is active (after a lock or amendment)."""
+    reg = read_registry()
+    entry = reg["workdirs"].get(wd.id)
+    if entry is None:
+        return
+    cfg = load_config(wd)
+    entry["aliases"] = sorted(cfg["data_roots"])
+    entry["roots"] = _roots_from_config(cfg)
+    write_json_atomic(registry_path(), reg)
 
 
 def release(wd: Workdir) -> list[str]:

@@ -17,3 +17,14 @@ data_roots: {}
 #     tool_patterns: []
 #     pii: false
 #     pii_columns: []
+
+# Publish channels (SPEC §6.5): tool-name regexes and paths that publish.
+# In a bound session, a call through one of these that carries this
+# workdir's report is blocked unless tier is PUBLISH with verified sign-off.
+publish_channels: {}
+# Example:
+# publish_channels:
+#   vault:
+#     paths: ["C:/Users/bmtrn/vault"]
+#   wordpress:
+#     tool_patterns: ["^mcp__wordpress__.*"]

@@ -243,9 +243,11 @@ class TestHookEntry(Base):
 
     def test_bound_blocks_and_allows_dda(self):
         self.run_cli("start", str(self.wd.root), "--session", "b-1")
-        rc, out = self.hook("lockguard", {"session_id": "b-1", "tool_name": "read_file", "tool_input": {"path": "x"}})
+        # Phase 2: a read of a declared root before lock blocks with the fix named.
+        rc, out = self.hook("lockguard", {"session_id": "b-1", "tool_name": "read_file",
+                                          "tool_input": {"path": "D:/data/sales/x.csv"}})
         self.assertEqual((rc, out["action"]), (2, "block"))
-        self.assertIn("dda release", out["message"])
+        self.assertIn("dda lock", out["message"])
         self.assertEqual(self.hook("lockguard", {"session_id": "b-1", "tool_name": "terminal",
                                                  "tool_input": {"command": "dda status"}}), (0, {}))
         self.assertEqual(self.hook("runlog", {"session_id": "b-1", "tool_name": "read_file"}), (0, {}))

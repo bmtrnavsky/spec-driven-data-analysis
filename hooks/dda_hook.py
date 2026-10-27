@@ -12,6 +12,10 @@ Fail-closed rules (phase 0 asserts every one of these):
   * payload unparseable / no session id   -> block if any workdir is active, else {}
   * binding file unreadable               -> block
   * unknown hook name                     -> block if bound, else {}
+  * unbound session, runlog               -> unbound-access log line if the
+                                             call matches an ACTIVE workdir's
+                                             roots (never blocks, errors -> {})
+  * child session, bound parent visible   -> judged with the parent's binding
 
 This file is stdlib-only and does the unbound fast path itself, so a
 broken `ddalib` import can only affect bound sessions (which then block).
@@ -53,6 +57,23 @@ def _any_active():
         return True  # registry unreadable: assume something is active
 
 
+def _ddalib():
+    here = os.path.dirname(os.path.abspath(__file__))
+    scripts = os.path.join(os.path.dirname(here), "scripts")
+    if scripts not in sys.path:
+        sys.path.insert(0, scripts)
+
+
+def _parent_id(payload):
+    extra = payload.get("extra") if isinstance(payload.get("extra"), dict) else {}
+    for src in (payload, extra):
+        for key in ("parent_session_id", "parent_session"):
+            v = src.get(key)
+            if isinstance(v, str) and _SESSION_RE.match(v):
+                return v
+    return None
+
+
 def main():
     hook = sys.argv[1] if len(sys.argv) > 1 else ""
     blocking = hook in BLOCKING
@@ -73,9 +94,23 @@ def main():
         _emit({})
 
     bfile = os.path.join(_dda_home(), "sessions", sid + ".json")
+    parent = None
     if not os.path.exists(bfile):
-        # Unbound fast path (§6.0). Phase 2 adds runlog's unbound-access logging here.
-        _emit({})
+        # Subagents inherit a bound parent's binding when the payload names the parent (§6.0).
+        parent = _parent_id(payload)
+        pfile = os.path.join(_dda_home(), "sessions", parent + ".json") if parent else None
+        if pfile and os.path.exists(pfile):
+            bfile = pfile
+        else:
+            # Unbound fast path (§6.0): blocking hooks return {}; runlog logs root matches of active workdirs.
+            if hook == "runlog" and _any_active():
+                try:
+                    _ddalib()
+                    from ddalib import hooks
+                    hooks.unbound_runlog(payload)
+                except BaseException:  # noqa: BLE001 - never block or fail an unbound session
+                    pass
+            _emit({})
 
     # Bound session from here on: every failure blocks.
     try:
@@ -83,8 +118,9 @@ def main():
             binding = json.load(fh)
         if not isinstance(binding, dict) or not binding.get("workdir"):
             raise ValueError("binding file malformed")
-        here = os.path.dirname(os.path.abspath(__file__))
-        sys.path.insert(0, os.path.join(os.path.dirname(here), "scripts"))
+        if parent:
+            binding = dict(binding, parent=parent)
+        _ddalib()
         from ddalib import hookentry
         result, code = hookentry.dispatch(hook, payload, binding)
     except SystemExit:
