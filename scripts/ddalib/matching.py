@@ -377,18 +377,23 @@ _WRAPPER_FLAGS = frozenset({
 # `python -m <mod>` module invocations that run the dda CLI.
 _DDA_MODULES = frozenset({"dda", "ddalib", "ddalib.cli"})
 
-# sh-family shells accept bundled short flags (`bash -lc '...'`).
+# sh-family shells accept bundled short flags (`bash -lc '...'`, `bash -cl '...'` —
+# verified: any bundle containing `c` takes the next argv word as its command).
 _SH_BUNDLED_C = frozenset({
     "bash", "bash.exe", "sh", "sh.exe", "dash", "zsh", "ksh",
 })
-_BUNDLED_C_RE = re.compile(r"^-[A-Za-z]{1,4}$")
+_BUNDLED_C_RE = re.compile(r"^-[A-Za-z]+$")
+# Interpreter flags that consume the following argv word (`-W ignore`,
+# `-X utf8`, `--check-hash-based-pycs never`); `python -c` is deliberately
+# absent — everything after `-c` is the command's own argv, never a script.
+_PY_OPTS_WITH_ARG = frozenset({"-w", "-x", "--check-hash-based-pycs"})
 
 
 def _is_command_flag(shell_base: str, flag: str) -> bool:
     if flag in _WRAPPER_FLAGS:
         return True
     return (shell_base in _SH_BUNDLED_C and bool(_BUNDLED_C_RE.match(flag))
-            and flag.endswith("c") and flag != "-c")
+            and "c" in flag[1:] and flag != "-c")
 
 
 def _dda_base(tok: str) -> str:
@@ -419,19 +424,31 @@ def _dda_next_words(tokens: list[str]) -> list[str]:
             if i + 1 < n:
                 out.append(_unquoted_word(tokens[i + 1]))
         elif _PYTHON_RE.match(b):
-            for j in range(i + 1, n):
+            j = i + 1
+            while j < n:
                 bj = _dda_base(tokens[j])
                 if bj == "dda.py" or (bj == "cli.py" and "dda" in tokens[j].lower()):
                     if j + 1 < n:
                         out.append(_unquoted_word(tokens[j + 1]))
                     break
-                if tokens[j].strip("'\"").lower() == "-m" and j + 1 < n:
-                    if tokens[j + 1].strip("'\"").lower() in _DDA_MODULES:
+                low = tokens[j].strip("'\"").lower()
+                if low == "-m":
+                    if j + 1 < n and tokens[j + 1].strip("'\"").lower() in _DDA_MODULES:
                         if j + 2 < n:
                             out.append(_unquoted_word(tokens[j + 2]))
                     break
-                if tokens[j].startswith("-"):
-                    continue  # `python -u dda.py ...`
+                if low.startswith("-m") and len(low) > 2:
+                    # Attached form (`python -mdda ...` runs module `dda`).
+                    if low[2:] in _DDA_MODULES:
+                        if j + 1 < n:
+                            out.append(_unquoted_word(tokens[j + 1]))
+                    break
+                if low in _PY_OPTS_WITH_ARG:
+                    j += 2 if j + 1 < n else 1
+                    continue
+                if tokens[j].startswith("-") and tokens[j] != "-":
+                    j += 1  # pass-through interpreter flag (`-u`, `-E`, `-3.11`, `--`)
+                    continue
                 break
     return out
 

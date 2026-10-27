@@ -9,14 +9,17 @@ removed when the harness shows the case as prevented or detected.
 
 - **human-only.obfuscated-invocations** — the argv parser re-parses shell
   wrappers: `-c`/`/c`/`-Command` string arguments (`bash -c`, `cmd /c`,
-  `powershell -Command`), including bundled sh flags (`bash -lc`), long
+  `powershell -Command`), including bundled sh flags in any position or
+  length (`bash -lc`, `bash -cl`, `bash -licsu`), long
   `--command`, and `-command=<str>`; nested wrappers
   (`bash -c 'sh -c "dda release"'`, re-parsed to fixpoint); quote-spliced
   names (`d''da`, `"dd"a` — quotes stripped, posix shell joining); unquoted
   chaining (`&&`, `;`, `|`, newlines) and redirect-attached words
   (`dda release>out.txt` — `>`/`<` split); subshell parens and
   `$(...)`/backtick expansions (so `$(echo dda) release` still hits); plus
-  `uv run`, the `py` launcher, `python -m ddalib.cli`, and
+  `uv run`, the `py` launcher, `python -m ddalib.cli` (spaced and
+  attached `-mddalib.cli`, options-with-args such as `-W ignore` skipped),
+  and
   `python <path/>ddalib/cli.py` via argv. Shell-level obfuscation still
   gets through (evasion, not slips — §0.1): variable indirection
   (`x=dda; $x release`), runtime-built commands (`eval`, downloaded

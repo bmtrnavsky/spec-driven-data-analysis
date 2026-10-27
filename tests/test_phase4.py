@@ -213,6 +213,9 @@ class HumanOnlyTests(Base):
             'powershell -Command "dda status; dda abandon WD --reason x"',
             "bash -lc 'dda release WD'",
             "sh -ic 'dda abandon WD --reason x'",
+            "bash -cl 'dda release WD'",
+            "bash -ci 'dda abandon WD --reason x'",
+            "bash -licsu 'dda release WD'",
             'bash --command "dda release WD"',
             "d''da release WD",
             'bash -c \'sh -c "dda release WD"\'',
@@ -220,7 +223,12 @@ class HumanOnlyTests(Base):
             "dda release WD>out.txt",
             "python -m ddalib.cli release WD",
             "python -m ddalib.cli abandon WD --reason x",
+            "python -mddalib.cli release WD",
+            "python -mdda abandon WD --reason x",
             "python scripts/ddalib/cli.py release WD",
+            "python -W ignore scripts/ddalib/cli.py release WD",
+            "python -W ignore -m ddalib.cli release WD",
+            "python -u -X utf8 -m ddalib.cli abandon WD --reason x",
         ]
         for raw in cmds:
             cmd = raw.replace("WD", str(self.wd.root))
