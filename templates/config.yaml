@@ -1,0 +1,19 @@
+# .analysis/config.yaml — human-owned (SPEC §4, §4.5).
+# Changing this file changes the lock hash; data reads block until re-lock.
+version: 1
+
+# Starting proposal only; the spec is where tier is stored (SPEC §2).
+default_tier: EXPLORE
+
+# Data-root aliases. Each alias needs at least one locator.
+# Credentials are referenced by name only: conn: env:NAME or vault:NAME.
+data_roots: {}
+# Example:
+# data_roots:
+#   sales:
+#     paths: ["D:/data/sales"]
+#     hosts: []
+#     url_prefixes: []
+#     tool_patterns: []
+#     pii: false
+#     pii_columns: []
