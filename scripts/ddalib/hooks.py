@@ -15,8 +15,8 @@ from pathlib import Path
 from . import chain, footer, ledger, lockstate
 from .layout import REPO_ROOT, DdaError, Workdir, canonical_path, dda_home, load_config
 from .matching import (CODE_TOOLS, FILE_WRITERS, ToolView, agent_writable, analysis_refs, analysis_tail, canon,
-                       connector_aliases, norm_text, referenced_aliases, signing_violation, under, write_targets,
-                       written_paths_under)
+                       connector_aliases, human_only_violation, norm_text, referenced_aliases, signing_violation, under,
+                       write_targets, written_paths_under)
 
 BUSY = "dda: evidence log busy, retry the tool call (§4.4)"
 # Tools whose output goes straight to the model: never a sanctioned data path after lock (§6.1).
@@ -131,9 +131,28 @@ def plugin_code_mentioned(view: ToolView) -> list[str]:
     return sorted(p for p in view.paths if any(under(p, t) for t in targets))
 
 
+# ---------- human-only subcommands (§6.0) ----------
+
+def human_only_block(ctx: Ctx) -> tuple[dict, int] | None:
+    """`dda release` / `dda abandon` from an agent tool call always block.
+
+    Releasing launders later reads (the roots leave the active set), so the
+    release itself is ledgered (binding.release) and only a human runs it.
+    Checked before the clean-dda passthrough in every blocking hook.
+    """
+    hit = human_only_violation(ctx.view)
+    if hit:
+        return block(f"dda {hit} from an agent tool call is blocked (human-only, §6.0). Ask Brad to run it in "
+                     "their own terminal; the release is ledgered with the sessions it unbinds.")
+    return None
+
+
 # ---------- lockguard (§6.1) ----------
 
 def lockguard(ctx: Ctx) -> tuple[dict, int]:
+    hb = human_only_block(ctx)
+    if hb:
+        return hb
     sig = signing_violation(ctx.view)
     if sig:
         return block(f"dda lockguard: {sig} is human-only (§4.5). Approvals are signed by an approver in their own "
@@ -194,6 +213,9 @@ def _frozen_variant(ctx: Ctx, tail: str) -> bool:
 
 
 def evidenceguard(ctx: Ctx) -> tuple[dict, int]:
+    hb = human_only_block(ctx)
+    if hb:
+        return hb
     if is_clean_dda(ctx):
         return allow()
     view = ctx.view
@@ -216,7 +238,8 @@ def evidenceguard(ctx: Ctx) -> tuple[dict, int]:
         plugin_hits = plugin_code_mentioned(view)
     if home_hits:
         return block("dda evidenceguard: the dda home (session bindings, heads mirror, lock-state cache, logs) is "
-                     "written only by dda and its hooks (§6.2). Use `dda status` / `dda release` / `dda verify-chain`.")
+                     "written only by dda and its hooks (§6.2). A bound agent never touches it (and never runs "
+                     "`dda release`/`dda abandon` itself — those are human-only); ask Brad.")
     if plugin_hits:
         return block("dda evidenceguard: the dda plugin's hooks and scripts are read-only in a bound session.")
     bad = sorted(t for t in tails if not agent_writable(t))
@@ -235,6 +258,9 @@ def evidenceguard(ctx: Ctx) -> tuple[dict, int]:
 # ---------- rawguard (§6.3) ----------
 
 def rawguard(ctx: Ctx) -> tuple[dict, int]:
+    hb = human_only_block(ctx)
+    if hb:
+        return hb
     if is_clean_dda(ctx):
         return allow()
     intent, targets = write_targets(ctx.view)
@@ -258,6 +284,9 @@ def rawguard(ctx: Ctx) -> tuple[dict, int]:
 # ---------- defguard (§6.4) ----------
 
 def defguard(ctx: Ctx) -> tuple[dict, int]:
+    hb = human_only_block(ctx)
+    if hb:
+        return hb
     if is_clean_dda(ctx):
         return allow()
     intent, targets = write_targets(ctx.view)
@@ -302,6 +331,9 @@ def _publish_channels(ctx: Ctx) -> dict:
 
 
 def footercheck(ctx: Ctx) -> tuple[dict, int]:
+    hb = human_only_block(ctx)
+    if hb:
+        return hb
     if is_clean_dda(ctx):
         return allow()
     reports = canon(str(ctx.wd.root / "reports"))
@@ -418,6 +450,36 @@ def write_blob(wd: Workdir, text: str) -> tuple[str, str]:
     return h, f"runs/blobs/{h}"
 
 
+def _was_blocked(payload: dict) -> bool:
+    """Did a sibling hook block this tool call? A blocked call still reaches
+    runlog's post hook in some transports, so runlog must not mislabel the
+    attempt as data: it is logged kind=blocked and exposure ignores it."""
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("blocked") is True:
+        return True
+    for key in ("decision", "hook_decision", "hook_action", "outcome", "status", "action"):
+        if str(payload.get(key) or "").lower() == "block":
+            return True
+    extra = payload.get("extra")
+    if isinstance(extra, dict):
+        if extra.get("blocked") is True:
+            return True
+        for key in ("decision", "hook_decision", "hook_action", "outcome", "status", "action"):
+            if str(extra.get(key) or "").lower() == "block":
+                return True
+    for rkey in ("tool_result", "result", "tool_output", "output"):
+        res = payload.get(rkey)
+        if isinstance(res, dict):
+            if res.get("blocked") is True or str(res.get("action") or "").lower() == "block":
+                return True
+            err = res.get("error")
+            if isinstance(err, str) and "block" in err.lower():
+                return True
+    err = payload.get("error")
+    return isinstance(err, str) and "block" in err.lower() and "dda" in err.lower()
+
+
 def runlog(ctx: Ctx) -> tuple[dict, int]:
     """Side effect only: never blocks (busy logs spill, §4.4)."""
     aliases = referenced_aliases(ctx.view, ctx.roots) if ctx.tool not in FILE_WRITERS else set()
@@ -429,7 +491,9 @@ def runlog(ctx: Ctx) -> tuple[dict, int]:
         variant = None
         if "--variant" in sub and sub.index("--variant") + 1 < len(sub):
             variant = sub[sub.index("--variant") + 1]
-        if sub[:1] == ["meta"]:
+        if _was_blocked(ctx.payload):
+            kind, aliases = "blocked", set()
+        elif sub[:1] == ["meta"]:
             kind = "meta"
         elif sub[:1] == ["run"]:
             kind = "data"

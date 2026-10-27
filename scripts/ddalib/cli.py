@@ -214,8 +214,7 @@ def cmd_footer(args) -> int:
 def cmd_abandon(args) -> int:
     wd = _wd(args)
     wd.require_initialized()
-    chain.append(ledger.ledger_path(wd), {"type": "abandon", "reason": args.reason})
-    released = binding.release(wd)
+    released = binding.release(wd, cause="abandon", reason=args.reason)
     print(f"abandoned {wd.root}: {len(released)} session(s) unbound; workdir inactive")
     return 0
 

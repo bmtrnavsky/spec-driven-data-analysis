@@ -56,8 +56,8 @@ def is_clean_dda_invocation(tool_name: str, tool_input: dict | None) -> bool:
         rest = tokens[2:]
     else:
         return False
-    # `dda approve` is human-only (§4.5): never pass it through.
-    return not (rest and rest[0] == "approve")
+    # `dda approve`, `dda release`, and `dda abandon` are human-only (§6.0, §4.5): never pass them through.
+    return not (rest and rest[0] in ("approve", "release", "abandon"))
 
 
 def dispatch(hook: str, payload: dict, binding: dict) -> tuple[dict, int]:

@@ -137,8 +137,15 @@ def refresh_registry(wd: Workdir) -> None:
     write_json_atomic(registry_path(), reg)
 
 
-def release(wd: Workdir) -> list[str]:
-    """Unbind every session bound to `wd` and drop it from the active registry."""
+def release(wd: Workdir, cause: str = "release", reason: str | None = None) -> list[str]:
+    """Unbind every session bound to `wd`, drop it from the active registry,
+    and ledger the release (spec §6.0).
+
+    Without the ledger line a release launders later reads: the roots leave
+    the active set, so a re-lock afterwards looks clean. `cause` is
+    "release" (G9) or "abandon" (dropped work). Only a human runs these;
+    every blocking hook refuses them from agent tool calls.
+    """
     released = []
     sdir = sessions_dir()
     if sdir.is_dir():
@@ -150,6 +157,11 @@ def release(wd: Workdir) -> list[str]:
     reg = read_registry()
     if reg["workdirs"].pop(wd.id, None) is not None or released:
         write_json_atomic(registry_path(), reg)
+    if cause not in ("release", "abandon"):
+        raise DdaError(f"unknown release cause {cause!r}")
+    from . import chain, ledger
+    chain.append(ledger.ledger_path(wd), {"type": cause, "sessions": sorted(released),
+                                          **({"reason": reason} if reason else {})})
     return released
 
 

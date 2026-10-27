@@ -256,8 +256,9 @@ class TestHookEntry(Base):
         self.assertEqual(self.hook("lockguard", None, raw="garbage"), (0, {}))
 
     def test_clean_dda_invocation(self):
-        ok = ["dda status", "dda.cmd release", 'python "C:/x/scripts/dda.py" hash', "C:/p/dda.exe status"]
-        bad = ["dda approve spec", "dda status; cat x", "dda status | tee", "dda $(cat x)", "ddax status",
+        ok = ["dda status", 'python "C:/x/scripts/dda.py" hash', "C:/p/dda.exe status"]
+        bad = ["dda approve spec", "dda release", "dda abandon wd --reason x", "dda.cmd release",
+               "dda status; cat x", "dda status | tee", "dda $(cat x)", "ddax status",
                "python evil.py dda.py", "cat dda", "dda status\ncat x", "dda `id`", "dda status > out"]
         for c in ok:
             self.assertTrue(hookentry.is_clean_dda_invocation("terminal", {"command": c}), c)

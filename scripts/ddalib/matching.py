@@ -86,6 +86,17 @@ def under(path: str, prefix: str) -> bool:
     return path == prefix or path.startswith(prefix.rstrip("/") + "/")
 
 
+def parent_dir(path: str) -> str | None:
+    """Canonical parent of a canonical path, or None at the filesystem root."""
+    p = (path or "").rstrip("/")
+    if not p or "/" not in p:
+        return None
+    parent = p.rpartition("/")[0]
+    if not parent or parent.endswith(":") or parent in ("/", ""):
+        return None
+    return parent or None
+
+
 def _boundary_contains(hay: str, needle: str) -> bool:
     """`needle` occurs in `hay` not followed by a name character (so /data/raw ≠ /data/raw2)."""
     if not needle:
@@ -99,6 +110,28 @@ def _boundary_contains(hay: str, needle: str) -> bool:
         if j >= len(hay) or not (hay[j].isalnum() or hay[j] in "_-."):
             return True
         if needle.endswith("/"):
+            return True
+        start = i + 1
+
+
+def _dir_token_contains(hay: str, needle: str) -> bool:
+    """`needle` occurs in `hay` as a complete path token: at most one trailing
+    slash may follow, then a boundary. Longer paths merely passing through the
+    directory (parent/child) do not count — used for the parent-dir rule (§6.1)."""
+    if not needle:
+        return False
+    start = 0
+    while True:
+        i = hay.find(needle, start)
+        if i < 0:
+            return False
+        if i > 0 and (hay[i - 1].isalnum() or hay[i - 1] in "_-."):
+            start = i + 1
+            continue
+        j = i + len(needle)
+        if j < len(hay) and hay[j] == "/":
+            j += 1
+        if j >= len(hay) or not (hay[j].isalnum() or hay[j] in "_-."):
             return True
         start = i + 1
 
@@ -180,11 +213,28 @@ class ToolView:
         p = self.input.get("path") or self.input.get("file_path")
         return canon(p, self.cwd) if isinstance(p, str) else None
 
-    def mentions_path(self, prefix: str) -> bool:
+    def mentions_path(self, prefix: str, include_parent: bool = False) -> bool:
+        """Does the call mention `prefix` (or a path under it)?
+
+        With include_parent=True the call also matches when it names the
+        direct parent directory of `prefix`: listing the parent exposes the
+        root itself, so it counts as a read of the root (§6.1). Callers that
+        match workdir-internal prefixes (derived/, reports/) leave this off,
+        because the session's own workdir token would otherwise always hit.
+        """
         pre = canon(prefix) or norm_text(prefix)
         if any(under(p, pre) for p in self.paths):
             return True
-        return any(_boundary_contains(self.blob, v) for v in _path_variants(prefix))
+        variants = list(_path_variants(prefix))
+        if include_parent:
+            par = parent_dir(pre)
+            if par and par in self.paths:
+                return True
+            if par:
+                par_variants = _path_variants(par)
+                if any(_dir_token_contains(self.blob, v) for v in par_variants):
+                    return True
+        return any(_boundary_contains(self.blob, v) for v in variants)
 
 
 def referenced_aliases(view: ToolView, roots: dict) -> set[str]:
@@ -203,7 +253,7 @@ def referenced_aliases(view: ToolView, roots: dict) -> set[str]:
         if any(norm_text(u) in view.blob for u in loc.get("url_prefixes") or []):
             hits.add(alias)
             continue
-        if any(view.mentions_path(p) for p in loc.get("paths") or []):
+        if any(view.mentions_path(p, include_parent=True) for p in loc.get("paths") or []):
             hits.add(alias)
     return hits
 
@@ -309,6 +359,17 @@ def signing_violation(view: ToolView) -> str | None:
     return None
 
 
+_HUMAN_ONLY = re.compile(r"\bdda(?:\.py|\.cmd|\.bat|\.exe)?['\"]?\s+(release|abandon)\b", re.IGNORECASE)
+
+
+def human_only_violation(view: ToolView) -> str | None:
+    """`dda release` / `dda abandon` are human-only (§6.0): an agent must ask Brad, never run them."""
+    if view.tool not in CODE_TOOLS:
+        return None
+    m = _HUMAN_ONLY.search("\n".join(view.texts))
+    return m.group(1).lower() if m else None
+
+
 # ---------- evidence path table (§6.2) ----------
 
 _AGENT_ANALYSIS = re.compile(
@@ -352,6 +413,6 @@ def analysis_refs(view: ToolView) -> set[str]:
 
 __all__ = [
     "ToolView", "referenced_aliases", "connector_aliases", "write_targets", "written_paths_under",
-    "signing_violation", "analysis_refs", "analysis_tail", "agent_writable", "canon", "under", "norm_text",
-    "FILE_WRITERS", "CODE_TOOLS",
+    "signing_violation", "human_only_violation", "analysis_refs", "analysis_tail", "agent_writable", "canon", "under",
+    "norm_text", "parent_dir", "FILE_WRITERS", "CODE_TOOLS",
 ]

@@ -121,23 +121,36 @@ def _locator_set(loc: dict) -> set[str]:
 
 
 def exposure(wd: Workdir, aliases: list[str], watermarks: dict | None, locked_ts: float | None) -> dict:
-    """Data-root reads of `aliases` that precede the lock.
+    """Reads of `aliases` attributable to this workdir, plus hopping signals.
 
-    watermarks None = scan everything (a lock being made now)."""
+    watermarks None = scan everything (a lock being made now). With the lock's
+    watermarks (G4): runs/audit scan only lines up to the lock; the unbound
+    log skips lines the lock already judged (only newer lines count); the
+    session-history and rebind scans have no upper bound, because a hop after
+    the lock is the laundering case."""
     al = set(aliases)
     wm = watermarks or {}
-    found = {"runs": [], "audit": [], "unbound": [], "other_workdirs": []}
+    found = {"runs": [], "audit": [], "unbound": [], "other_workdirs": [],
+             "session_history": [], "rebind": []}
+    data_sessions: set = set()
+    mine_sessions: set = set()
     for rec in chain.read_records(runs_log(wd)):
         if wm.get("runs") is not None and rec.get("seq", 0) > wm["runs"]:
             break
         if rec.get("type") == "done" and rec.get("kind") == "data" and al & set(rec.get("aliases") or []):
             found["runs"].append({"seq": rec.get("seq"), "session": rec.get("session"), "aliases": rec.get("aliases")})
+        if rec.get("type") == "done" and rec.get("session"):
+            mine_sessions.add(rec.get("session"))
+            if rec.get("kind") == "data":
+                data_sessions.add(rec.get("session"))
     for rec in chain.read_records(audit_log(wd)):
         if wm.get("audit") is not None and rec.get("seq", 0) > wm["audit"]:
             break
         if rec.get("kind") in ("audit", "open", "data") and al & set(rec.get("aliases") or []):
             found["audit"].append({"seq": rec.get("seq"), "aliases": rec.get("aliases")})
     for rec in chain.read_records(unbound_log()):
+        if wm.get("unbound") is not None and rec.get("seq", 0) <= wm["unbound"]:
+            continue  # judged at the lock whose watermark G4 carries; only newer lines count
         hits = [m for m in rec.get("matches") or [] if m.get("workdir_id") == wd.id and m.get("alias") in al]
         if hits:
             found["unbound"].append({"seq": rec.get("seq"), "session": rec.get("session"), "tool": rec.get("tool"),
@@ -167,13 +180,45 @@ def exposure(wd: Workdir, aliases: list[str], watermarks: dict | None, locked_ts
             if rec.get("type") == "done" and rec.get("kind") == "data" and overlap & set(rec.get("aliases") or []):
                 found["other_workdirs"].append({"workdir": w["path"], "seq": rec.get("seq"),
                                                 "session": rec.get("session"), "aliases": rec.get("aliases")})
+    # Rootless workdir hopping (§6.0): a session seen in this workdir's log that
+    # also has data reads in ANY other workdir's log — even one declaring no
+    # shared locator — hopped between workdirs. No upper time bound: a hop
+    # after the lock counts, because that is the laundering case.
+    other_data: set = set()
+    other_done: list = []
+    if mine_sessions:
+        for wid, w in reg.items():
+            if wid == wd.id:
+                continue
+            other = Path(w["path"]) / ".analysis" / "runs.log"
+            if not other.is_file():
+                continue
+            for rec in chain.read_records(other):
+                if rec.get("type") != "done" or not rec.get("session"):
+                    continue
+                if rec.get("kind") == "data":
+                    other_data.add(rec.get("session"))
+                if rec.get("kind") in ("data", "other"):
+                    other_done.append({"workdir": w["path"], "seq": rec.get("seq"),
+                                       "session": rec.get("session"), "kind": rec.get("kind"),
+                                       "aliases": rec.get("aliases")})
+    # The session must have read data somewhere (here or another workdir's
+    # log): mere `dda status` cross-talk without any data read is not hopping.
+    carried = data_sessions | other_data
+    for f in other_done:
+        if f["session"] in mine_sessions and f["session"] in carried:
+            found["session_history"].append(f)
+    for rec in chain.read_records(ledger_path(wd)):
+        if rec.get("type") == "rebind" and rec.get("session") in carried:
+            found["rebind"].append({"seq": rec.get("seq"), "session": rec.get("session"),
+                                    "from": rec.get("from"), "to": rec.get("to")})
     return found
 
 
 def label_for(found: dict, prior_exposure: str) -> str:
-    if found["unbound"] or found["other_workdirs"]:
+    if found.get("unbound") or found.get("other_workdirs") or found.get("session_history") or found.get("rebind"):
         return "post-data (unbound access)"
-    if found["runs"] or found["audit"]:
+    if found.get("runs") or found.get("audit"):
         return "post-data"
     pe = lockhash.normalize_ws(prior_exposure).lower().strip(" .")
     if pe and pe not in ("none known", "none"):
@@ -335,7 +380,8 @@ def gate_g4(wd: Workdir) -> tuple[bool, str, dict]:
     recomputed = label_for(found, prior)
     eff = lockstate.worst_label(ledger_summary(wd)["effective_label"], recomputed)
     if eff != ledger_summary(wd)["effective_label"]:
-        sessions = sorted({f.get("session") for k in ("unbound", "other_workdirs") for f in found[k] if f.get("session")})
+        sessions = sorted({f.get("session") for k in ("unbound", "other_workdirs", "session_history", "rebind")
+                           for f in found[k] if f.get("session")})
         chain.append(ledger_path(wd), {"type": "relabel", "version": lock["version"], "label": eff,
                                        "reason": "G4 exposure scan", "sessions": sessions,
                                        "exposure": {k: len(v) for k, v in found.items() if v}})
@@ -345,6 +391,9 @@ def gate_g4(wd: Workdir) -> tuple[bool, str, dict]:
         notes.append(f"merged {merged} spill file(s)")
     if found["unbound"]:
         notes.append("unbound sessions: " + ", ".join(sorted({f['session'] for f in found['unbound'] if f.get('session')})))
+    if found["session_history"] or found["rebind"]:
+        notes.append("workdir hopping: " + ", ".join(sorted({f['session'] for f in found['session_history'] + found['rebind']
+                                                             if f.get('session')})))
     # Config approval (§4.5) arrives in build phase 4.
     if tier == "EXPLORE":
         notes.append("config approval not built (phase 4): unapproved config disclosed")

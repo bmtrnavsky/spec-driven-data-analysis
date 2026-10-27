@@ -585,16 +585,28 @@ plugin must not block any of that.
   `~/.hermes-home/dda/unbound-access.log`. It never blocks.
 - **Detection instead.** G4 reads the unbound-access log. A read of one
   of the lock's aliases after the workdir was registered labels the lock
-  **post-data (unbound access)**, and the footer names the sessions. This
-  also catches workdir hopping: G4 checks the bound session's history
-  and the logs of other active workdirs that declare the same aliases.
+  **post-data (unbound access)**, and the footer names the sessions. The
+  lock stores the log head as the `unbound` watermark
+  (`heads/global.unbound-access.log.json`); G4 carries it, so lines the
+  lock already judged are not re-reported and only newer lines count.
+  This also catches workdir hopping: G4 checks the bound session's history
+  and the logs of other active workdirs, with no shared-locator
+  requirement — a session with data reads in two workdirs' `runs.log`
+  files (a rootless hop), and any `rebind` ledger line for a session that
+  read data anywhere, labels the lock **post-data (unbound access)** and
+  names the session. A rebind with no data reads anywhere stays clean.
 - **Bound sessions.** A data read by bound session S is judged only
   against the lock of S's workdir, and only for roots that lock lists.
   Two workdirs may analyze the same root; workdir A's lock never unlocks
   reads for B.
 - **Release.** `dda release` (run by G9, or `dda abandon` for dropped
   work) unbinds every session bound to the workdir and marks it
-  inactive. Inactive workdirs' roots are no longer matched by anything,
+  inactive. Both are **human-only**: every blocking hook refuses them
+  from agent tool calls, because a release launders later reads (the
+  roots leave the active set, so a re-lock afterwards looks clean). The
+  release itself is ledgered — one `release` / `abandon` line naming the
+  unbound sessions — so the laundering step stays in the chain.
+  Inactive workdirs' roots are no longer matched by anything,
   so a finished analysis leaves no trace on later sessions. `dda status`
   lists active workdirs and bound sessions; `dda doctor` warns about
   workdirs active for more than 14 days with no runs.
@@ -611,7 +623,10 @@ plugin must not block any of that.
 - Data-root aliases in config map to any of: paths, connection hosts, URL
   prefixes (dashboards, GA, WordPress stats), and deferred-tool name
   patterns (e.g. D1 or R2 query tools). A tool input matching any of them
-  is a data read.
+  is a data read. Naming a root's direct parent directory counts too:
+  listing the parent exposes the root, so `mentions_path` matches the
+  parent one level up (deeper ancestors do not match, so `ls C:/Users`
+  stays allowed).
 - Before lock: block every data read except `dda meta` (§3.3), and treat
   `derived/` and earlier reports for the same aliases as data roots
   (§4.1).
@@ -621,7 +636,8 @@ plugin must not block any of that.
   `read_file`/`search_files` on data roots stays blocked after lock,
   because that output would bypass masking (§10.2).
 - Also blocks agent `git commit -S`, `git tag -s`,
-  `git -c commit.gpgsign=true`, and `dda approve` (§4.5).
+  `git -c commit.gpgsign=true`, `dda approve` (§4.5), and
+  `dda release` / `dda abandon` (§6.0, human-only).
 - Applies to bound sessions only (§6.0). It never computes the lock hash
   on the hot path; it reads the cached lock state (§6.9).
 - The block message names the fix: "Lock the spec (`dda lock`)",
@@ -701,7 +717,11 @@ plugin must not block any of that.
 - Pre: appends a `seen` line (sequence number, session id, tool name) for
   every tool call. Post: appends the matching `done` line with timestamp,
   tool, code/query hash, blob pointer, data-root **aliases** referenced,
-  variant id if any, and kind (`meta | data | other`).
+  variant id if any, and kind (`meta | data | other | blocked`). A post
+  that carries a sibling hook's block signal (`blocked: true`,
+  `decision/action: block`, or a block error) is logged `blocked` with
+  empty aliases: a blocked attempt never executed, so it must never count
+  as exposure.
 - Records aliases, never paths containing credentials or connection
   strings; blobs are scrubbed of secrets (§10.4). Never blocks.
 

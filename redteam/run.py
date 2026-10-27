@@ -170,13 +170,24 @@ class Harness:
                         f"blocked by {', '.join(by)}" if blocked else "no blocking hook fired",
                         "lockguard (declared roots, signing), evidenceguard (writer table), rawguard (phase 2)")
 
-        # False-positive check: a clean dda command in a bound session must pass (else `dda release` is unreachable).
-        for cid, cmd in (("allow.dda-status", "dda status"), ("allow.dda-release-py", f"python {DDA.as_posix()} release"),
+        # False-positive check: a clean dda command in a bound session must pass.
+        for cid, cmd in (("allow.dda-status", "dda status"),
                          ("allow.dda-background", "dda status")):
             args = {"command": cmd, "background": cid == "allow.dda-background"}
             blocked, _ = self.all_blocking(BOUND, "terminal", args)
             self.record(cid, "bound false-positive", cmd, "allowed" if not blocked else "false-positive",
                         "allowed", "passed through" if not blocked else "blocked a clean dda command")
+        # `dda release` / `dda abandon` are human-only (§6.0): a bound agent must
+        # be blocked from laundering reads through release. The human runs it in
+        # their own terminal, where no hook fires.
+        for cid, cmd in (("block.dda-release-agent", f"python {DDA.as_posix()} release {self.wd}"),
+                         ("block.dda-abandon-agent", f"python {DDA.as_posix()} abandon {self.wd} --reason x")):
+            blocked, res = self.all_blocking(BOUND, "terminal", {"command": cmd})
+            by = [h for h, r in res.items() if r["blocked"]]
+            self.record(cid, "bound pre-lock", cmd,
+                        "prevented" if blocked else "missed", "prevented",
+                        f"blocked by {', '.join(by)}" if blocked else "no blocking hook fired",
+                        "release/abandon ledgered and human-only (§6.0)")
         # Phase 2: ordinary work in a bound session that touches no data root must pass every hook.
         a = self.wd / ".analysis"
         benign = [
