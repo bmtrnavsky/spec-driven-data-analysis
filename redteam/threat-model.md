@@ -118,9 +118,18 @@ edited record file no longer passes.
   hooks fail open and the missing-interpreter case can only be detected;
   on this build that is only true if the `fail_closed` key is dropped.
   `dda install` emits `fail_closed: true` on every blocking hook;
-  `dda doctor` (phase 4) must verify the key is present in the live
-  profile config, because a hand-edited block without it silently
-  reverts to fail-open.
+  `dda doctor` (phase 4) verifies the emitted install block carries the key
+  on every blocking hook, because a hand-edited block without it silently
+  reverts to fail-open. A live profile whose block was hand-edited after
+  install is out of scope — reinstall from `dda install` to restore it:
+
+- **live-profile.fail-closed-drift** — `doctor` checks the block `dda`
+  emits, not the live profile file (the harness never touches the real
+  profile, and the profile schema is Hermes-owned). If Brad hand-edits
+  the installed block and drops `fail_closed`, hooks on this install
+  fail open (§6.9 fail-open default) and no gate flags it. Mitigation:
+  reinstall from `dda install` after any hand edit; the install block is
+  the source of truth.
 - **The `tool_call` bridge is unwrapped before `pre_tool_call`** (static
   read of `agent/tool_executor.py`: `_parse_tool_call` →
   `_unwrap_tool_search_call` → `_pre_tool_block`), so hooks see the inner
@@ -141,8 +150,10 @@ The phase-1 fail-closed stubs are replaced by real rules: lockguard
 (declared roots by path, host, URL prefix and tool-name pattern; signing
 commands), evidenceguard (the §6.2 writer table, dda home, plugin code),
 rawguard, defguard (path rules; content pins arrive in phase 6) and
-footercheck (value checks for the fields recomputable today; publish
-channels park until phase-4 sign-off). Bound sessions doing ordinary work
+footercheck (value checks for the fields recomputable today, including the
+config-approval state and approver fingerprints; per-report sign-off
+verifies via `dda approved signoff`, and publish channels stay parked
+until the report gate lands). Bound sessions doing ordinary work
 that touches no declared root now pass every hook (`allow.*` cases).
 Hooks still fail closed on any exception, unreadable binding, or
 unparseable payload while a workdir is active.

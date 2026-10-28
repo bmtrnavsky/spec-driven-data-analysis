@@ -583,14 +583,41 @@ def gate_g4(wd: Workdir) -> tuple[bool, str, dict]:
     if found["session_history"] or found["rebind"]:
         notes.append("workdir hopping: " + ", ".join(sorted({f['session'] for f in found['session_history'] + found['rebind']
                                                              if f.get('session')})))
-    # Config approval (§4.5) arrives in build phase 4.
-    if tier == "EXPLORE":
-        notes.append("config approval not built (phase 4): unapproved config disclosed")
-        passed = True
+    # Config approval (§4.5): a `config` approval for the exact config hash.
+    from . import approvals as _approvals
+    comp_hash = lockhash.config_hash(wd)
+    status = _approvals.config_status(wd)
+    st = status.get("state")
+    if st == "verified":
+        notes.append(f"config approval verified ({status.get('detail')})")
+    elif st == "downgraded":
+        notes.append(f"config approval DOWNGRADED to unverified: {status.get('detail')}")
+        st = "unverified"
+    elif st == "unverified":
+        notes.append(f"config approval unverified (agent could have produced it): {status.get('detail')}")
+    elif st == "missing":
+        notes.append(f"no config approval for config {comp_hash[:12]}")
     else:
-        notes.append(f"config approval required at {tier or 'undeclared tier'} and not built until phase 4")
+        notes.append(f"config approval unknown: {status.get('detail')}")
+        st = "missing"
+    if tier == "EXPLORE":
+        if st == "missing":
+            notes.append("unapproved config disclosed at EXPLORE")
+        passed = True
+    elif st == "verified":
+        passed = True
+    elif st == "unverified":
+        notes.append("human approval unverified (agent could have produced it)")
+        if tier == "PUBLISH":
+            notes.append("PUBLISH needs a verified config approval: parked (§3.2 case 9)")
+            passed = False
+        else:
+            passed = True
+    else:
+        notes.append(f"data reads block at {tier or 'undeclared tier'} until a human approves the new config "
+                     f"(`dda approve config` in their own terminal, then `dda approved config`)")
         passed = False
-    return passed, "; ".join(notes), {"label": eff, "exposure": found}
+    return passed, "; ".join(notes), {"label": eff, "exposure": found, "config_approval": st}
 
 
 __all__ = ["do_lock", "gate_g4", "verify_all", "ledger_summary", "last_lock_record", "exposure", "label_for",

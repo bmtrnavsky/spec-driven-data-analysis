@@ -202,10 +202,30 @@ def load_config(wd: Workdir) -> dict:
                 re.compile(pat)
             except re.error as exc:
                 errors.append(f"publish_channels.{name}.tool_patterns: bad regex {pat!r}: {exc}")
+    approvers = cfg.get("approvers")
+    if approvers is None:
+        approvers = []
+    if not isinstance(approvers, list):
+        errors.append("approvers must be a list of {name, fingerprint|key|key_id}")
+        approvers = []
+    else:
+        for i, a in enumerate(approvers):
+            if not isinstance(a, dict):
+                errors.append(f"approvers[{i}]: must be a mapping")
+                continue
+            unknown = set(a) - {"name", "fingerprint", "key", "key_id"}
+            if unknown:
+                errors.append(f"approvers[{i}]: unknown keys {sorted(unknown)}")
+            name = a.get("name")
+            if not isinstance(name, str) or not re.match(r"^[A-Za-z0-9_.\-]{1,64}$", name):
+                errors.append(f"approvers[{i}].name: must be a non-empty handle (letters, digits, _.-)")
+            if not any(isinstance(a.get(k), str) and a.get(k).strip() for k in ("fingerprint", "key", "key_id")):
+                errors.append(f"approvers[{i}] ({name!r}): needs at least one of fingerprint, key, key_id")
     if errors:
         raise DdaError("config.yaml invalid:\n  - " + "\n  - ".join(errors))
     cfg["data_roots"] = roots
     cfg["publish_channels"] = channels
+    cfg["approvers"] = approvers
     return cfg
 
 

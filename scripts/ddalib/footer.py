@@ -7,8 +7,9 @@ field recomputable in this build matches the evidence files.
 
 Recomputed now: lock hash, spec version, lock label, tier, amendments,
 variants N (ledger spec versions + specs-tried variants), definition pins,
-sources. Data, kernel, approvals, review and eval fields are presence-
-checked only until their build phases land (§14 phases 4, 7-9).
+sources, and config-approval status with approver fingerprints (phase 4).
+Data, kernel, review-round and eval fields are presence-checked only until
+their build phases land (§14 phases 7-9).
 """
 from __future__ import annotations
 
@@ -54,11 +55,15 @@ def expected(wd: Workdir) -> dict | None:
     summ = ledger.ledger_summary(wd)
     tried = {r.get("variant") for r in chain.read_records(ledger.specs_tried(wd))
              if r.get("type", "variant") == "variant" and r.get("variant")}
+    from . import approvals as _approvals
+    cfg_status = _approvals.config_status(wd)
     return {
         "lock_hash": lock["lock_hash"], "version": lock["version"], "label": summ["effective_label"] or lock["label"],
         "tier": lock.get("tier"), "pins": sorted(lock.get("pins") or []), "aliases": sorted(lock.get("aliases") or []),
         "amendments": summ["amendments"], "post_data_amendments": summ["post_data_amendments"],
         "n_tried": len(tried) + summ["versions"], "locked_at": lock.get("locked_at"),
+        "config_approval": cfg_status.get("state"), "config_hash": cfg_status.get("config_hash") or "",
+        "fingerprints": cfg_status.get("fingerprints") or [],
     }
 
 
@@ -126,6 +131,11 @@ def skeleton(wd: Workdir, short: bool = False) -> str:
         "amendments": f"{exp['amendments']} ({exp['post_data_amendments']} post-data)",
         "variants": f"{exp['n_tried']} tried (incl. spec versions), K reported, locked variant <id>",
         "definitions": ", ".join(exp["pins"]) or "none", "sources": ", ".join(exp["aliases"]),
+        "review": (f"config approval: {exp['config_approval'] or 'unknown'} "
+                   f"({(exp['config_hash'] or '')[:12]}); "
+                   f"approver fingerprints: {', '.join(exp['fingerprints']) or 'none configured'}"),
+        "approvals": (f"config {(exp['config_hash'] or '')[:12]}: {exp['config_approval'] or 'unknown'}; "
+                      "other kinds verified or unverified per approvals.index.jsonl"),
     }
     fields = SHORT_FIELDS if short else FULL_FIELDS
     return "## Provenance\n\n" + "\n".join(f"- **{f.capitalize()}:** {known.get(f, '')}" for f in fields) + "\n"

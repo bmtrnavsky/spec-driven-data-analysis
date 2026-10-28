@@ -378,11 +378,25 @@ class TestUnbound(Base):
         self.lock()
         rc, out, _ = self.cli("gate", "G4", str(self.wd.root))
         self.assertEqual(rc, 1)
-        self.assertIn("phase 4", out)
+        self.assertIn("no config approval", out)
+        self.assertIn("dda approve config", out)
         # G6 (phase 3) is built: a fresh lock with no data runs passes vacuously.
         rc, out, _ = self.cli("gate", "G6", str(self.wd.root))
         self.assertEqual(rc, 0, out)
         self.assertIn("G6 pass", out)
+
+    def test_g4_decide_passes_with_unverified_config_approval(self):
+        self.tier = "DECIDE"
+        self.write_spec()
+        self.lock()
+        rc, out, _ = self.cli("approve", "config", "--no-sign", str(self.wd.root))
+        self.assertEqual(rc, 0, out)
+        rc, out, _ = self.cli("approved", "config", str(self.wd.root))
+        self.assertEqual(rc, 0, out)
+        self.assertIn("UNVERIFIED", out)
+        rc, out, _ = self.cli("gate", "G4", str(self.wd.root))
+        self.assertEqual(rc, 0, out)
+        self.assertIn("unverified", out)
 
 
 if __name__ == "__main__":

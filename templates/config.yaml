@@ -28,3 +28,15 @@ publish_channels: {}
 #     paths: ["C:/Users/bmtrn/vault"]
 #   wordpress:
 #     tool_patterns: ["^mcp__wordpress__.*"]
+
+# Approver keys (SPEC §4.5). Human-owned: only a string-match hook guards
+# this block, so it is never trusted on its own — `dda approved` walks the
+# chain from the first (trust-on-first-use) config approval.
+# The first `dda approve config` must be signed by Brad himself; `dda init`
+# prints these fingerprints for him to confirm.
+approvers: []
+# Example:
+# approvers:
+#   - name: brad
+#     fingerprint: SHA256:REPLACE-WITH-KEY-FINGERPRINT
+#     # key: ssh-ed25519 AAAAC3... (full public key also accepted)

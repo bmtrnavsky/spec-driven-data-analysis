@@ -690,8 +690,7 @@ class Harness:
 
     def pending_phases(self):
         pend = [
-            ("approval.gpg-agent-cached", 4), ("approval.ssh-agent-key", 4), ("approval.global-gpgsign", 4),
-            ("approval.config-add-approver-key-detected", 4), ("goldfish.empty-tools", 7),
+            ("goldfish.empty-tools", 7),
             ("goldfish.reroll-counted", 7),
         ]
         for cid, phase in pend:
@@ -797,6 +796,41 @@ class Harness:
                     "detected" if "post-data (unbound access)" in g.stdout and "rt-hopper-0003" in g.stdout else "missed",
                     "detected", g.stdout.strip()[:150], "G4 scan of unbound-access.log (§6.0)")
 
+    # ---------- phase 4: approvals, doctor, config approval at G4 ----------
+    def phase4(self):
+        d = self.dda("doctor", str(self.wd), "--json", check=False)
+        try:
+            rep = json.loads(d.stdout)
+            secs = rep.get("sections", {})
+            ok = all(s in secs for s in ("interpreter", "hooks", "keys", "workdir"))
+        except ValueError:
+            ok, rep = False, {}
+        self.record("doctor.runs-and-reports", "approvals/doctor",
+                    "dda doctor runs on the locked workdir and reports every section",
+                    "detected" if ok else "missed", "detected",
+                    (f"sections={sorted(rep.get('sections', {}))}" if ok
+                     else (d.stderr or d.stdout).strip()[-200:]),
+                    "doctor sections: interpreter, hooks, keys (§4.5), workdir (§6.8)")
+        a = self.dda("approve", "config", "--no-sign", str(self.wd), check=False)
+        v = self.dda("approved", "config", str(self.wd), check=False)
+        idx = self.wd / ".analysis" / "approvals.index.jsonl"
+        recs = []
+        if idx.is_file():
+            recs = [json.loads(x) for x in idx.read_text(encoding="utf-8").splitlines() if x.strip()]
+        unv = [x for x in recs if x.get("type") == "approval" and x.get("verified") is False]
+        ok2 = a.returncode == 0 and "UNVERIFIED" in v.stdout and bool(unv)
+        self.record("approval.unsigned-recorded", "approvals/doctor",
+                    "unsigned config approval commits, then `dda approved` records it UNVERIFIED in approvals.index.jsonl",
+                    "detected" if ok2 else "missed", "detected",
+                    (v.stdout.strip()[:150] if ok2 else (v.stderr or v.stdout or a.stderr or a.stdout).strip()[-200:]),
+                    "approvals.index.jsonl hash chain; G4 reads the latest verdict (§4.5)")
+        g = self.dda("gate", "G4", str(self.wd), check=False)
+        ok3 = g.returncode == 0 and "config approval" in g.stdout
+        self.record("g4.config-approval-surfaced", "approvals/doctor",
+                    "G4 names the config-approval state (EXPLORE discloses; verified required at DECIDE+)",
+                    "detected" if ok3 else "missed", "detected",
+                    g.stdout.strip()[:150], "config-status lookup in approvals.index.jsonl (phase 4)")
+
     def host_recon(self):
         def git(*a):
             r = subprocess.run(["git", *a], capture_output=True, text=True)
@@ -823,6 +857,7 @@ class Harness:
             self.hermes_platform()
             self.phase2()
             self.phase3()
+            self.phase4()
             self.dda("release", str(self.wd))
             ul = Path(self.env["DDA_HOME"]) / "unbound-access.log"
             self.lines_at_release = len(ul.read_text(encoding="utf-8").splitlines()) if ul.is_file() else 0

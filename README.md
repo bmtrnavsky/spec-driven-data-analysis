@@ -12,7 +12,8 @@ in [SPEC.md](SPEC.md). This tree contains build phases 0–2 (SPEC §14).
 | 1 | Workdir layout, `dda` CLI skeleton, lock hashing, hook entry point, session binding | built |
 | 2 | `dda lock` (git commit + ledger), hash-chained append-only logs with a locked appender, spill files and a heads mirror; lock-state cache; real `lockguard`, `evidenceguard`, `rawguard`, `defguard` (path rules), `footercheck` (recomputable fields), `runlog` + heartbeat; unbound-access log; G4 | built |
 | 3 | Kernel runner with audit hook, native lockdown and reader wrappers, `dda meta`, variants with freeze-on-first-run, specs-tried ledger, and the orphan check (G6) | built |
-| 4+ | kernel, approvals, gitcheck, definitions pins at gates, goldfish, verify, evals | not built; commands fail closed (exit 3) |
+| 4 | `dda doctor` (interpreter, hooks, approver keys, workdir, heartbeat), signed approvals (`dda approve` / `dda approved`, approver chain, config approval at G4), footer approval fields | built |
+| 5+ | kernel, approvals, gitcheck, definitions pins at gates, goldfish, verify, evals | not built; commands fail closed (exit 3) |
 
 ## Use
 
@@ -49,7 +50,7 @@ rejects anything it doesn't understand.
 ## Tests
 
 ```
-python -m unittest discover -s tests      # phase-1 and phase-2 unit tests
+python -m unittest discover -s tests      # phase-1 to phase-4 unit tests
 python redteam/run.py [--json out.json]   # phase-0 red-team; exit 0 = GREEN
 ```
 
@@ -64,4 +65,4 @@ is a documented caveat in [redteam/threat-model.md](redteam/threat-model.md).
 Phase 3's sanctioned path is real: after lock, data reads go through
 `dda run` (the locked-down kernel, `dda variant` ids, freeze-on-first-run)
 and declared connector tools; `dda meta` is the only metadata peek.
-Config approval at G4 is phase 4, so G4 fails closed at DECIDE and PUBLISH.
+Config approval at G4 is built: G4 fails closed at DECIDE/PUBLISH without a config approval for the exact config hash, passes with disclosure on an unverified one at DECIDE, and discloses unapproved config at EXPLORE.

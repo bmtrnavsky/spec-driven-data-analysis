@@ -395,5 +395,124 @@ class ReleasedExposureTests(Base):
         self.assertEqual(ledger.label_for(exp, "none known"), "pre-data")
 
 
+class ApprovalsTests(Base):
+    """Phase-4 approvals: `dda approve` / `dda approved`, config chain, G4."""
+
+    def lock(self, *extra):
+        rc, out, err = self.cli("lock", str(self.wd.root), *extra)
+        self.assertEqual(rc, 0, err)
+        return out
+
+    def test_config_approvers_validation(self):
+        self.wd.config_path.write_text(
+            "version: 1\ndefault_tier: EXPLORE\napprovers:\n  - name: brad\n", encoding="utf-8")
+        from ddalib.layout import DdaError, load_config
+        with self.assertRaises(DdaError):
+            load_config(self.wd)
+        self.wd.config_path.write_text(
+            "version: 1\ndefault_tier: EXPLORE\napprovers:\n  - name: brad\n    fingerprint: SHA256:abc123\n",
+            encoding="utf-8")
+        cfg = load_config(self.wd)
+        self.assertEqual(cfg["approvers"][0]["name"], "brad")
+
+    def test_approve_records_unverified_and_gates(self):
+        self.lock()
+        rc, out, err = self.cli("approve", "config", "--no-sign", str(self.wd.root))
+        self.assertEqual(rc, 0, err)
+        self.assertIn("UNSIGNED (unverified)", out)
+        from ddalib import approvals
+        ch = approvals.current_artifact(self.wd, "config")
+        self.assertTrue((self.wd.analysis / "approvals" / f"config-{ch}.json").is_file())
+        rc, out, err = self.cli("approved", "config", str(self.wd.root))
+        self.assertEqual(rc, 0, err)
+        self.assertIn("UNVERIFIED", out)
+        recs = [r for r in chain.read_records(ledger.approvals_index(self.wd))
+                if r.get("type") == "approval"]
+        self.assertEqual(len(recs), 1)
+        self.assertFalse(recs[0]["verified"])
+        # EXPLORE gate passes with disclosure.
+        rc, out, _ = self.cli("gate", "G4", str(self.wd.root))
+        self.assertEqual(rc, 0, out)
+        self.assertIn("unverified", out)
+
+    def test_approve_rejects_unknown_kind_and_bad_artifact(self):
+        self.lock()
+        rc, _, err = self.cli("approve", "bogus", "--no-sign", str(self.wd.root))
+        self.assertNotEqual(rc, 0)
+        rc, _, _ = self.cli("approve", "config", "../evil", "--no-sign", str(self.wd.root))
+        self.assertNotEqual(rc, 0)
+
+    def test_approved_missing_file_fails(self):
+        self.lock()
+        rc, out, _ = self.cli("approved", "config", str(self.wd.root))
+        self.assertEqual(rc, 0)  # recorded, but UNVERIFIED
+        self.assertIn("UNVERIFIED", out)
+
+    def test_g4_rejects_stale_config_approval(self):
+        self.lock()
+        from ddalib import approvals
+        old = approvals.current_artifact(self.wd, "config")
+        self.assertEqual(self.cli("approve", "config", "--no-sign", str(self.wd.root))[0], 0)
+        self.assertEqual(self.cli("approved", "config", str(self.wd.root))[0], 0)
+        # Change the config: the old approval no longer covers the new hash.
+        cfg = self.wd.config_path.read_text(encoding="utf-8")
+        self.wd.config_path.write_text(cfg + "# touch\n", encoding="utf-8")
+        self.lock("--amend", "touch config")
+        self.assertNotEqual(approvals.current_artifact(self.wd, "config"), old)
+        rc, out, _ = self.cli("gate", "G4", str(self.wd.root))
+        self.assertEqual(rc, 0, out)  # EXPLORE discloses the unapproved config
+        self.assertIn("no config approval", out)
+
+    def test_agent_cannot_approve_through_hooks(self):
+        self.bind()
+        for cmd in ("dda approve config", "dda release", "git commit -S -m x"):
+            b, _ = self.blocked("lockguard", "terminal", {"command": cmd})
+            self.assertTrue(b, cmd)
+
+
+class DoctorTests(Base):
+    def test_doctor_json_shape(self):
+        rc, out, err = self.cli("doctor", "--json")
+        self.assertIn(rc, (0, 1), err)
+        rep = json.loads(out)
+        self.assertIn("sections", rep)
+        self.assertIn("keys", rep["sections"])
+        self.assertIn("hooks", rep["sections"])
+        self.assertIn("interpreter", rep["sections"])
+        names = [c["name"] for c in rep["sections"]["keys"]]
+        self.assertIn("gpg-agent", names)
+        self.assertIn("ssh-agent", names)
+        self.assertIn("git-signing-config", names)
+        for checks in rep["sections"].values():
+            for c in checks:
+                self.assertIn(c["status"], ("pass", "fail", "skip"))
+
+    def test_doctor_sees_auto_signing(self):
+        rc, out, err = self.cli("doctor", "--json")
+        self.assertIn(rc, (0, 1), err)
+        before = json.loads(out)
+        subprocess.run(["git", "config", "--global", "commit.gpgsign", "true"], check=True)
+        try:
+            rc2, out2, _ = self.cli("doctor", "--json")
+        finally:
+            subprocess.run(["git", "config", "--global", "--unset", "commit.gpgsign"], check=True)
+        after = json.loads(out2)
+        git_checks = [c for c in after["sections"]["keys"] if c["name"] == "git-signing-config"]
+        self.assertTrue(git_checks and git_checks[0]["status"] == "fail")
+        self.assertEqual(rc2, 1)
+        self.assertIn("git-signing-config", after["key_failures"])
+
+    def test_doctor_workdir_section(self):
+        rc, out, _ = self.cli("lock", str(self.wd.root))
+        self.assertEqual(rc, 0)
+        rc, out, _ = self.cli("doctor", str(self.wd.root), "--json")
+        rep = json.loads(out)
+        self.assertIn("workdir", rep["sections"])
+        names = [c["name"] for c in rep["sections"]["workdir"]]
+        self.assertIn("lock-state", names)
+        self.assertIn("evidence-chains", names)
+        self.assertIn("heartbeat-live", names)
+
+
 if __name__ == "__main__":
     unittest.main()

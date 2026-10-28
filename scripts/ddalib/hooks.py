@@ -185,7 +185,7 @@ def lockguard(ctx: Ctx) -> tuple[dict, int]:
     if state == "config-changed":
         return block(f"dda lockguard: config.yaml changed since lock v{lock['version']}; data reads stay blocked. "
                      "Re-lock as an amendment (`dda lock --amend \"<reason>\"`); the new config needs a human "
-                     "config approval (`dda approve config`, phase 4).")
+                     "config approval (`dda approve config` in your own terminal).")
     if state != "valid":
         return block(f"dda lockguard: {detail}. Re-lock after your spec edit "
                      "(`dda lock --amend \"<reason>\"`); data reads require hash(spec.md) == lock hash (§3.1).")
@@ -380,7 +380,8 @@ def footercheck(ctx: Ctx) -> tuple[dict, int]:
                 return block(f"dda footercheck: publishing this workdir's report through '{hit}' needs tier PUBLISH "
                              "and a verified human sign-off. Raise the tier (amendment) and get sign-off first.")
             return block(f"dda footercheck: publishing through '{hit}' needs a verified human sign-off for this "
-                         "report hash; sign-off verification arrives in build phase 4, so publish is parked.")
+                         "report hash; verify it with `dda approved signoff <hash>` — until the report gate "
+                         "lands, publish stays parked.")
     return allow()
 
 

@@ -2,7 +2,7 @@
 
 Implemented: init, status, start, release, hash, install, version (phase 1);
 lock, verify-chain, gate (G4), footer, abandon (phase 2); meta, variant, run,
-gate G6 (phase 3).
+gate G6 (phase 3); approve, approved, doctor (phase 4).
 Everything else in the spec's command set is registered but fails closed
 (exit 3, "not implemented in this build") so a script or gate that calls
 it can never mistake a missing feature for a pass.
@@ -17,15 +17,14 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import __version__, binding, chain, footer, kernel, ledger, lockhash, lockstate
+from . import __version__, approvals, binding, chain, doctor, footer, kernel, ledger, lockhash, lockstate
 from .layout import LAYOUT_DIRS, LAYOUT_FILES, REPO_ROOT, TEMPLATES_DIR, DdaError, Workdir, dda_home
 
 EXIT_NOT_IMPLEMENTED = 3
 
 # Spec commands not yet built, with the build phase that delivers them (§14).
 PENDING = {
-    "approve": 4,
-    "approved": 4, "doctor": 4, "gitcheck": 5, "evals": 9, "packet": 7,
+    "gitcheck": 5, "evals": 9, "packet": 7,
     "review": 7, "profile": 8, "verify": 8,
 }
 # Gates and the phase that builds each one's checks (§3, §14). G4 and G6 are built.
@@ -61,6 +60,19 @@ def cmd_init(args) -> int:
     for rel in created:
         print(f"  + {rel}")
     print(f"workdir id: {wd.id}")
+    try:
+        from .layout import load_config as _load
+        fps = [f"{a.get('name')}:{str(a.get('fingerprint') or a.get('key_id') or a.get('key') or '')[:64]}"
+               for a in (_load(wd).get("approvers") or [])]
+        if fps:
+            print("approver fingerprints (confirm these are Brad's keys before the first config approval):")
+            for f in fps:
+                print(f"  {f}")
+        else:
+            print("approvers: none configured — add Brad's keys under `approvers:` in .analysis/config.yaml, "
+                  "then `dda approve config` (TOFU, §4.5)")
+    except DdaError as exc:
+        print(f"approvers: could not read ({exc})")
     return 0
 
 
@@ -230,6 +242,57 @@ def cmd_version(args) -> int:
     return 0
 
 
+def _kind_artifact_workdir(args) -> tuple:
+    """Split `approve(d) kind [artifact] [workdir]`: a lone path-like positional is the workdir."""
+    kind, artifact, workdir = args.kind, args.artifact, args.workdir
+    if artifact is not None and workdir is None and (
+            os.sep in artifact or "/" in artifact or Path(artifact).is_dir()):
+        workdir, artifact = artifact, None
+    return kind, artifact, workdir
+
+
+def cmd_approve(args) -> int:
+    kind, artifact, workdir = _kind_artifact_workdir(args)
+    wd = Workdir.at(workdir or os.getcwd(), args.milestone)
+    res = approvals.do_approve(wd, kind, artifact=artifact, key=args.key,
+                               sign=not args.no_sign, message=args.message)
+    print(f"approved {res['kind']} {res['artifact'][:16]} — commit {res['commit'][:12]} "
+          f"({'signed' if res['signed'] else 'UNSIGNED (unverified)'}); "
+          f"run `dda approved {res['kind']} {res['artifact'][:16]}` to record the verification")
+    return 0
+
+
+def cmd_approved(args) -> int:
+    kind, artifact, workdir = _kind_artifact_workdir(args)
+    wd = Workdir.at(workdir or os.getcwd(), args.milestone)
+    verdict = approvals.do_approved(wd, kind, artifact=artifact)
+    state = "verified" if verdict["verified"] else "UNVERIFIED"
+    print(f"{args.kind} {verdict['artifact'][:16]}: {state} — {verdict['reason']}")
+    return 0
+
+
+def cmd_doctor(args) -> int:
+    wd = None
+    if args.workdir or args.milestone:
+        wd = _wd(args)
+    elif Path(os.getcwd(), ".analysis", "config.yaml").is_file():
+        wd = _wd(args)
+    rep = doctor.run(wd)
+    if args.json:
+        print(json.dumps(rep, indent=2))
+        return 0 if rep["ok"] else 1
+    for section, checks in rep["sections"].items():
+        print(f"[{section}]")
+        for c in checks:
+            mark = {"pass": "ok", "fail": "FAIL", "skip": "skip"}[c["status"]]
+            print(f"  {mark} {c['name']}" + (f": {c['detail']}" if c.get("detail") else ""))
+    if rep["downgrade"]:
+        print("doctor: FAIL — key checks fail, so every approval downgrades to unverified (§4.5)")
+        return 1
+    print("doctor: ok" if rep["ok"] else "doctor: FAIL")
+    return 0 if rep["ok"] else 1
+
+
 def cmd_meta(args) -> int:
     wd = _wd(args)
     text, _rec = kernel.do_meta(wd, args.alias, session=args.session or os.environ.get("HERMES_SESSION_ID") or "")
@@ -395,6 +458,29 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--milestone")
     s.add_argument("--reason", required=True)
     s.set_defaults(func=cmd_abandon)
+
+    s = sub.add_parser("approve", help="commit a human approval file (signed; run in your own terminal)")
+    s.add_argument("kind", help=f"approval kind: {', '.join(approvals.KINDS)}")
+    s.add_argument("artifact", nargs="?", help="artifact hash (defaults from the workdir for config/spec/amendment)")
+    s.add_argument("workdir", nargs="?")
+    s.add_argument("--milestone")
+    s.add_argument("--key", help="signing key id passed to git (default: the key's own default)")
+    s.add_argument("--no-sign", action="store_true", help="commit unsigned: recorded as UNVERIFIED")
+    s.add_argument("-m", "--message", help="approval note recorded in the approval file")
+    s.set_defaults(func=cmd_approve)
+
+    s = sub.add_parser("approved", help="verify an approval and record the verdict in approvals.index.jsonl")
+    s.add_argument("kind", help=f"approval kind: {', '.join(approvals.KINDS)}")
+    s.add_argument("artifact", nargs="?", help="artifact hash (defaults from the workdir for config/spec/amendment)")
+    s.add_argument("workdir", nargs="?")
+    s.add_argument("--milestone")
+    s.set_defaults(func=cmd_approved)
+
+    s = sub.add_parser("doctor", help="health checks: interpreter, hooks, approver keys, workdir, heartbeat")
+    s.add_argument("workdir", nargs="?")
+    s.add_argument("--milestone")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_doctor)
 
     s = sub.add_parser("version")
     s.set_defaults(func=cmd_version)
