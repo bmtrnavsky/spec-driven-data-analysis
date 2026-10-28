@@ -158,7 +158,7 @@ judgment), G (goldfish), H (human artifact, §4.5), K (hook).
 | 3 | Teardown (pre-data) | `goldfish-review` | `.analysis/reviews/goldfish/teardown.md` | G3: tier-scaled rounds recorded from `dda review run` calls (§5.0); at DECIDE, a human spec approval for this spec hash (verified, or unverified and disclosed); at PUBLISH, verified only (§4.5) | S, G, H |
 | 4 | Lock | `lock` | `specs/vN.md`, `spec.lock`, ledger entry, git commit | G4: lock hash recomputes (spec + definition pins + config hash + source aliases); a `config` approval exists for this config hash, signed through the approver chain (§4.5; verified required at DECIDE+, unapproved config disclosed at EXPLORE); evidence chains verify; `runs.log`, the audit log, and the unbound-access log (§6.0) show no non-metadata reads of these aliases before this lock, otherwise the lock is labelled post-data | S, K, H |
 | 5 | Profile (first data contact) | `profile` | `.analysis/profile.md` | G5: snapshot or fingerprint recorded per source (§10.3); schema compared with declared expectations; mismatch filed as amendment | S, A |
-| 6 | Analyze | `analyze` | variant scripts, outputs, `runs.log`, `specs-tried.jsonl` | G6: every data-touching run maps to a variant id (no orphan runs); every variant beyond the locked one has a ledger entry with a reason; hook heartbeat complete (§6.8) | S, K |
+| 6 | Analyze | `analyze` | variant scripts, outputs, `runs.log`, `specs-tried.jsonl` | G6: every data-touching run maps to a variant id (no orphan runs); every kernel record is IPC-imported with a policy hash bound to the run's lock hash and pairs with a parent-appended `kernel-start`; every variant beyond the locked one has a ledger entry with a reason; hook heartbeat complete (§6.8) | S, K |
 | 7 | Verify | `verify`, `goldfish-review`, `correct` | `.analysis/verify.md` | G7: locked variant reproduces from its saved script in a fresh kernel within declared tolerance against the snapshot; source drift recorded separately (§10.3); matched correction evals pass; post-result goldfish rounds recorded (§5.2) | S, G |
 | 8 | Report | `report` | `reports/<slug>.md` or `.analysis/answer.md` | G8: footer values recompute from lock, ledgers, runs, profile, reviews, approvals (§8); `exploratory` and `post-data-locked` labels present at point of claim; at PUBLISH, verified human sign-off for this report hash | S, K, H |
 | 9 | Archive | `report` | ledger closed, commit, push | G9: spec, lock, ledger, verify, report committed together; `dda gitcheck` finds no data or secrets staged (§11); evidence chains verify; Wayfinder closed; `dda release` unbinds every session and deregisters the workdir's roots (§6.0) | S |
@@ -345,12 +345,19 @@ roots.
      releases it.
 - Lock timeout: a `pre_tool_call` hook that cannot get the lock blocks
   the call with "evidence log busy, retry" (fail closed for bound
-  sessions). A `post_tool_call` hook or the kernel writes the record to
+  sessions). A `post_tool_call` hook writes the record to
   `<file>.spill/<pid>-<n>.json` instead. `dda` merges spill files into the
   chain under the lock on its next run and logs the merge. A spill file
   that is still unmerged at a gate is a hook fault (§6.8).
-- The kernel writes to `audit.log`, not `runs.log`, so hook traffic and
-  kernel traffic do not contend for one lock.
+- The kernel never appends to a chain: it writes audit events to its IPC
+  event file outside the workdir, and the `dda run` parent imports them
+  into `audit.log` (plus `kernel-launch`/`kernel-start`/`kernel-stop`)
+  through the locked appender after the subprocess exits. Kernel traffic
+  therefore never contends for a chain lock, and a kernel that crashes
+  mid-run leaves its already-written events for the parent to import.
+- Kernel audit traffic lands in `audit.log` (via the parent's IPC
+  import), not `runs.log`, so hook traffic and kernel traffic do not
+  contend for one lock.
 - On each append, the chain heads are mirrored to
   `~/.hermes-home/dda/heads/<workdir-id>.json`, which is also guarded. A
   truncated or edited log fails verification against the mirror. The
@@ -666,7 +673,7 @@ plugin must not block any of that.
 | `verify.md` | `dda verify` | G7 |
 | `reviews/goldfish/`, `packets/` | `dda review run`, `dda packet` | packet and brief hashes (§5.0) |
 | `runs.log`, `runs/blobs/` | `runlog` hook, `dda` | chain (§4.4) |
-| `audit.log` | kernel | chain (§4.4) |
+| `audit.log` | `dda run` (parent, importing the kernel's IPC events) | chain (§4.4) |
 | `spec.lock`, `specs/`, `ledger.md` | `dda lock` | lock commit, chain |
 | `specs-tried.jsonl` | `dda variant`, `dda run` | chain |
 | `approvals/` | human, via `dda approve` in their own terminal | signature (§4.5) |
@@ -746,7 +753,11 @@ plugin must not block any of that.
   the tool calls it missed.
 - The kernel audit log (§10.1, including reader-wrapper events, §10.1b) is an independent second source: a file
   open on a data root with no matching `runs.log` entry is reported as a
-  hook fault or an evasion.
+  hook fault or an evasion. Kernel events reach `audit.log` only through
+  the parent's IPC import, so the pairing also proves the import ran:
+  a `run` entry whose kernel record lacks the IPC marker, whose policy
+  hash does not match the run's lock hash, or with no parent-appended
+  `kernel-start` for its run id is a fabricated run and fails G6.
 - A gate that passes despite a hook fault is recorded as
   `pass (hook fault: <name>)` and appears as a footer caveat.
 
@@ -870,11 +881,29 @@ isolated environment always carries the full data stack (§10.1a).
 
 ### 10.1 Kernel policy
 
-- Launched only by `dda run`, bound to the session's workdir.
+- Launched only by `dda run`, bound to the session's workdir, as a
+  **separate locked subprocess**: its own process, started `-I -P` with a
+  clean environment, carrying a frozen **policy snapshot** (aliases, roots,
+  hosts, allowed dirs, lock hash, variant, run id, session, entry-script
+  path) that the parent writes to a policy file **outside** the workdir and
+  passes by path. The kernel never reads `spec.lock`, the ledger, or any
+  other `.analysis` file to learn policy; the snapshot is frozen at spawn
+  (a re-lock mid-run does not change the running kernel — the parent
+  records the spawn-time lock hash on the run entry and G6 compares it).
+- **Narrow IPC door, no ledger access.** The kernel holds no `.analysis`
+  handle and appends to no chain. Its only outputs are (1) derived files
+  under `derived/` or `outputs/`, (2) stdout/stderr tails captured by the
+  parent, (3) a status file, and (4) an audit-event file — the last two
+  written to a parent-owned IPC directory **outside** the workdir. The
+  parent imports the event file into `audit.log` through the locked
+  appender (§4.4) and writes the kernel record. The audit hook refuses
+  every `open` under `.analysis` from inside the kernel except a
+  read-only open of the entry script itself.
 - A Python **audit hook** (`sys.addaudithook`) is installed at kernel
   start. It:
   - logs every `open` on a data-root path and every `socket.connect` to
-    `runs.log` as `kind: audit`, regardless of tool-input text;
+    its IPC event file (imported by the parent into `runs.log` as
+    `kind: audit` — never written directly), regardless of tool-input text;
   - refuses `open` on data roots when the lock is invalid, and refuses
     write-mode `open` on raw roots and snapshots;
   - refuses `socket.connect` to hosts not on the config allowlist;
@@ -896,8 +925,11 @@ isolated environment always carries the full data stack (§10.1a).
 ### 10.1b Native data libraries: lockdown and reader wrappers
 
 The kernel bootstrap (`dda`'s kernel startup file, run before any user
-code) applies these and records each one in the kernel record. A step
-that fails stops the kernel, like a missing baseline package (§10.1a).
+code in the locked subprocess) reads only the parent-supplied policy
+file — never the workdir's `.analysis` — applies these, and records each
+one in the IPC status file for the parent to copy into the kernel
+record. A step that fails stops the kernel, like a missing baseline
+package (§10.1a).
 
 - **duckdb.** The bootstrap replaces `duckdb.connect`, `duckdb.sql`,
   `duckdb.query`, `duckdb.read_*`, and `duckdb.default_connection` with
@@ -910,8 +942,8 @@ that fails stops the kernel, like a missing baseline package (§10.1a).
   3. `SET enable_external_access = false` (no other files, no network);
   4. `SET lock_configuration = true` (user code cannot undo 1–3).
 
-  The wrapper also logs each statement's referenced paths to
-  `audit.log` as aliases, and refuses `COPY … TO`, `EXPORT DATABASE`, and
+  The wrapper also logs each statement's referenced paths to its IPC
+  event file (parent-imported into `audit.log`) as aliases, and refuses `COPY … TO`, `EXPORT DATABASE`, and
   `ATTACH` whose target resolves under a raw root or snapshot (duckdb
   cannot make one allowed directory read-only). Raw-root mutation that
   slips past this is caught by the G7 snapshot re-check.
@@ -922,7 +954,8 @@ that fails stops the kernel, like a missing baseline package (§10.1a).
   `pyarrow.csv.read_csv`/`open_csv`, `pyarrow.feather.*`, and the
   `pyarrow.fs` remote filesystem constructors. Each wrapper resolves the
   path, checks lock validity and root membership exactly like the audit
-  hook, logs to `audit.log`, refuses writes onto raw roots and snapshots,
+  hook, logs to its IPC event file (imported by the parent into
+  `audit.log`), refuses writes onto raw roots and snapshots,
   and refuses remote URLs (`s3://`, `gs://`, `http(s)://`, `az://`)
   whose host is not on the allowlist. pandas readers that route through
   pyarrow (`read_parquet`, `read_feather`, `engine="pyarrow"`) are
@@ -1231,7 +1264,7 @@ noted.
 | 4 | Approver keys and config hash sit in a hook-guarded file; no gate needs a config approval | G4 needs a `config` approval for the exact config hash; approver chain (TOFU root, later key changes signed by a previous key); fingerprints in every footer; kernel packages moved to `kernel.yaml` outside the config hash (§3, §4.5, §10.1a) |
 | 5 | `gpg-agent` cache, Windows `ssh-agent`, global `commit.gpgsign`, contradictory approvals format, unverified at PUBLISH unspecified | Doctor key checks downgrade approvals (fail, not warn); `ed25519-sk` preferred; `dda` commits with signing forced off; `lockguard` blocks `-c commit.gpgsign=true`; per-approval files plus a chained index; unverified ok at DECIDE with disclosure, never at PUBLISH (§4.4, §4.5, §3.2) |
 | 6 | Hooks can't be dependency-free shell; interpreter unnamed; `python3` missing here; 5 s timeout | Python hooks in one entry point, absolute interpreter path into the plugin's own uv venv, fail-closed catch-all for bound sessions, lock-state cache keyed on mtime/size, 300 ms target (§6.9) |
-| 7 | Concurrent hooks and the kernel fork the hash chain | One locked appender (`msvcrt.locking`/`flock`), `seq` assigned under the lock, spill files on timeout merged by `dda`, kernel writes a separate `audit.log`; phase 0 concurrency test (§4.4, §14) |
+| 7 | Concurrent hooks fork the hash chain (the kernel never appends: the parent imports its IPC events after exit) | One locked appender (`msvcrt.locking`/`flock`), `seq` assigned under the lock, spill files on timeout merged by `dda`, kernel traffic via parent IPC import; phase 0 concurrency test (§4.4, §14) |
 | 8 | Profile-wide hooks block Brad's everyday sessions; no workdir release; vault matcher too broad | Hooks no-op for unbound sessions; unbound reads of active roots logged and labelled post-data at G4 (also catches workdir hopping); `dda release` at G9; `footercheck` matches publish calls only when they carry the bound workdir's report; rebinding logged (§6.0, §6.5, §3) |
 
 Folded in from the partial/smaller lists: goldfish shopping (#4),

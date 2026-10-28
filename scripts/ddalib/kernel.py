@@ -12,6 +12,15 @@ specs-tried.jsonl entry types used here (all hash-chained via ddalib.chain):
   {"type": "run", ...}            every kernel execution: variant, run id, body hash, kernel record
   {"type": "variant-locked", ...} the reported (locked) variant id
 
+The kernel is a separate locked subprocess (§10.1): `do_run` freezes
+policy into a JSON snapshot in a parent-owned IPC directory outside the
+workdir, spawns the child with a clean environment, and after the child
+exits imports its audit-event file into `audit.log` through the locked
+appender and writes the kernel record. The child never reads
+`spec.lock`, the ledger, or any chain, and never appends to one; the
+audit hook refuses every `.analysis` open from inside the kernel except
+a read-only open of the entry script itself.
+
 Stdlib only. Everything fails closed: unknown alias, missing lock, invalid
 lock, unregistered variant, or a changed script body is an error, never a
 silent pass.
@@ -23,13 +32,16 @@ import importlib.metadata
 import json
 import os
 import random
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
 from . import chain, ledger, lockstate
-from .layout import ALIAS_RE, DdaError, Workdir, load_config, read_text_lf
+from .layout import ALIAS_RE, DdaError, Workdir, canonical_path, load_config, read_text_lf
+from .matching import canon
 
 # Required baseline data stack, always installed and pinned (§10.1a).
 # `sklearn` is the import name for scikit-learn; everything else imports
@@ -365,8 +377,46 @@ def do_run(wd: Workdir, vid: str, script: str, script_args: list[str], *, sessio
     chain.append(audit, {"type": "audit", "kind": "audit", "event": "kernel-launch", "aliases": sorted(lock["aliases"]),
                         "variant": vid, "run_id": run_id, "session": session})
 
+    # Freeze the policy snapshot the locked subprocess will run under.
+    # The child never reads spec.lock, the ledger, or any chain; it gets
+    # everything from this file, which lives in a parent-owned IPC
+    # directory outside the workdir.
+    cfg = load_config(wd)
+    roots: dict[str, list[str]] = {}
+    hosts: set[str] = set()
+    for alias in sorted(lock["aliases"]):
+        loc = (cfg.get("data_roots") or {}).get(alias) or {}
+        paths = []
+        for p in loc.get("paths") or []:
+            c = canon(p, str(wd.root))
+            if c:
+                paths.append(c)
+        roots[alias] = paths
+        hosts |= {str(h).lower() for h in loc.get("hosts") or []}
+    ky = wd.analysis / "kernel.yaml"
+    try:
+        ky_text = ky.read_text(encoding="utf-8")
+    except OSError:
+        ky_text = None
+    policy = {"aliases": sorted(lock["aliases"]), "roots": roots, "hosts": sorted(hosts),
+              "snapshots": canon(str(wd.root / "derived" / "snapshots")),
+              "analysis_dir": canon(str(wd.analysis)),
+              "script": canon(str(sp)),
+              "allowed_dirs": sorted(set([p for ps in roots.values() for p in ps if p]
+                                         + [canon(str(wd.root / "derived")),
+                                            canon(str(wd.root / "outputs"))])),
+              "lock_hash": lock_hash, "variant": vid, "run_id": run_id,
+              "session": session, "seed": run_seed, "kernel_yaml": ky_text}
+    policy_bytes = json.dumps(policy, sort_keys=True).encode("utf-8")
+    policy_hash = hashlib.sha256(policy_bytes).hexdigest()
+    ipc_dir = Path(tempfile.mkdtemp(prefix="dda-kernel-"))
+    policy_path = ipc_dir / "policy.json"
+    events_path = ipc_dir / "events.jsonl"
+    status_path = ipc_dir / "status.json"
+    policy_path.write_text(policy_bytes.decode("utf-8"), encoding="utf-8", newline="\n")
+    events_path.write_text("", encoding="utf-8")
+
     env = dict(os.environ)
-    status_file = wd.analysis / "runs" / f".kernel-{run_id}.json"
     # Isolated launch: no PYTHONPATH/PYTHONHOME (a swapped `ddalib` on the
     # path would run as the kernel), `-I -P` so the child ignores any
     # ambient path configuration; the bootstrap file path is fixed to this
@@ -376,6 +426,10 @@ def do_run(wd: Workdir, vid: str, script: str, script_args: list[str], *, sessio
     env.pop("PYTHONSAFEPATH", None)
     bootstrap = str(Path(__file__).resolve().parent / "kernel_bootstrap.py")
     env.update({
+        "DDA_POLICY_FILE": str(policy_path),
+        "DDA_IPC_EVENTS": str(events_path),
+        "DDA_IPC_STATUS": str(status_path),
+        "DDA_KERNEL_STATUS": str(status_path),
         "DDA_WORKDIR": str(wd.root),
         "DDA_MILESTONE": wd.milestone or "",
         "DDA_VARIANT": vid,
@@ -383,7 +437,6 @@ def do_run(wd: Workdir, vid: str, script: str, script_args: list[str], *, sessio
         "DDA_SESSION": session,
         "DDA_LOCK_HASH": lock_hash,
         "DDA_SEED": str(run_seed),
-        "DDA_KERNEL_STATUS": str(status_file),
         "PYTHONHASHSEED": str(run_seed % 4294967296),
         "HTTP_PROXY": env.get("HTTP_PROXY") or DEAD_PROXY,
         "HTTPS_PROXY": env.get("HTTPS_PROXY") or DEAD_PROXY,
@@ -396,19 +449,33 @@ def do_run(wd: Workdir, vid: str, script: str, script_args: list[str], *, sessio
                           errors="replace")
     dt = round(time.time() - t0, 3)
     try:
-        status = json.loads(status_file.read_text(encoding="utf-8"))
+        status = json.loads(status_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         status = {"ok": False, "error": "kernel did not write its status file"}
+    child_events: list[dict] = []
     try:
-        status_file.unlink()
+        for line in events_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(rec, dict):
+                child_events.append(rec)
+    except OSError:
+        pass
+    try:
+        shutil.rmtree(ipc_dir, ignore_errors=True)
     except OSError:
         pass
     versions = status.get("baseline") or {}
-    ky = wd.analysis / "kernel.yaml"
-    env_hash = environment_hash(versions, ky.read_bytes() if ky.is_file() else None)
+    env_hash = environment_hash(versions, ky_text.encode("utf-8") if ky_text is not None else None)
     net = status.get("network_policy") or "detect-only (kernel status missing)"
     record = {"run_id": run_id, "variant": vid, "variant_key": reg.get("variant_key"),
               "lock_hash": lock_hash, "seed": run_seed, "python": status.get("python") or sys.version.split()[0],
+              "ipc": True, "policy_hash": policy_hash, "event_count": len(child_events),
               "baseline": versions, "environment_hash": env_hash, "network_policy": net,
               "audit_hook": status.get("audit_hook"), "wrappers": status.get("wrappers"),
               "display": status.get("display"), "returncode": proc.returncode,
@@ -429,14 +496,28 @@ def do_run(wd: Workdir, vid: str, script: str, script_args: list[str], *, sessio
                                          "body_hash": body_hash, "code_hash": code_hash, "seed": run_seed,
                                          "lock_hash": lock_hash, "label": reg.get("label"),
                                          "kernel": f"runs/kernels/{run_id}.json", "kernel_hash": kernel_hash,
-                                         "returncode": proc.returncode})
+                                         "policy_hash": policy_hash, "returncode": proc.returncode})
     chain.append(ledger.runs_log(wd), {"type": "done", "session": session, "tool": "dda", "subcommand": "run",
                                       "call": run_id, "aliases": sorted(lock["aliases"]), "kind": "data",
                                       "variant": vid, "code_hash": code_hash, "blob": blob_ptr,
                                       "kernel": f"runs/kernels/{run_id}.json"})
-    chain.append(audit, {"type": "audit", "kind": "audit", "event": "kernel-stop", "aliases": sorted(lock["aliases"]),
-                        "variant": vid, "run_id": run_id, "session": session, "returncode": proc.returncode,
-                        "elapsed_s": dt})
+    # Import the child's IPC events into the audit log through the locked
+    # appender — the only path kernel audit traffic takes into evidence.
+    # kernel-start/stop ride along; if the child died before logging its
+    # stop, the parent synthesizes one so the run is still bounded.
+    for rec in child_events:
+        rec = dict(rec)
+        rec.setdefault("variant", vid)
+        rec.setdefault("run_id", run_id)
+        rec.setdefault("session", session)
+        rec.setdefault("type", "audit")
+        rec.setdefault("kind", "audit")
+        chain.append(audit, rec, spill_on_busy=True)
+    if not any(isinstance(r, dict) and r.get("event") == "kernel-stop" for r in child_events):
+        chain.append(audit, {"type": "audit", "kind": "audit", "event": "kernel-stop",
+                            "aliases": sorted(lock["aliases"]), "variant": vid, "run_id": run_id,
+                            "session": session, "returncode": proc.returncode, "elapsed_s": dt,
+                            "synthesized": "child exited without logging kernel-stop"})
     record["kernel_file"] = str(kpath)
     record["blob"] = blob_ptr
     if proc.returncode != 0:

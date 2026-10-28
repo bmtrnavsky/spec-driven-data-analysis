@@ -472,10 +472,30 @@ def gate_g6(wd: Workdir) -> tuple[bool, str, dict]:
         if actual != r.get("kernel_hash"):
             problems.append(f"run {r.get('run_id')} of variant {vid!r} kernel record hash mismatch "
                             "(edited or forked?)")
+            continue
+        # IPC binding (§10.1): the record must come from the locked-subprocess
+        # path (`ipc: true`, policy hash matching this run entry) and be
+        # bound to the same lock hash. A hand-written record that merely
+        # carries a kernel_hash fails here.
+        try:
+            rec = json.loads(kp.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            rec = {}
+        if not rec.get("ipc"):
+            problems.append(f"run {r.get('run_id')} of variant {vid!r} kernel record predates the "
+                            "locked-subprocess IPC path (no ipc marker; re-run with this build)")
+        elif rec.get("lock_hash") != r.get("lock_hash"):
+            problems.append(f"run {r.get('run_id')} of variant {vid!r} kernel record lock hash "
+                             "does not match the run entry")
+        elif not r.get("policy_hash") or rec.get("policy_hash") != r.get("policy_hash"):
+            problems.append(f"run {r.get('run_id')} of variant {vid!r} kernel record policy hash "
+                            "does not match the run entry (policy snapshot mismatch?)")
     # Every successful run must pair with a kernel-start in the audit log:
     # a `run` entry plus a kernel JSON with no booted kernel behind them
-    # is a fabricated run. (Failed starts never ran user code, so they
-    # are exempt from the pairing.)
+    # is a fabricated run. kernel-start reaches the log only through the
+    # parent's IPC import (§10.1), so the pairing also proves the import
+    # ran. (Failed starts never ran user code, so they are exempt from
+    # the pairing.)
     started = set()
     for r in chain.read_records(audit_log(wd)):
         if r.get("type") == "audit" and r.get("event") in ("kernel-start", "kernel-launch"):

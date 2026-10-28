@@ -272,25 +272,34 @@ class TestKernelRun(Base):
         rec = kernel.do_run(self.wd, "v1", str(sp), [], session="s-poison", seed=7)
         self.assertEqual(rec["returncode"], 0)
 
-    def test_kernel_refuses_evidence_writes(self):
+    def test_kernel_refuses_evidence_access(self):
+        # Locked subprocess: no `.analysis` access at all — reads and
+        # writes alike — except a read-only open of the entry script.
+        # Status and audit traffic leave through the parent-owned IPC
+        # directory outside the workdir, so there is nothing to exempt.
         self.stub_baseline()
         self.lock()
         lock = lockstate.read_lock(self.wd)
         events: list[dict] = []
-        status = self.wd.analysis / "runs" / ".kernel-r1.json"
-        os.environ[kernel_bootstrap.STATUS_ENV] = str(status)
+        script = self.wd.analysis / "variants" / "v1.py"
+        script.parent.mkdir(parents=True, exist_ok=True)
+        script.write_text("x = 1\n", encoding="utf-8")
         ctx2 = kernel_bootstrap.Ctx(self.wd, lock, "v1", "r1", "s",
-                                    log_fn=lambda rec: events.append(rec))
+                                    log_fn=lambda rec: events.append(rec),
+                                    script=str(script))
         kernel_bootstrap.install_audit_hook(ctx2)
+        with self.assertRaises(kernel_bootstrap.KernelRefusal):
+            open(self.wd.analysis / "ledger.md").read()
         with self.assertRaises(kernel_bootstrap.KernelRefusal):
             open(self.wd.analysis / "ledger.md", "a").close()
         with self.assertRaises(kernel_bootstrap.KernelRefusal):
             open(self.wd.analysis / "runs.log", "w").close()
-        # The kernel's own channels stay open.
-        with open(self.wd.analysis / "audit.log", "a", encoding="utf-8"):
-            pass
-        with open(status, "w", encoding="utf-8"):
-            pass
+        with self.assertRaises(kernel_bootstrap.KernelRefusal):
+            open(self.wd.analysis / "audit.log", "a").close()
+        with open(script, encoding="utf-8") as fh:  # the entry script stays readable
+            self.assertEqual(fh.read(), "x = 1\n")
+        with self.assertRaises(kernel_bootstrap.KernelRefusal):
+            open(script, "w").close()
         kinds = [e["event"] for e in events]
         self.assertIn("open-refused", kinds)
 
@@ -338,6 +347,11 @@ class TestKernelRun(Base):
         self.assertTrue({"kernel-start", "kernel-stop", "open"} <= events)
         opens = [r for r in audits if r.get("event") == "open"]
         self.assertTrue(all(r.get("aliases") == ["sales"] for r in opens))
+        # Locked-subprocess binding: IPC marker + policy hash, and no
+        # status litter left inside .analysis (status lives in the IPC dir).
+        self.assertTrue(rec.get("ipc"))
+        self.assertTrue(rec.get("policy_hash"))
+        self.assertEqual(list((self.wd.analysis / "runs").glob(".kernel-*.json")), [])
         # The kernel wrote derived output; the raw root is untouched.
         self.assertTrue((self.wd.root / "derived" / "out.csv").is_file())
         self.assertEqual((self.raw / "orders.csv").read_text(encoding="utf-8"), ORDERS)
@@ -434,7 +448,7 @@ class TestG6(Base):
                                                   "returncode": 0})
         passed, reason, _ = ledger.gate_g6(self.wd)
         self.assertFalse(passed)
-        self.assertIn("kernel-start", reason)
+        self.assertIn("ipc", reason)  # pre-IPC fabricated record: no ipc marker, no kernel-start
         # Tampering with a real kernel record breaks the hash binding.
         kp = self.wd.analysis / "runs" / "kernels" / f"{runs[0]['run_id']}.json"
         kp.write_text(kp.read_text(encoding="utf-8") + " ", encoding="utf-8")

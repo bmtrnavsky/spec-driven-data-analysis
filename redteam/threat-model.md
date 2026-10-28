@@ -40,6 +40,13 @@ edited record file no longer passes.
 
 ## Missed today
 
+- **runtime.latency-target** — per-call hook latency p95 ~600 ms on this
+  Windows host vs the 300 ms design target (SPEC §6.9, §14: target, not a
+  gate), because each hook invocation spawns a fresh interpreter
+  (`python -I -S`). Well under the 5 s hook timeout, and every expected
+  prevention held in the same run, so this is a performance caveat, not a
+  bypass: hooks still block, and a slow hook fails closed on timeout
+  (§6.9). A persistent-interpreter hook host would remove the spawn cost.
 - **human-only.obfuscated-invocations** — the argv parser re-parses shell
   wrappers: `-c`/`/c`/`-Command` string arguments (`bash -c`, `cmd /c`,
   `powershell -Command`), including bundled sh flags in any position or

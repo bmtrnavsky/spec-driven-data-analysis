@@ -1,14 +1,24 @@
 """Kernel bootstrap: runs inside the `dda run` child process (spec §10.1, §10.1b).
 
-Launched only by `dda run` (`python -m ddalib.kernel_bootstrap <script>
-[args...]`), bound to the session's workdir via DDA_* env vars. Before any
-user code runs it:
+The child is a separate locked subprocess: it never reads the workdir's
+`.analysis` (no spec.lock, no ledger, no chains) and never appends to one.
+The parent (`dda run`) freezes policy into a JSON file in a directory
+outside the workdir and passes it via DDA_POLICY_FILE; the child's only
+outputs are derived files, stdio tails, an IPC status file and an IPC
+audit-event file (DDA_IPC_STATUS / DDA_IPC_EVENTS, same outside dir).
+The parent imports the event file into `audit.log` through the locked
+appender after the subprocess exits. The audit hook therefore refuses
+every `open` under `.analysis` except a read-only open of the entry
+script itself.
 
-1. re-validates the lock (refuses to run user code when invalid);
-2. installs a `sys.addaudithook` that logs every `open` on a data-root path
-   and every `socket.connect` to the audit log, refuses write-mode opens on
-   raw roots, snapshots, and evidence files (`.analysis`, except the kernel's
-   own status file and the audit log it appends to), refuses non-allowlisted
+Launched only by `dda run` (`python -I -P <scripts>/ddalib/kernel_bootstrap.py
+<script> [args...]`). Before any user code it:
+
+1. loads the frozen policy (refuses to run user code when absent);
+2. installs a `sys.addaudithook` that queues every `open` on a data-root
+   path and every `socket.connect` to the IPC event file, refuses all
+   opens under `.analysis` (except reading the entry script), refuses
+   write-mode opens on raw roots and snapshots, refuses non-allowlisted
    hosts, and logs spawns;
 3. applies the native lockdown + reader wrappers for duckdb, polars and
    pyarrow (each recorded as enforced / not-installed / wrap-failed);
@@ -53,17 +63,107 @@ if not Path(getattr(chain, "__file__", "") or "").resolve().is_relative_to(SCRIP
                      f"expected under {SCRIPTS_DIR})")
 
 STATUS_ENV = "DDA_KERNEL_STATUS"
+POLICY_ENV = "DDA_POLICY_FILE"
+EVENTS_ENV = "DDA_IPC_EVENTS"
+IPC_STATUS_ENV = "DDA_IPC_STATUS"
 
 
 class KernelRefusal(Exception):
     """The audit hook or a wrapper refused an operation (fail closed)."""
 
 
+class PolicyCtx:
+    """Resolved kernel policy for one run, from the parent's frozen snapshot.
+
+    Used inside the locked subprocess: no Workdir, no lockstate, no
+    ledger — policy arrives via DDA_POLICY_FILE and events leave via the
+    IPC event file. `recheck()` is frozen-true: the lock was valid when
+    the parent spawned this process, and a re-lock mid-run does not
+    change the running kernel (the parent binds the spawn-time lock hash
+    to the run entry; G6 compares it).
+    """
+
+    def __init__(self, policy: dict, log_fn=None):
+        self.variant = policy.get("variant") or ""
+        self.run_id = policy.get("run_id") or ""
+        self.session = policy.get("session") or ""
+        self.aliases = sorted(policy.get("aliases") or [])
+        self.roots: dict[str, list[str]] = {a: list(ps) for a, ps in (policy.get("roots") or {}).items()}
+        self.hosts: set[str] = {str(h).lower() for h in policy.get("hosts") or []}
+        self.snapshots = policy.get("snapshots") or ""
+        self.analysis_dir = policy.get("analysis_dir") or ""
+        self.script = policy.get("script") or ""
+        self.allowed_dirs = sorted(policy.get("allowed_dirs") or [])
+        self._log_fn = log_fn or self._ipc_log
+        self._events_path = os.environ.get(EVENTS_ENV) or ""
+        self._local = threading.local()
+
+    # ---------- logging ----------
+
+    def _ipc_log(self, rec: dict) -> None:
+        line = json.dumps(rec, sort_keys=True) + "\n"
+        if self._events_path:
+            with open(self._events_path, "a", encoding="utf-8", newline="\n") as fh:
+                fh.write(line)
+        # No event file (unit tests): keep events in memory.
+        if not hasattr(self, "_mem"):
+            self._mem = []
+        if not self._events_path:
+            self._mem.append(rec)
+
+    def log(self, event: str, aliases: list[str], **extra) -> None:
+        if getattr(self._local, "in_log", False):
+            return
+        self._local.in_log = True
+        try:
+            self._log_fn({"type": "audit", "kind": "audit", "event": event,
+                          "aliases": sorted(set(aliases)), "variant": self.variant,
+                          "run_id": self.run_id, "session": self.session, **extra})
+        finally:
+            self._local.in_log = False
+
+    # ---------- classification ----------
+
+    def aliases_of(self, path: str) -> list[str]:
+        """Every alias whose roots contain the path (a path can sit under
+        several aliases; logging only the first would blind exposure scans
+        for the others)."""
+        c = canon(path, os.getcwd())
+        if not c:
+            return []
+        return sorted(a for a, paths in self.roots.items() if any(under(c, p) for p in paths))
+
+    def alias_of(self, path: str) -> str | None:
+        found = self.aliases_of(path)
+        return found[0] if found else None
+
+    def is_analysis(self, path: str) -> bool:
+        c = canon(path, os.getcwd())
+        return bool(c and self.analysis_dir and (c == self.analysis_dir or under(c, self.analysis_dir)))
+
+    def is_script(self, path: str) -> bool:
+        c = canon(path, os.getcwd())
+        return bool(c and self.script and c == self.script)
+
+    def is_evidence_exempt(self, path: str) -> bool:
+        """No `.analysis` writes leave the locked subprocess — the status
+        and event files live in the parent-owned IPC directory outside the
+        workdir, so there is nothing to exempt."""
+        return False
+
+    def is_snapshot(self, path: str) -> bool:
+        c = canon(path, os.getcwd())
+        return bool(c and self.snapshots and (c == self.snapshots or under(c, self.snapshots)))
+
+    def recheck(self) -> bool:
+        return True
+
+
 class Ctx:
     """Resolved kernel policy for one run."""
 
     def __init__(self, wd: Workdir, lock: dict, variant: str, run_id: str, session: str,
-                 log_fn=None):
+                 log_fn=None, script: str = ""):
         from ddalib.layout import load_config
         cfg = load_config(wd)
         self.wd = wd
@@ -92,6 +192,7 @@ class Ctx:
         allowed = [p for ps in self.roots.values() for p in ps]
         self.allowed_dirs = sorted(set(allowed + [canon(str(wd.root / "derived")),
                                                   canon(str(wd.root / "outputs"))]))
+        self.script = canon(script, os.getcwd()) if script else ""
         self._log_fn = log_fn or self._chain_log
         self._local = threading.local()
         self._valid_at = 0.0
@@ -135,18 +236,16 @@ class Ctx:
         return bool(c and self.analysis_dir and (c == self.analysis_dir or under(c, self.analysis_dir)))
 
     def is_evidence_exempt(self, path: str) -> bool:
-        """Write paths the kernel itself needs: its status file (plus the
-        `.pid.tmp` sibling write_status() renames into place) and the audit
-        log it appends to (plus chain spill dirs). Everything else under
-        .analysis is hand-off evidence and refused from inside the kernel."""
-        c = canon(path, os.getcwd())
-        if not c:
-            return False
-        if self.status_path and (c == self.status_path or c.startswith(self.status_path + ".")):
-            return True
-        if self.audit_path and (c == self.audit_path or c.startswith(self.audit_path + ".")):
-            return True
+        """Nothing under `.analysis` is writable from inside the kernel:
+        the status and event files live in the parent-owned IPC directory
+        outside the workdir, so there is nothing to exempt."""
         return False
+
+    def is_script(self, path: str) -> bool:
+        """The entry script is the single `.analysis` path the kernel may
+        open — read-only (the parent launches it by path)."""
+        c = canon(path, os.getcwd())
+        return bool(c and self.script and c == self.script)
 
     def is_snapshot(self, path: str) -> bool:
         c = canon(path, os.getcwd())
@@ -201,15 +300,17 @@ def install_audit_hook(ctx: Ctx):
                     return
             write = _is_write_mode(mode, flags)
             if ctx.is_analysis(p):
-                # Evidence files are hand-off: user code may read them, but
-                # only the kernel's own status file and audit-log appends
-                # may write. Reads pass silently (no data values live here).
-                if not write or ctx.is_evidence_exempt(p):
+                # Locked subprocess: user code may read only the entry
+                # script (the parent launches it by path); every other
+                # open under .analysis — reads and writes alike — is
+                # refused. Evidence leaves the kernel through the IPC
+                # event file, never through a direct chain append.
+                if not write and hasattr(ctx, "is_script") and ctx.is_script(p):
                     return
                 ctx.log("open-refused", [], path=p[:300], mode=str(mode)[:20],
-                        reason="write to .analysis evidence (only derived/ or outputs/)")
-                raise KernelRefusal("dda kernel: writes to .analysis evidence are refused "
-                                    "(write derived data to derived/ or outputs/)")
+                        reason="no .analysis access from inside the kernel (only the entry script, read-only)")
+                raise KernelRefusal("dda kernel: .analysis is not accessible from inside the kernel "
+                                    "(only the entry script, read-only)")
             aliases = ctx.aliases_of(p)
             snap = ctx.is_snapshot(p)
             if not aliases and not snap:
@@ -269,12 +370,12 @@ def _refuse_remote(ctx: Ctx, target) -> str | None:
 def _check_local(ctx: Ctx, target, *, write: bool, what: str):
     _refuse_remote(ctx, target)
     if ctx.is_analysis(str(target)):
-        if write and not ctx.is_evidence_exempt(str(target)):
-            ctx.log(f"{what}-refused", [], path=str(target)[:300],
-                    reason="write to .analysis evidence")
-            raise KernelRefusal(f"dda kernel: {what} write to .analysis evidence refused; "
-                                "write derived data to derived/ or outputs/")
-        return
+        if not write and hasattr(ctx, "is_script") and ctx.is_script(str(target)):
+            return
+        ctx.log(f"{what}-refused", [], path=str(target)[:300],
+                reason="no .analysis access from inside the kernel")
+        raise KernelRefusal(f"dda kernel: {what} access to .analysis refused; "
+                            "only the entry script (read-only), derived data to derived/ or outputs/")
     aliases = ctx.aliases_of(str(target))
     snap = ctx.is_snapshot(str(target))
     if not aliases and not snap:
@@ -639,7 +740,7 @@ def install_display_limit(ctx: Ctx, max_rows: int = 20) -> str:
 # ---------- startup ----------
 
 def write_status(payload: dict) -> None:
-    path = os.environ.get(STATUS_ENV)
+    path = os.environ.get(IPC_STATUS_ENV) or os.environ.get(STATUS_ENV)
     if not path:
         return
     tmp = path + f".{os.getpid()}.tmp"
@@ -647,6 +748,54 @@ def write_status(payload: dict) -> None:
         json.dump(payload, fh, sort_keys=True)
         fh.write("\n")
     os.replace(tmp, path)
+
+
+def boot_ipc() -> tuple[PolicyCtx, dict]:
+    """Boot the locked subprocess from the parent's frozen policy file.
+
+    No Workdir, no lock, no ledger reads: everything the kernel needs is
+    in the policy snapshot. Refuses to run user code when the policy
+    file is absent or unreadable."""
+    from ddalib import kernel as _k
+    ppath = os.environ.get(POLICY_ENV) or ""
+    try:
+        with open(ppath, encoding="utf-8") as fh:
+            policy = json.load(fh)
+    except (OSError, ValueError, TypeError):
+        raise SystemExit("dda kernel: no policy snapshot from the parent; refusing to run")
+    if not isinstance(policy, dict) or not policy.get("run_id"):
+        raise SystemExit("dda kernel: policy snapshot is invalid; refusing to run")
+    ctx = PolicyCtx(policy)
+    status: dict = {"python": sys.version.split()[0], "ok": True, "ipc": True}
+    status.update(install_audit_hook(ctx))
+    versions, missing = _k.baseline_versions()
+    status["baseline"] = versions
+    if missing:
+        status["ok"] = False
+        status["missing_baseline"] = missing
+    status["wrappers"] = apply_wrappers(ctx)
+    unenforced = [lib for lib, st in status["wrappers"].items()
+                  if st.startswith(("not-installed", "wrap-failed"))]
+    status["network_policy"] = ("detect-only (unenforced native path: " + ", ".join(unenforced) + ")"
+                                if unenforced else "audit+wrapper-enforced")
+    seed = int(policy.get("seed") or 0)
+    try:
+        import random as _r
+        _r.seed(seed)
+    except Exception:
+        pass
+    try:
+        import numpy as _np
+        _np.random.seed(seed % 4294967296)
+    except Exception:
+        pass
+    status["seed"] = seed
+    status["display"] = install_display_limit(ctx)
+    ky = policy.get("kernel_yaml")
+    status["environment_hash"] = _k.environment_hash(
+        versions, ky.encode("utf-8") if isinstance(ky, str) else None)
+    write_status(status)
+    return ctx, status
 
 
 def boot() -> tuple[Ctx, dict]:
@@ -710,7 +859,10 @@ def main(argv: list[str]) -> int:
     if not argv:
         print("usage: python -I -P <scripts>/ddalib/kernel_bootstrap.py <script> [args...]", file=sys.stderr)
         return 2
-    ctx, status = boot()
+    if os.environ.get(POLICY_ENV):
+        ctx, status = boot_ipc()
+    else:
+        ctx, status = boot()
     if not status.get("ok"):
         print(f"dda kernel does not start: missing baseline packages: "
               f"{', '.join(status.get('missing_baseline') or [])} (§10.1a)", file=sys.stderr)
@@ -718,11 +870,11 @@ def main(argv: list[str]) -> int:
     script = os.path.abspath(argv[0])
     sys.argv = [script, *argv[1:]]
     sys.path.insert(0, os.path.dirname(script))
-    ctx.log("kernel-start", ctx.aliases, script=script)
+    ctx.log("kernel-start", ctx.aliases, script=script, via_ipc=True)
     try:
         runpy.run_path(script, run_name="__main__")
     finally:
-        ctx.log("kernel-stop", ctx.aliases, script=script)
+        ctx.log("kernel-stop", ctx.aliases, script=script, via_ipc=True)
     return 0
 
 
@@ -741,7 +893,9 @@ def self_test() -> int:
     (analysis / "ledger.md").write_text("# ledger\n", encoding="utf-8")
     audit_p = analysis / "audit.log"
     audit_p.write_text("", encoding="utf-8")
-    status_p = tmp / ".kernel-test.json"
+    (analysis / "variants").mkdir(exist_ok=True)
+    (analysis / "variants" / "v1.py").write_text("x = 1\n", encoding="utf-8")
+    status_p = analysis / ".kernel-test.json"
     events: list[dict] = []
 
     class FakeCtx:
@@ -751,8 +905,7 @@ def self_test() -> int:
         snapshots = canon(str(tmp / "snaps"))
         allowed_dirs = [canon(str(raw))]
         analysis_dir = canon(str(analysis))
-        audit_path = canon(str(audit_p))
-        status_path = canon(str(status_p))
+        script = canon(str(analysis / "variants" / "v1.py"))
 
         def __init__(self):
             self._valid = True
@@ -771,14 +924,11 @@ def self_test() -> int:
             c = canon(path, os.getcwd())
             return bool(c and (c == self.analysis_dir or under(c, self.analysis_dir)))
 
-        def is_evidence_exempt(self, path):
+        def is_script(self, path):
             c = canon(path, os.getcwd())
-            if not c:
-                return False
-            if c == self.status_path or c.startswith(self.status_path + "."):
-                return True
-            if c == self.audit_path or c.startswith(self.audit_path + "."):
-                return True
+            return bool(c and self.script and c == self.script)
+
+        def is_evidence_exempt(self, path):
             return False
 
         def is_snapshot(self, path):
@@ -817,17 +967,28 @@ def self_test() -> int:
     outside = tmp / "elsewhere.txt"
     ok, _ = tried(lambda: open(outside, "w"))
     checks["outside-raw-allowed"] = ok
-    # Evidence is hand-off: user code may read .analysis, never write it
-    # (except the kernel's own status file and audit-log appends).
+    # Locked subprocess: user code may read only the entry script;
+    # every other open under .analysis — reads and writes alike — is
+    # refused (status and audit traffic leave via the IPC directory
+    # outside the workdir).
     ok, _ = tried(lambda: open(analysis / "ledger.md").read())
-    checks["evidence-read-allowed"] = ok
+    checks["evidence-read-refused"] = (not ok) and any(
+        e["event"] == "open-refused" and "analysis" in str(e.get("reason", "")) for e in events)
+    script_p = analysis / "variants" / "v1.py"
+    ok, _ = tried(lambda: open(script_p).read())
+    checks["script-read-allowed"] = ok
+    ok, _ = tried(lambda: open(script_p, "w"))
+    checks["script-write-refused"] = (not ok) and any(
+        e["event"] == "open-refused" and "analysis" in str(e.get("reason", "")) for e in events)
     ok, _ = tried(lambda: open(analysis / "ledger.md", "a"))
     checks["evidence-write-refused"] = (not ok) and any(
         e["event"] == "open-refused" and "analysis" in str(e.get("reason", "")) for e in events)
     ok, _ = tried(lambda: open(audit_p, "a"))
-    checks["audit-append-allowed"] = ok
+    checks["audit-append-refused"] = (not ok) and any(
+        e["event"] == "open-refused" and "analysis" in str(e.get("reason", "")) for e in events)
     ok, _ = tried(lambda: open(status_p, "w"))
-    checks["status-write-allowed"] = ok
+    checks["status-write-refused"] = (not ok) and any(
+        e["event"] == "open-refused" and "analysis" in str(e.get("reason", "")) for e in events)
     import socket as _sock
     ok, _ = tried(lambda: _sock.socket().connect(("169.254.169.254", 80)))
     checks["strange-host-refused"] = not ok
