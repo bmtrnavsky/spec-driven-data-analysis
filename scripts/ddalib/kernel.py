@@ -14,12 +14,21 @@ specs-tried.jsonl entry types used here (all hash-chained via ddalib.chain):
 
 The kernel is a separate locked subprocess (§10.1): `do_run` freezes
 policy into a JSON snapshot in a parent-owned IPC directory outside the
-workdir, spawns the child with a clean environment, and after the child
-exits imports its audit-event file into `audit.log` through the locked
-appender and writes the kernel record. The child never reads
+workdir, preflights the baseline in an isolated interpreter with the
+exact child env, spawns the child with a clean environment, and after
+the child exits imports its audit-event file into `audit.log` through
+the locked appender and writes the kernel record. The child never reads
 `spec.lock`, the ledger, or any chain, and never appends to one; the
 audit hook refuses every `.analysis` open from inside the kernel except
 a read-only open of the entry script itself.
+
+The kernel record is parent-owned, never trusted from the child's IPC
+status file: the baseline versions and environment hash come from the
+parent's preflight, the verdict comes from the child's exit code and
+the run-id-bound status file (a status whose run id does not match the
+spawned run is treated as untrusted), and the event file is size-capped
+and schema-checked before import. A forged or missing status file can
+only downgrade a record to untrusted, never upgrade it.
 
 Stdlib only. Everything fails closed: unknown alias, missing lock, invalid
 lock, unregistered variant, or a changed script body is an error, never a
@@ -49,13 +58,22 @@ from .matching import canon
 BASELINE = ("pandas", "numpy", "pyarrow", "polars", "duckdb", "scipy", "statsmodels", "sklearn",
             "matplotlib", "seaborn", "openpyxl", "xlrd", "ipykernel", "IPython", "jupyter_client")
 
-# Test/harness channel: an extra import dir the kernel bootstrap prepends
-# for baseline stubs, so the missing-baseline refusal is reproducible on
-# any host (with or without the real stack installed). It is the only
-# honoured path injection: the child is launched `-I -P` and ignores
+# Test/harness channel for baseline stubs (lets the missing-baseline
+# refusal reproduce on any host, with or without the real stack). It is
+# read by the PARENT only, from the parent's own environment, validated
+# (must be an existing dir when set), frozen into the policy snapshot,
+# and STRIPPED from the child env: the child never honours
+# DDA_BASELINE_DIR, so user code cannot inject a stub directory that
+# shadows the real stack. The child is launched `-I -P` and ignores
 # PYTHONPATH/PYTHONHOME; `ddalib` itself is pinned to the repo scripts
 # dir and a swapped copy refuses to boot.
 BASELINE_DIR_ENV = "DDA_BASELINE_DIR"
+
+# Child-written IPC is untrusted input: caps so a hostile or runaway
+# kernel cannot blow up the parent's memory or logs.
+STATUS_MAX_BYTES = 1_000_000
+EVENTS_MAX_BYTES = 32_000_000
+EVENT_LINE_MAX_BYTES = 262_144
 
 # Structured variant header fields (§4.3). A change to any field is a new variant.
 HEADER_FIELDS = ("population", "window", "filters", "cuts", "model", "outlier_rule", "definitions")
@@ -326,6 +344,89 @@ def environment_hash(versions: dict[str, str | None], kernel_yaml: bytes | None)
     return hashlib.sha256(("\n".join(lines) + "\n").encode("utf-8")).hexdigest()
 
 
+def _preflight_baseline(bootstrap: str, env: dict, baseline_dir: str) -> tuple[dict, list[str]]:
+    """Parent-owned baseline check, in an isolated child interpreter.
+
+    Runs `kernel_bootstrap --check-baseline` with the exact env the real
+    kernel will get (plus the parent-supplied stub dir on argv, never via
+    the environment), and returns (versions, missing). The record's
+    baseline verdict comes from here — never from the kernel's own
+    status file, which user code can rewrite. Fail closed: any preflight
+    failure looks like a missing stack, not a pass.
+    """
+    argv = [sys.executable, "-I", "-P", bootstrap, "--check-baseline",
+            baseline_dir if baseline_dir else "-"]
+    try:
+        proc = subprocess.run(argv, env=env, capture_output=True, text=True,
+                              errors="replace", timeout=120)
+        payload = json.loads(proc.stdout.strip().splitlines()[-1]) if proc.stdout.strip() else {}
+    except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+        return {}, ["preflight did not complete"]
+    if not isinstance(payload, dict) or proc.returncode != 0 and not payload.get("missing"):
+        return {}, ["preflight did not complete"]
+    versions = payload.get("versions")
+    missing = payload.get("missing")
+    if not isinstance(versions, dict) or not isinstance(missing, list):
+        return {}, ["preflight returned an invalid report"]
+    return versions, [str(m) for m in missing]
+
+
+def _read_child_status(status_path: Path, run_id: str) -> tuple[dict, bool]:
+    """Read the kernel's IPC status file as untrusted input.
+
+    Returns (status, trusted). Trusted requires: file present, within
+    size cap, valid JSON dict, and a `run_id` matching this run — binding
+    the file to the spawn, so a stale or forged file from another run
+    (or written by user code that read the policy) cannot pass.
+    """
+    try:
+        if status_path.stat().st_size > STATUS_MAX_BYTES:
+            return {}, False
+        raw = status_path.read_text(encoding="utf-8")
+    except OSError:
+        return {}, False
+    try:
+        status = json.loads(raw)
+    except ValueError:
+        return {}, False
+    if not isinstance(status, dict):
+        return {}, False
+    if status.get("run_id") != run_id:
+        return status, False
+    return status, True
+
+
+def _read_child_events(events_path: Path) -> list[dict]:
+    """Read the kernel's IPC event file as untrusted input.
+
+    Size-capped (total + per-line): a hostile or runaway kernel must not
+    be able to blow up the parent's memory. Non-dict and unparsable lines
+    are dropped; every surviving record is still validated by the chained
+    appender on import.
+    """
+    child_events: list[dict] = []
+    try:
+        if events_path.stat().st_size > EVENTS_MAX_BYTES:
+            data = events_path.read_bytes()[:EVENTS_MAX_BYTES].decode("utf-8", errors="replace")
+        else:
+            data = events_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    for line in data.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if len(line.encode("utf-8", errors="replace")) > EVENT_LINE_MAX_BYTES:
+            continue
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(rec, dict):
+            child_events.append(rec)
+    return child_events
+
+
 def _default_seed(lock_hash: str, vid: str) -> int:
     return int(hashlib.sha256(f"{lock_hash}:{vid}".encode()).hexdigest()[:8], 16)
 
@@ -381,6 +482,14 @@ def do_run(wd: Workdir, vid: str, script: str, script_args: list[str], *, sessio
     # The child never reads spec.lock, the ledger, or any chain; it gets
     # everything from this file, which lives in a parent-owned IPC
     # directory outside the workdir.
+    #
+    # DDA_BASELINE_DIR (the test/harness stub channel) is read HERE, in
+    # the parent, validated, and frozen into the policy. It is stripped
+    # from the child env below: user code must not be able to inject a
+    # stub directory that shadows the real data stack.
+    baseline_dir = os.environ.get(BASELINE_DIR_ENV) or ""
+    if baseline_dir and not os.path.isdir(baseline_dir):
+        raise DdaError(f"{BASELINE_DIR_ENV} names a missing directory: {baseline_dir!r}")
     cfg = load_config(wd)
     roots: dict[str, list[str]] = {}
     hosts: set[str] = set()
@@ -406,7 +515,8 @@ def do_run(wd: Workdir, vid: str, script: str, script_args: list[str], *, sessio
                                          + [canon(str(wd.root / "derived")),
                                             canon(str(wd.root / "outputs"))])),
               "lock_hash": lock_hash, "variant": vid, "run_id": run_id,
-              "session": session, "seed": run_seed, "kernel_yaml": ky_text}
+              "session": session, "seed": run_seed, "kernel_yaml": ky_text,
+              "baseline_dir": baseline_dir}
     policy_bytes = json.dumps(policy, sort_keys=True).encode("utf-8")
     policy_hash = hashlib.sha256(policy_bytes).hexdigest()
     ipc_dir = Path(tempfile.mkdtemp(prefix="dda-kernel-"))
@@ -424,12 +534,20 @@ def do_run(wd: Workdir, vid: str, script: str, script_args: list[str], *, sessio
     env.pop("PYTHONPATH", None)
     env.pop("PYTHONHOME", None)
     env.pop("PYTHONSAFEPATH", None)
+    # The child never honours DDA_BASELINE_DIR: stub dirs arrive via the
+    # frozen policy (parent-owned), never via the child environment.
+    env.pop(BASELINE_DIR_ENV, None)
     bootstrap = str(Path(__file__).resolve().parent / "kernel_bootstrap.py")
     env.update({
         "DDA_POLICY_FILE": str(policy_path),
         "DDA_IPC_EVENTS": str(events_path),
         "DDA_IPC_STATUS": str(status_path),
         "DDA_KERNEL_STATUS": str(status_path),
+        # Containment: the audit hook refuses subprocess spawns, `os`-level
+        # raw mutation, and `.analysis` enumeration only when this is set
+        # (captured at hook install, before user code runs, so user code
+        # cannot switch it off). Set for every kernel, no exceptions.
+        "DDA_KERNEL_ACTIVE": "1",
         "DDA_WORKDIR": str(wd.root),
         "DDA_MILESTONE": wd.milestone or "",
         "DDA_VARIANT": vid,
@@ -441,6 +559,19 @@ def do_run(wd: Workdir, vid: str, script: str, script_args: list[str], *, sessio
         "HTTP_PROXY": env.get("HTTP_PROXY") or DEAD_PROXY,
         "HTTPS_PROXY": env.get("HTTPS_PROXY") or DEAD_PROXY,
     })
+    # Parent-owned baseline preflight: run the SAME startup check the
+    # child will run, in an isolated interpreter with the exact child env,
+    # BEFORE spawning the real kernel. The child's status file is
+    # child-writable (user code runs in the same process and inherits the
+    # IPC env vars), so the record's baseline verdict must not come from
+    # it: a forged status claiming a complete stack can never upgrade the
+    # record. If the stack is incomplete the run is refused here, before
+    # any user code executes.
+    versions, missing = _preflight_baseline(bootstrap, env, baseline_dir)
+    if missing:
+        raise DdaError(f"dda kernel does not start: missing baseline packages: "
+                       f"{', '.join(missing)} (§10.1a)")
+    env_hash = environment_hash(versions, ky_text.encode("utf-8") if ky_text is not None else None)
     t0 = time.time()
     # errors="replace": the child runs `-I` (PYTHONUTF8 is ignored there),
     # so its stdio encoding is the platform locale, not necessarily UTF-8.
@@ -448,37 +579,49 @@ def do_run(wd: Workdir, vid: str, script: str, script_args: list[str], *, sessio
                           cwd=str(wd.root), env=env, capture_output=True, text=True,
                           errors="replace")
     dt = round(time.time() - t0, 3)
-    try:
-        status = json.loads(status_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        status = {"ok": False, "error": "kernel did not write its status file"}
-    child_events: list[dict] = []
-    try:
-        for line in events_path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                rec = json.loads(line)
-            except ValueError:
-                continue
-            if isinstance(rec, dict):
-                child_events.append(rec)
-    except OSError:
-        pass
+    # The status file is child-writable: user code runs in the same
+    # process as the bootstrap and inherits the IPC env vars, so it can
+    # overwrite status.json with forged claims. The parent therefore owns
+    # the verdict: the baseline and environment hash come from the
+    # preflight above, and a status file is only *informational* when its
+    # run id matches this run. A forged, stale, or missing status can only
+    # downgrade the record to untrusted, never upgrade it.
+    status, status_trusted = _read_child_status(status_path, run_id)
+    child_events = _read_child_events(events_path)
     try:
         shutil.rmtree(ipc_dir, ignore_errors=True)
     except OSError:
         pass
-    versions = status.get("baseline") or {}
-    env_hash = environment_hash(versions, ky_text.encode("utf-8") if ky_text is not None else None)
-    net = status.get("network_policy") or "detect-only (kernel status missing)"
+    # Parent-owned network policy: enforced only when the preflight saw
+    # the full stack AND the (bound, trusted) child status reports no
+    # unenforced native path. The child's bad news is believed (fail
+    # closed); its good news is verified against the preflight.
+    unenforced: list[str] = []
+    if status_trusted and isinstance(status.get("wrappers"), dict):
+        for lib, state in status["wrappers"].items():
+            s = str(state)
+            if s.startswith(("not-installed", "wrap-failed")):
+                unenforced.append(f"{lib}: {s[:120]}")
+    if unenforced:
+        net = "detect-only (unenforced native path: " + ", ".join(sorted(unenforced)) + ")"
+    elif not status_trusted:
+        net = "detect-only (kernel status untrusted)"
+    else:
+        net = "audit+wrapper-enforced"
+    child_net = status.get("network_policy") if status_trusted else None
+    if child_net and child_net != "audit+wrapper-enforced" and net == "audit+wrapper-enforced":
+        # The bound status file reports a detect-only path the parent
+        # cannot see (e.g. a runtime wrap failure): believe the bad news.
+        net = str(child_net)[:300]
     record = {"run_id": run_id, "variant": vid, "variant_key": reg.get("variant_key"),
-              "lock_hash": lock_hash, "seed": run_seed, "python": status.get("python") or sys.version.split()[0],
+              "lock_hash": lock_hash, "seed": run_seed, "python": sys.version.split()[0],
               "ipc": True, "policy_hash": policy_hash, "event_count": len(child_events),
               "baseline": versions, "environment_hash": env_hash, "network_policy": net,
-              "audit_hook": status.get("audit_hook"), "wrappers": status.get("wrappers"),
-              "display": status.get("display"), "returncode": proc.returncode,
+              "status_trusted": status_trusted,
+              "audit_hook": status.get("audit_hook") if status_trusted else "untrusted (status not bound)",
+              "wrappers": status.get("wrappers") if status_trusted else "untrusted (status not bound)",
+              "display": status.get("display") if status_trusted else "untrusted (status not bound)",
+              "returncode": proc.returncode,
               "elapsed_s": dt, "stdout_tail": proc.stdout[-2000:], "stderr_tail": proc.stderr[-2000:]}
     kdir = wd.analysis / "runs" / "kernels"
     kdir.mkdir(parents=True, exist_ok=True)

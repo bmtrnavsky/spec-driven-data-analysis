@@ -407,9 +407,11 @@ class Harness:
                     "prevented", vdup.stderr.strip()[:150],
                     "a change to any header field is a new variant id (§4.3)")
         # 3. The kernel does not start without the full baseline stack (§10.1a).
-        #    Host-independent: a stub dir whose duckdb raises on import shadows
-        #    any real stack through DDA_BASELINE_DIR, so the refusal reproduces
-        #    on every host (with or without the stack installed).
+        #    Host-independent: a stub dir whose duckdb raises on import is
+        #    read by the PARENT from DDA_BASELINE_DIR, frozen into the
+        #    policy, and stripped from the child env — so the refusal
+        #    reproduces on every host (with or without the stack installed),
+        #    and the child never honours the variable itself.
         (self.wd / ".analysis" / "variants" / "v1.py").write_text(
             "open(r'" + rawf + "').read()\n", encoding="utf-8")
         broken = self.scratch / "broken-baseline"
@@ -501,6 +503,17 @@ class Harness:
         self._live_native_probe("", "native.kernel-evidence-write",
                                 "kernel user code opens .analysis evidence for append", rawf)
         # 6. Orphan runs fail G6: a data read with no registered variant id.
+        # Containment (§10.1): `os`-level mutation and subprocess spawns
+        # bypass `open` entirely; the hook refuses them, never merely logs.
+        for _cid, _attack in (
+                ("native.kernel-os-remove-raw", "kernel user code os.remove()s a raw file"),
+                ("native.kernel-os-rename-away-raw", "kernel user code os.rename()s a raw file away"),
+                ("native.kernel-shutil-copy-raw", "kernel user code shutil.copy()s onto a raw root"),
+                ("native.kernel-listdir-analysis", "kernel user code enumerates .analysis"),
+                ("native.kernel-spawn-contained", "kernel user code spawns a subprocess"),
+        ):
+            self._live_native_probe("", _cid, _attack, rawf)
+        self._status_forgery_probe(rawf)
         orph_py = ("import sys; sys.path.insert(0, sys.argv[1]); from pathlib import Path; "
                    "from ddalib import chain; "
                    "chain.append(Path(sys.argv[2]), {'type':'done','session':'rt-orphan','tool':'x',"
@@ -602,6 +615,17 @@ class Harness:
                  "prevented"),
             "native.kernel-evidence-write":
                 ("open('.analysis/runs.log', 'a').write('forged\\n')", "prevented"),
+            "native.kernel-os-remove-raw":
+                ("import os; os.remove(r'%s')" % rawf, "prevented"),
+            "native.kernel-os-rename-away-raw":
+                ("import os; os.rename(r'%s', r'%s.moved')" % (rawf, rawf), "prevented"),
+            "native.kernel-shutil-copy-raw":
+                ("import shutil; shutil.copy(r'%s', r'%s')" % (rawf, rawdir + "/evil-sh.csv"),
+                 "prevented"),
+            "native.kernel-listdir-analysis":
+                ("import os; print(os.listdir('.analysis'))", "prevented"),
+            "native.kernel-spawn-contained":
+                ("import subprocess, sys; subprocess.run([sys.executable, '-c', 'pass'])", "prevented"),
         }
         body, expected = bodies[cid]
         r, logged = self._kernel_probe_run("rt-" + cid.split(".", 1)[1].replace("_", "-"), body)
@@ -621,6 +645,48 @@ class Harness:
                         "prevented" if ok else "missed", "prevented",
                         (out.strip()[-200:] if ok else "exit %d, no refusal: %s" % (r.returncode, out.strip()[-200:])),
                         "audit hook + native wrappers (§10.1, §10.1b)")
+
+    def _status_forgery_probe(self, rawf: str):
+        """The kernel record is parent-owned, never trusted from the
+        child's IPC status file: user code runs in the same process as
+        the bootstrap and inherits the IPC env vars, so it CAN rewrite
+        status.json. Forged good news (empty baseline, fake python) must
+        not take: the run succeeds, but the record keeps the preflight
+        baseline and stays trusted (run-id bound)."""
+        cid = "native.kernel-status-forged"
+        attack = "kernel user code forges its IPC status file"
+        if not self._full_baseline():
+            self.record(cid, "native paths", attack + " (no runnable kernel here)",
+                        "detected", "detected",
+                        "incomplete stack here: covered by kernel.start-no-baseline",
+                        "startup check (10.1a)")
+            return
+        vid = "rt-kernel-status-forged"
+        self.dda("variant", vid, str(self.wd), "--why", "redteam status-forgery probe",
+                 "--set", "population=all", "--set", "model=diff")
+        body = "import csv, json, os\nrows = open(r'" + rawf + "').read()\n"
+        body += "import os as _o\n_o.makedirs('derived', exist_ok=True)\n"
+        body += "open('derived/f.out', 'w').write('n=%d\\n' % len(rows))\n"
+        body += "forged = {'ok': True, 'run_id': _o.environ.get('DDA_RUN_ID'),\n"
+        body += " 'baseline': {}, 'python': '9.9.9-forged'}\n"
+        body += "open(_o.environ['DDA_IPC_STATUS'], 'w').write(json.dumps(forged))\n"
+        sp = self.wd / ".analysis" / "variants" / (vid + ".py")
+        sp.write_text(body, encoding="utf-8")
+        r = self.dda("run", "--variant", vid, "--workdir", str(self.wd), str(sp), check=False)
+        out = (r.stdout + r.stderr)
+        rec, kern = None, None
+        for e in chain.read_records(self.wd / ".analysis" / "specs-tried.jsonl"):
+            if e.get("type") == "run" and e.get("variant") == vid:
+                kern = self.wd / ".analysis" / e.get("kernel", "")
+        if kern is not None and kern.is_file():
+            rec = json.loads(kern.read_text(encoding="utf-8"))
+        ok = (r.returncode == 0 and isinstance(rec, dict)
+              and len(rec.get("baseline") or {}) == 15
+              and rec.get("status_trusted") is True)
+        self.record(cid, "native paths", attack + " (live: forged status in a real kernel)",
+                    "prevented" if ok else "missed", "prevented",
+                    ("record keeps parent-owned baseline" if ok else out.strip()[-200:]),
+                    "parent-owned kernel record: preflight baseline, run-id-bound status")
 
     def pending_phases(self):
         pend = [

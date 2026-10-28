@@ -96,6 +96,9 @@ class Base(unittest.TestCase):
     def tearDown(self):
         os.environ.clear()
         os.environ.update(self._env)
+        # The audit hook is process-global and cannot be uninstalled: never
+        # let an in-process install leak containment into later tests.
+        kernel_bootstrap._HOOK_STATE["contained"] = False
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def write_spec(self, extra=""):
@@ -131,10 +134,14 @@ class Base(unittest.TestCase):
                                        why=d["why"], label=d.get("label"), header=d["header"])
 
     def stub_baseline(self, broken: str | None = None):
-        """Host-independent stub stack via DDA_BASELINE_DIR (the bootstrap
-        prepends it even under `-I -P`, where PYTHONPATH is ignored). With
-        `broken=<pkg>`, that package raises on import so the startup check
-        refuses on ANY host, with or without the real stack installed."""
+        """Host-independent stub stack via DDA_BASELINE_DIR.
+
+        The parent (`dda run`) reads this from its OWN environment,
+        validates it, freezes it into the policy snapshot, and strips it
+        from the child env — the bootstrap honors the policy value even
+        under `-I -P`, where PYTHONPATH is ignored. With `broken=<pkg>`,
+        that package raises on import so the startup check refuses on ANY
+        host, with or without the real stack installed."""
         d = self.tmp / "stubs"
         d.mkdir(exist_ok=True)
         for name, body in STUBS.items():
@@ -386,6 +393,142 @@ class TestKernelRun(Base):
                            env={k: v for k, v in os.environ.items() if k != "PYTHONPATH"})
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertTrue(all(json.loads(r.stdout)["checks"].values()))
+
+    def test_baseline_dir_missing_fails_closed(self):
+        # The parent validates DDA_BASELINE_DIR before spawning: a named
+        # stub dir that does not exist is an error, never a silent pass.
+        self.stub_baseline()
+        self.lock()
+        self.register("v1")
+        self.write_variant_script("v1")
+        os.environ["DDA_BASELINE_DIR"] = str(self.tmp / "no-such-dir")
+        with self.assertRaises(DdaError) as cm:
+            kernel.do_run(self.wd, "v1", str(self.wd.analysis / "variants" / "v1.py"), [], seed=1)
+        self.assertIn("DDA_BASELINE_DIR", str(cm.exception))
+
+    def test_child_env_strips_baseline_dir(self):
+        # The child must not see DDA_BASELINE_DIR (user code could point
+        # it at a hostile stub dir); stubs arrive via the frozen policy.
+        self.stub_baseline()
+        self.lock()
+        self.register("v1")
+        sp = self.write_variant_script(
+            "v1", "import os\n"
+                   "os.makedirs('derived', exist_ok=True)\n"
+                   "open('derived/env.txt', 'w').write(repr(os.environ.get('DDA_BASELINE_DIR')))\n")
+        rec = kernel.do_run(self.wd, "v1", str(sp), [], session="s-strip", seed=1)
+        self.assertEqual(rec["returncode"], 0)
+        self.assertEqual((self.wd.root / "derived" / "env.txt").read_text(encoding="utf-8"), "None")
+        # …yet the stub stack reached the child: the parent-owned baseline
+        # lists the full stack and the record is trusted.
+        self.assertEqual(sorted(rec["baseline"]), sorted(kernel.BASELINE))
+        self.assertTrue(rec["status_trusted"])
+
+    def test_run_refuses_os_level_mutation(self):
+        # `os.remove/rename/replace` bypass `open` entirely; the hook must
+        # refuse them on raw roots (either side of a rename).
+        self.stub_baseline()
+        self.lock()
+        self.register("v1")
+        sp = self.write_variant_script(
+            "v1", "import os\n"
+                   "root = os.environ.get('DDA_RAW', '')\n"
+                   "os.remove(os.path.join(root, 'orders.csv'))\n")
+        os.environ["DDA_RAW"] = str(self.raw)
+        with self.assertRaises(DdaError) as cm:
+            kernel.do_run(self.wd, "v1", str(sp), [], session="s-osremove", seed=1)
+        self.assertIn("refused", str(cm.exception))
+        self.assertEqual((self.raw / "orders.csv").read_text(encoding="utf-8"), ORDERS)
+
+    def test_run_refuses_spawn(self):
+        # The kernel is contained: subprocesses would run without the hook,
+        # the wrappers, or the policy, so spawns are refused, not logged.
+        self.stub_baseline()
+        self.lock()
+        self.register("v1")
+        sp = self.write_variant_script(
+            "v1", "import subprocess, sys\n"
+                   "subprocess.run([sys.executable, '-c', 'pass'])\n")
+        os.environ["DDA_RAW"] = str(self.raw)
+        with self.assertRaises(DdaError) as cm:
+            kernel.do_run(self.wd, "v1", str(sp), [], session="s-spawn", seed=1)
+        self.assertIn("refused", str(cm.exception))
+
+    def test_run_ignores_forged_status(self):
+        # User code runs in the same process as the bootstrap and inherits
+        # the IPC env vars, so it CAN rewrite status.json. The record must
+        # not follow forged good news: baseline and python stay
+        # parent-owned (preflight + parent interpreter).
+        self.stub_baseline()
+        self.lock()
+        self.register("v1")
+        sp = self.write_variant_script(
+            "v1", "import csv, json, os\n"
+                   "root = os.environ.get('DDA_RAW', '')\n"
+                   "rows = list(csv.reader(open(os.path.join(root, 'orders.csv'))))\n"
+                   "os.makedirs('derived', exist_ok=True)\n"
+                   "open('derived/out.csv', 'w').write('n=%d\\n' % (len(rows) - 1))\n"
+                   "forged = {'ok': True, 'ipc': True, 'run_id': os.environ.get('DDA_RUN_ID'),\n"
+                   "          'python': '9.9.9-forged', 'baseline': {},\n"
+                   "          'wrappers': {'duckdb': 'enforced'}, 'audit_hook': 'installed',\n"
+                   "          'network_policy': 'audit+wrapper-enforced', 'display': 'forged',\n"
+                   "          'environment_hash': 'sha256:forged'}\n"
+                   "tmp = os.environ['DDA_IPC_STATUS'] + '.forged'\n"
+                   "open(tmp, 'w').write(json.dumps(forged))\n"
+                   "os.replace(tmp, os.environ['DDA_IPC_STATUS'])\n")
+        os.environ["DDA_RAW"] = str(self.raw)
+        rec = kernel.do_run(self.wd, "v1", str(sp), [], session="s-forge", seed=1)
+        self.assertEqual(rec["returncode"], 0)
+        self.assertEqual(sorted(rec["baseline"]), sorted(kernel.BASELINE))
+        self.assertNotEqual(rec["python"], "9.9.9-forged")
+        self.assertTrue(rec["status_trusted"])
+
+    def test_run_marks_unbound_status_untrusted(self):
+        # A status file whose run id does not match the spawn (stale from
+        # another run, or forged without the id) is informational at most:
+        # the record downgrades to untrusted, never upgrades.
+        self.stub_baseline()
+        self.lock()
+        self.register("v1")
+        sp = self.write_variant_script(
+            "v1", "import csv, json, os\n"
+                   "root = os.environ.get('DDA_RAW', '')\n"
+                   "rows = list(csv.reader(open(os.path.join(root, 'orders.csv'))))\n"
+                   "os.makedirs('derived', exist_ok=True)\n"
+                   "open('derived/out.csv', 'w').write('n=%d\\n' % (len(rows) - 1))\n"
+                   "open(os.environ['DDA_IPC_STATUS'], 'w').write(\n"
+                   "    json.dumps({'ok': True, 'run_id': 'deadbeefcafe', 'baseline': {}}))\n")
+        os.environ["DDA_RAW"] = str(self.raw)
+        rec = kernel.do_run(self.wd, "v1", str(sp), [], session="s-unbound", seed=1)
+        self.assertEqual(rec["returncode"], 0)
+        self.assertFalse(rec["status_trusted"])
+        self.assertIn("untrusted", rec["network_policy"])
+        self.assertEqual(sorted(rec["baseline"]), sorted(kernel.BASELINE))
+
+    def test_read_child_status_binding(self):
+        d = self.tmp / "ipc"
+        d.mkdir(exist_ok=True)
+        good = d / "good.json"
+        good.write_text(json.dumps({"ok": True, "run_id": "abc123"}), encoding="utf-8")
+        status, trusted = kernel._read_child_status(good, "abc123")
+        self.assertTrue(trusted)
+        self.assertEqual(status["run_id"], "abc123")
+        status, trusted = kernel._read_child_status(good, "other-run")
+        self.assertFalse(trusted)  # stale/forged run id: untrusted
+        missing = d / "missing.json"
+        _, trusted = kernel._read_child_status(missing, "abc123")
+        self.assertFalse(trusted)
+        garbage = d / "garbage.json"
+        garbage.write_text("not json{", encoding="utf-8")
+        _, trusted = kernel._read_child_status(garbage, "abc123")
+        self.assertFalse(trusted)
+        big = d / "big.json"
+        with open(big, "wb") as fh:
+            fh.write(b'{"run_id": "abc123", "pad": "')
+            fh.write(b"x" * (kernel.STATUS_MAX_BYTES + 1))
+            fh.write(b'"}')
+        _, trusted = kernel._read_child_status(big, "abc123")
+        self.assertFalse(trusted)  # over the cap: untrusted
 
 
 class TestG6(Base):

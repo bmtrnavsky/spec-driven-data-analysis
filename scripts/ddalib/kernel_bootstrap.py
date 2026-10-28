@@ -19,7 +19,17 @@ Launched only by `dda run` (`python -I -P <scripts>/ddalib/kernel_bootstrap.py
    path and every `socket.connect` to the IPC event file, refuses all
    opens under `.analysis` (except reading the entry script), refuses
    write-mode opens on raw roots and snapshots, refuses non-allowlisted
-   hosts, and logs spawns;
+   hosts, refuses every `os`-level mutation or link on raw roots,
+   snapshots and `.analysis` (`remove`/`unlink`, `rmdir`, `mkdir`,
+   `rename`/`replace`, `link`, `symlink`, `truncate`), logs
+   `listdir`/`scandir` enumeration of raw roots and snapshots (refusing
+   it under `.analysis` and when the lock is invalid), and refuses every
+   subprocess spawn (`subprocess.Popen`, `os.spawn`/`posix_spawn`/`exec`,
+   `os.fork`, `os.system`, `os.startfile`) — the kernel is contained, it
+   has no child processes whose I/O the hook cannot see. The spawn,
+   `os`-mutation and enumeration refusals engage when DDA_KERNEL_ACTIVE=1
+   is present at hook-install time (`dda run` sets it for every kernel);
+   plain `open`/`socket` refusals are unconditional;
 3. applies the native lockdown + reader wrappers for duckdb, polars and
    pyarrow (each recorded as enforced / not-installed / wrap-failed);
 4. seeds randomness and installs the row-cap / PII-masking display formatter.
@@ -44,13 +54,12 @@ import time
 from pathlib import Path
 
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent
-# Test/harness channel: an extra import dir for baseline stubs (lets the
-# startup check run host-independently). This is the ONLY honourable
-# path injection: PYTHONPATH/PYTHONHOME are ignored because `dda run`
-# launches this file with `python -I -P`, and `ddalib` itself is pinned
-# to SCRIPTS_DIR below (a swapped `ddalib` anywhere else is refused).
-if os.environ.get("DDA_BASELINE_DIR"):
-    sys.path.insert(0, os.environ["DDA_BASELINE_DIR"])
+# Baseline stubs for tests/harness reach the child ONLY through the frozen
+# policy (`baseline_dir`, written by the parent from its own environment).
+# The child environment is stripped of DDA_BASELINE_DIR (and PYTHONPATH /
+# PYTHONHOME), so user code cannot inject a stub directory that shadows the
+# real stack; `ddalib` itself is pinned to SCRIPTS_DIR below (a swapped
+# copy anywhere else is refused).
 sys.path.insert(0, str(SCRIPTS_DIR))
 
 from ddalib import chain, lockstate  # noqa: E402
@@ -272,17 +281,82 @@ def _is_write_mode(mode, flags) -> bool:
     return False
 
 
-_HOOK_STATE: dict = {"ctx": None, "installed": False}
+def _iter_path_args(args) -> object:
+    """Yield every argument that could be a path (str/bytes/PathLike).
+
+    `os.*` audit events carry trailing dir-fd/mode ints after the path
+    arguments; those are skipped here.
+    """
+    for a in args or ():
+        if isinstance(a, (str, bytes, os.PathLike)):
+            yield a
+
+
+def _decode_path(p) -> str | None:
+    if isinstance(p, os.PathLike):
+        try:
+            p = os.fspath(p)
+        except Exception:
+            return None
+    if isinstance(p, bytes):
+        try:
+            p = p.decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+    return p if isinstance(p, str) else None
+
+
+# `os.*` audit events that mutate the filesystem or create links: every
+# path argument is checked, because a raw root can sit on either side
+# (`rename`/`replace` move a raw file away; a raw destination is a write).
+_OS_MUTATE_EVENTS = frozenset({
+    "os.remove", "os.unlink", "os.rmdir", "os.mkdir",
+    "os.rename", "os.link", "os.symlink", "os.truncate",
+})
+
+# `os.*` audit events that only enumerate: logged on raw roots and
+# snapshots (lock-gated like reads), refused under `.analysis`. `shutil`
+# copies/moves/trees route through these `os.*` primitives and `open`,
+# so they are covered transitively — there is no `shutil` audit event.
+_OS_LIST_EVENTS = frozenset({"os.listdir", "os.scandir"})
+
+# Spawning a subprocess would leave the containment boundary: the child
+# would run without the audit hook, the wrappers, or the policy. The
+# kernel is contained — spawns are refused, not merely logged — whenever
+# containment is engaged (DDA_KERNEL_ACTIVE=1 in the install environment,
+# which `dda run` sets for every real kernel). Gating matters because the
+# hook is process-global and cannot be uninstalled: library/harness use
+# of install_audit_hook in-process must not permanently contain the host.
+_SPAWN_EVENTS = frozenset({
+    "subprocess.Popen", "os.exec", "os.spawn", "os.posix_spawn",
+    "os.fork", "os.system", "os.startfile",
+})
+
+# Set at install time from the environment (before any user code runs).
+# Read dynamically by the hook so in-process test installs can disengage
+# afterwards; user code cannot reach this module's globals (the bootstrap
+# runs as __main__, and runpy replaces sys.modules['__main__'] with the
+# user script before it executes — only gc/ctypes-level introspection
+# could, which is outside the hook's bar like all native I/O).
+_HOOK_STATE: dict = {"ctx": None, "installed": False, "contained": False}
 
 
 def install_audit_hook(ctx: Ctx):
     """sys.addaudithook: log data-root opens and connects; refuse writes and strangers.
+
+    Containment (no subprocesses, no `os`-level raw mutation, no
+    `.analysis` enumeration) engages when DDA_KERNEL_ACTIVE=1 is present
+    at install time — `dda run` sets it for every real kernel. The flag
+    is captured here, before any user code runs, so user code cannot
+    switch containment off by editing its own environment.
 
     Idempotent: a second call in one process re-points the single hook at
     the new Ctx instead of stacking a stale hook that would refuse — and
     shadow — the live one.
     """
     _HOOK_STATE["ctx"] = ctx
+    if os.environ.get("DDA_KERNEL_ACTIVE") == "1":
+        _HOOK_STATE["contained"] = True
     if _HOOK_STATE["installed"]:
         return {"audit_hook": "installed"}
     def hook(event, args):
@@ -335,12 +409,58 @@ def install_audit_hook(ctx: Ctx):
             if not allowed:
                 raise KernelRefusal(f"dda kernel: network connect to {host!r} refused "
                                     f"(allowlist: {sorted(ctx.hosts) or 'none'})")
-        elif event in ("subprocess.Popen", "os.exec", "os.spawn", "os.system"):
+        elif event in _SPAWN_EVENTS and _HOOK_STATE["contained"]:
             try:
                 detail = str(args[0])[:200] if args else event
             except Exception:
                 detail = event
-            ctx.log("spawn", [], detail=detail)
+            ctx.log("spawn", [], detail=detail, refused=True)
+            raise KernelRefusal(f"dda kernel: subprocess spawn ({event}) is refused "
+                                f"(contained kernel: no child processes)")
+        elif event in _OS_MUTATE_EVENTS and _HOOK_STATE["contained"]:
+            # `os.remove/unlink/rmdir/mkdir/rename/replace/link/symlink/
+            # truncate` bypass `open` entirely (as does everything built on
+            # them: `pathlib` mutation, `shutil` move/copytree). Every path
+            # argument is checked — a raw root on either side of a rename
+            # is a mutation of raw data.
+            for raw_p in _iter_path_args(args):
+                p = _decode_path(raw_p)
+                if p is None:
+                    continue
+                if ctx.is_analysis(p):
+                    ctx.log("os-refused", [], path=p[:300], op=event,
+                            reason="no .analysis mutation from inside the kernel")
+                    raise KernelRefusal(f"dda kernel: {event} on .analysis is refused "
+                                        f"(only the entry script, read-only)")
+                aliases = ctx.aliases_of(p)
+                snap = ctx.is_snapshot(p)
+                if not aliases and not snap:
+                    continue
+                ctx.log("os-refused", aliases, path=p[:300], op=event,
+                        snapshot=snap, reason="mutation of raw data or snapshot")
+                raise KernelRefusal(f"dda kernel: {event} on a raw root or snapshot is refused "
+                                    f"({aliases[0] if aliases else 'snapshot'}); "
+                                    f"write derived data to derived/ or outputs/")
+        elif event in _OS_LIST_EVENTS and _HOOK_STATE["contained"]:
+            # `os.listdir`/`os.scandir` (and everything built on them)
+            # enumerate without `open`: logged on raw roots like reads,
+            # refused under `.analysis`.
+            for raw_p in _iter_path_args(args):
+                p = _decode_path(raw_p)
+                if p is None:
+                    continue
+                if ctx.is_analysis(p):
+                    ctx.log("os-refused", [], path=p[:300], op=event,
+                            reason="no .analysis enumeration from inside the kernel")
+                    raise KernelRefusal(f"dda kernel: {event} on .analysis is refused")
+                aliases = ctx.aliases_of(p)
+                snap = ctx.is_snapshot(p)
+                if not aliases and not snap:
+                    continue
+                ctx.log("os-list", aliases, path=p[:300], snapshot=snap, refused=False)
+                if not ctx.recheck():
+                    raise KernelRefusal(f"dda kernel: lock is not valid; data reads are refused "
+                                        f"({aliases[0] if aliases else 'snapshot'})")
     sys.addaudithook(hook)
     _HOOK_STATE["installed"] = True
     return {"audit_hook": "installed"}
@@ -765,8 +885,17 @@ def boot_ipc() -> tuple[PolicyCtx, dict]:
         raise SystemExit("dda kernel: no policy snapshot from the parent; refusing to run")
     if not isinstance(policy, dict) or not policy.get("run_id"):
         raise SystemExit("dda kernel: policy snapshot is invalid; refusing to run")
+    # Baseline stubs (tests/harness) arrive ONLY here, in the
+    # parent-written policy — never from the child environment, which the
+    # parent strips (a user-controlled stub dir must not shadow the stack).
+    baseline_dir = policy.get("baseline_dir") or ""
+    if baseline_dir:
+        if not isinstance(baseline_dir, str) or not os.path.isdir(baseline_dir):
+            raise SystemExit("dda kernel: policy baseline_dir is invalid; refusing to run")
+        sys.path.insert(0, baseline_dir)
     ctx = PolicyCtx(policy)
-    status: dict = {"python": sys.version.split()[0], "ok": True, "ipc": True}
+    status: dict = {"python": sys.version.split()[0], "ok": True, "ipc": True,
+                    "run_id": policy.get("run_id")}
     status.update(install_audit_hook(ctx))
     versions, missing = _k.baseline_versions()
     status["baseline"] = versions
@@ -856,6 +985,24 @@ def main(argv: list[str]) -> int:
             pass
     if argv[:1] == ["--self-test"]:
         return self_test()
+    if argv[:1] == ["--check-baseline"]:
+        # Parent-owned baseline preflight: `dda run` executes this in an
+        # isolated interpreter with the exact child env BEFORE spawning the
+        # real kernel, so the parent — not the child's status file — owns
+        # the baseline verdict in the kernel record. Optional argv[1] is a
+        # parent-supplied stub dir ("-" or absent = none); unlike the old
+        # DDA_BASELINE_DIR channel this arrives on argv, which user code
+        # cannot control.
+        stub_dir = argv[1] if len(argv) > 1 else ""
+        if stub_dir and stub_dir != "-":
+            if not os.path.isdir(stub_dir):
+                print(json.dumps({"ok": False, "error": f"stub dir is missing: {stub_dir}"}))
+                return 7
+            sys.path.insert(0, stub_dir)
+        from ddalib import kernel as _k
+        versions, missing = _k.baseline_versions()
+        print(json.dumps({"ok": not missing, "versions": versions, "missing": missing}))
+        return 0 if not missing else 7
     if not argv:
         print("usage: python -I -P <scripts>/ddalib/kernel_bootstrap.py <script> [args...]", file=sys.stderr)
         return 2
@@ -869,7 +1016,12 @@ def main(argv: list[str]) -> int:
         return 7
     script = os.path.abspath(argv[0])
     sys.argv = [script, *argv[1:]]
-    sys.path.insert(0, os.path.dirname(script))
+    # NOTE: the script's directory is deliberately NOT added to sys.path.
+    # The locked subprocess is a single entry script: any other file under
+    # .analysis is unreadable through the open hook, so a sibling import
+    # could never succeed — and inserting the dir would make the import
+    # system's own sys.path scans (os.listdir per path entry) trip the
+    # .analysis enumeration refusal for every script that imports anything.
     ctx.log("kernel-start", ctx.aliases, script=script, via_ipc=True)
     try:
         runpy.run_path(script, run_name="__main__")
@@ -883,6 +1035,9 @@ def main(argv: list[str]) -> int:
 def self_test() -> int:
     """Exercise the audit hook + wrappers against synthetic roots and stub modules."""
     import tempfile
+    # Self-test runs in its own process: engage containment exactly like a
+    # real kernel (`dda run` sets this for every child).
+    os.environ["DDA_KERNEL_ACTIVE"] = "1"
     checks: dict[str, object] = {}
     tmp = Path(tempfile.mkdtemp(prefix="dda-kernel-test-"))
     raw = tmp / "raw"
@@ -994,6 +1149,64 @@ def self_test() -> int:
     checks["strange-host-refused"] = not ok
     logged_hosts = [e for e in events if e["event"] == "socket-connect"]
     checks["connect-logged"] = bool(logged_hosts)
+    # `os`-level mutation bypasses `open` entirely and must be refused on
+    # raw roots, snapshots and .analysis — on EITHER side of a rename
+    # (moving a raw file away mutates raw data; a raw destination is a
+    # write). `shutil`/`pathlib` mutation routes through these same
+    # primitives, so it is covered transitively.
+    import shutil as _shutil
+    Victim = raw / "orders.csv"
+    ok, _ = tried(lambda: os.remove(Victim))
+    checks["os-remove-raw-refused"] = (not ok) and any(
+        e["event"] == "os-refused" for e in events)
+    ok, _ = tried(lambda: os.rename(Victim, tmp / "moved.csv"))
+    checks["os-rename-away-raw-refused"] = not ok
+    ok, _ = tried(lambda: os.rename(tmp / "elsewhere.txt", raw / "planted.csv"))
+    checks["os-rename-into-raw-refused"] = not ok
+    ok, _ = tried(lambda: os.replace(Victim, tmp / "moved2.csv"))
+    checks["os-replace-raw-refused"] = not ok
+    ok, _ = tried(lambda: os.mkdir(raw / "newdir"))
+    checks["os-mkdir-raw-refused"] = not ok
+    ok, _ = tried(lambda: os.rmdir(raw))
+    checks["os-rmdir-raw-refused"] = not ok
+    ok, _ = tried(lambda: os.truncate(str(Victim), 1))
+    checks["os-truncate-raw-refused"] = not ok
+    ok, _ = tried(lambda: os.link(str(Victim), str(tmp / "hardlink.csv")))
+    checks["os-link-raw-refused"] = not ok
+    ok, _ = tried(lambda: os.symlink(str(Victim), str(tmp / "link.csv")))
+    checks["os-symlink-raw-refused"] = not ok
+    ok, _ = tried(lambda: _shutil.copy(str(Victim), str(raw / "copy.csv")))
+    checks["shutil-copy-onto-raw-refused"] = not ok
+    ok, _ = tried(lambda: os.remove(analysis / "ledger.md"))
+    checks["os-remove-analysis-refused"] = not ok
+    ok, _ = tried(lambda: os.rename(str(outside), str(analysis / "planted.txt")))
+    checks["os-rename-into-analysis-refused"] = not ok
+    # Enumeration without `open`: logged on raw roots (lock-gated like
+    # reads), refused under .analysis, silent elsewhere.
+    ok, _ = tried(lambda: os.listdir(raw))
+    checks["os-listdir-raw-logged"] = ok and any(
+        e["event"] == "os-list" and "sales" in e.get("aliases", []) for e in events)
+    ok, _ = tried(lambda: os.scandir(raw))
+    checks["os-scandir-raw-logged"] = ok and any(e["event"] == "os-list" for e in events)
+    ok, _ = tried(lambda: os.listdir(analysis))
+    checks["os-listdir-analysis-refused"] = not ok
+    ctx._valid = False
+    ok, _ = tried(lambda: os.listdir(raw))
+    checks["os-listdir-raw-invalid-lock-refused"] = not ok
+    ctx._valid = True
+    n_ev = len(events)
+    ok, _ = tried(lambda: os.listdir(tmp))
+    checks["os-listdir-outside-allowed"] = ok and not any(
+        e["event"] in ("os-list", "os-refused") for e in events[n_ev:])
+    # Spawn containment: the kernel has no child processes — a subprocess
+    # would run without the hook, the wrappers, or the policy. Refused,
+    # not merely logged.
+    import subprocess as _sp
+    ok, _ = tried(lambda: _sp.Popen([sys.executable, "-c", "pass"]))
+    checks["spawn-popen-refused"] = (not ok) and any(
+        e["event"] == "spawn" and e.get("refused") for e in events)
+    ok, _ = tried(lambda: os.system("exit 0"))
+    checks["spawn-system-refused"] = not ok
 
     # Wrapper unit checks against stub modules (no real duckdb/polars needed).
     class StubCon:
