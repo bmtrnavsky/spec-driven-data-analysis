@@ -37,6 +37,14 @@ from .layout import ALIAS_RE, DdaError, Workdir, load_config, read_text_lf
 BASELINE = ("pandas", "numpy", "pyarrow", "polars", "duckdb", "scipy", "statsmodels", "sklearn",
             "matplotlib", "seaborn", "openpyxl", "xlrd", "ipykernel", "IPython", "jupyter_client")
 
+# Test/harness channel: an extra import dir the kernel bootstrap prepends
+# for baseline stubs, so the missing-baseline refusal is reproducible on
+# any host (with or without the real stack installed). It is the only
+# honoured path injection: the child is launched `-I -P` and ignores
+# PYTHONPATH/PYTHONHOME; `ddalib` itself is pinned to the repo scripts
+# dir and a swapped copy refuses to boot.
+BASELINE_DIR_ENV = "DDA_BASELINE_DIR"
+
 # Structured variant header fields (§4.3). A change to any field is a new variant.
 HEADER_FIELDS = ("population", "window", "filters", "cuts", "model", "outlier_rule", "definitions")
 
@@ -359,8 +367,15 @@ def do_run(wd: Workdir, vid: str, script: str, script_args: list[str], *, sessio
 
     env = dict(os.environ)
     status_file = wd.analysis / "runs" / f".kernel-{run_id}.json"
+    # Isolated launch: no PYTHONPATH/PYTHONHOME (a swapped `ddalib` on the
+    # path would run as the kernel), `-I -P` so the child ignores any
+    # ambient path configuration; the bootstrap file path is fixed to this
+    # repo's scripts dir and pins `ddalib` back to it on boot.
+    env.pop("PYTHONPATH", None)
+    env.pop("PYTHONHOME", None)
+    env.pop("PYTHONSAFEPATH", None)
+    bootstrap = str(Path(__file__).resolve().parent / "kernel_bootstrap.py")
     env.update({
-        "PYTHONPATH": str(Path(__file__).resolve().parent.parent) + os.pathsep + env.get("PYTHONPATH", ""),
         "DDA_WORKDIR": str(wd.root),
         "DDA_MILESTONE": wd.milestone or "",
         "DDA_VARIANT": vid,
@@ -374,8 +389,11 @@ def do_run(wd: Workdir, vid: str, script: str, script_args: list[str], *, sessio
         "HTTPS_PROXY": env.get("HTTPS_PROXY") or DEAD_PROXY,
     })
     t0 = time.time()
-    proc = subprocess.run([sys.executable, "-m", "ddalib.kernel_bootstrap", str(sp), *script_args],
-                          cwd=str(wd.root), env=env, capture_output=True, text=True)
+    # errors="replace": the child runs `-I` (PYTHONUTF8 is ignored there),
+    # so its stdio encoding is the platform locale, not necessarily UTF-8.
+    proc = subprocess.run([sys.executable, "-I", "-P", bootstrap, str(sp), *script_args],
+                          cwd=str(wd.root), env=env, capture_output=True, text=True,
+                          errors="replace")
     dt = round(time.time() - t0, 3)
     try:
         status = json.loads(status_file.read_text(encoding="utf-8"))
@@ -401,13 +419,17 @@ def do_run(wd: Workdir, vid: str, script: str, script_args: list[str], *, sessio
     with open(kpath, "w", encoding="utf-8", newline="\n") as fh:
         json.dump(record, fh, indent=2, sort_keys=True)
         fh.write("\n")
+    # Hash-bind the record: the `run` entry carries the sha256 of the
+    # kernel file, so a hand-edited record no longer passes G6.
+    kernel_hash = hashlib.sha256(kpath.read_bytes()).hexdigest()
     if not frozen:
         chain.append(ledger.specs_tried(wd), {"type": "freeze", "variant": vid, "frozen_hash": body_hash,
                                              "run_id": run_id, "code_hash": code_hash})
     chain.append(ledger.specs_tried(wd), {"type": "run", "variant": vid, "run_id": run_id,
                                          "body_hash": body_hash, "code_hash": code_hash, "seed": run_seed,
                                          "lock_hash": lock_hash, "label": reg.get("label"),
-                                         "kernel": f"runs/kernels/{run_id}.json", "returncode": proc.returncode})
+                                         "kernel": f"runs/kernels/{run_id}.json", "kernel_hash": kernel_hash,
+                                         "returncode": proc.returncode})
     chain.append(ledger.runs_log(wd), {"type": "done", "session": session, "tool": "dda", "subcommand": "run",
                                       "call": run_id, "aliases": sorted(lock["aliases"]), "kind": "data",
                                       "variant": vid, "code_hash": code_hash, "blob": blob_ptr,

@@ -7,6 +7,7 @@ Ledger records (JSON lines, hash-chained through chain.append):
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import subprocess
@@ -456,6 +457,35 @@ def gate_g6(wd: Workdir) -> tuple[bool, str, dict]:
         kp = wd.analysis / str(r.get("kernel") or "")
         if not kp.is_file():
             problems.append(f"run {r.get('run_id')} of variant {vid!r} has no kernel record")
+            continue
+        # The `run` entry hash-binds its kernel record: a hand-edited
+        # record file no longer matches and fails here.
+        if not r.get("kernel_hash"):
+            problems.append(f"run {r.get('run_id')} of variant {vid!r} kernel record is not hash-bound "
+                            "(no kernel_hash on the run entry; re-run with this build)")
+            continue
+        try:
+            actual = hashlib.sha256(kp.read_bytes()).hexdigest()
+        except OSError as e:
+            problems.append(f"run {r.get('run_id')} of variant {vid!r} kernel record unreadable ({e})")
+            continue
+        if actual != r.get("kernel_hash"):
+            problems.append(f"run {r.get('run_id')} of variant {vid!r} kernel record hash mismatch "
+                            "(edited or forked?)")
+    # Every successful run must pair with a kernel-start in the audit log:
+    # a `run` entry plus a kernel JSON with no booted kernel behind them
+    # is a fabricated run. (Failed starts never ran user code, so they
+    # are exempt from the pairing.)
+    started = set()
+    for r in chain.read_records(audit_log(wd)):
+        if r.get("type") == "audit" and r.get("event") in ("kernel-start", "kernel-launch"):
+            rid = r.get("run_id")
+            if rid:
+                started.add(str(rid))
+    for r in runs:
+        if r.get("returncode", 0) == 0 and str(r.get("run_id")) not in started:
+            problems.append(f"run {r.get('run_id')} of variant {r.get('variant')!r} has no kernel-start "
+                            "in the audit log (kernel never started?)")
     reg_ledger = {(l.get("variant"), (l.get("why") or "").strip()) for l in chain.read_records(ledger_path(wd))
                   if l.get("type") == "variant-registered"}
     for vid in sorted(regs):

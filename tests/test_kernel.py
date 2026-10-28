@@ -2,6 +2,7 @@
 kernel runner (audit hook, native wrappers, kernel record), and `dda gate G6`.
 Run: python -m unittest discover -s tests -v
 """
+import hashlib
 import io
 import json
 import os
@@ -129,6 +130,20 @@ class Base(unittest.TestCase):
         return kernel.register_variant(self.wd, vid, parent=d.get("parent"),
                                        why=d["why"], label=d.get("label"), header=d["header"])
 
+    def stub_baseline(self, broken: str | None = None):
+        """Host-independent stub stack via DDA_BASELINE_DIR (the bootstrap
+        prepends it even under `-I -P`, where PYTHONPATH is ignored). With
+        `broken=<pkg>`, that package raises on import so the startup check
+        refuses on ANY host, with or without the real stack installed."""
+        d = self.tmp / "stubs"
+        d.mkdir(exist_ok=True)
+        for name, body in STUBS.items():
+            if name == broken:
+                body = "raise ImportError('blocked for test: baseline package is missing')"
+            (d / f"{name}.py").write_text(body, encoding="utf-8")
+        os.environ["DDA_BASELINE_DIR"] = str(d)
+        return d
+
     def write_variant_script(self, vid="v1", body=None):
         p = self.wd.analysis / "variants" / f"{vid}.py"
         p.write_text(body if body is not None else (
@@ -230,22 +245,54 @@ class TestVariants(Base):
 
 
 class TestKernelRun(Base):
-    def stub_baseline(self):
-        d = self.tmp / "stubs"
-        d.mkdir(exist_ok=True)
-        for name, body in STUBS.items():
-            (d / f"{name}.py").write_text(body, encoding="utf-8")
-        os.environ["PYTHONPATH"] = str(d) + os.pathsep + os.environ.get("PYTHONPATH", "")
-        return d
-
     def test_run_fails_closed_without_baseline(self):
-        # This env has no data stack: the kernel must not start (§10.1a).
+        # Deterministic on any host: the stub duckdb raises on import, so
+        # the startup check must refuse even where the real stack exists.
+        self.stub_baseline(broken="duckdb")
         self.lock()
         self.register("v1")
         self.write_variant_script("v1")
         with self.assertRaises(DdaError) as cm:
             kernel.do_run(self.wd, "v1", str(self.wd.analysis / "variants" / "v1.py"), [], seed=1)
         self.assertIn("does not start", str(cm.exception))
+
+    def test_run_ignores_poisoned_pythonpath(self):
+        # Isolation: a swapped `ddalib` on PYTHONPATH must not become the
+        # kernel (launched `-I -P`, pinned back to the repo scripts dir).
+        evil = self.tmp / "evilpath"
+        (evil / "ddalib").mkdir(parents=True, exist_ok=True)
+        (evil / "ddalib" / "__init__.py").write_text(
+            "raise ImportError('swapped ddalib must never load')\n", encoding="utf-8")
+        os.environ["PYTHONPATH"] = str(evil)
+        self.stub_baseline()
+        self.lock()
+        self.register("v1")
+        sp = self.write_variant_script("v1")
+        os.environ["DDA_RAW"] = str(self.raw)
+        rec = kernel.do_run(self.wd, "v1", str(sp), [], session="s-poison", seed=7)
+        self.assertEqual(rec["returncode"], 0)
+
+    def test_kernel_refuses_evidence_writes(self):
+        self.stub_baseline()
+        self.lock()
+        lock = lockstate.read_lock(self.wd)
+        events: list[dict] = []
+        status = self.wd.analysis / "runs" / ".kernel-r1.json"
+        os.environ[kernel_bootstrap.STATUS_ENV] = str(status)
+        ctx2 = kernel_bootstrap.Ctx(self.wd, lock, "v1", "r1", "s",
+                                    log_fn=lambda rec: events.append(rec))
+        kernel_bootstrap.install_audit_hook(ctx2)
+        with self.assertRaises(kernel_bootstrap.KernelRefusal):
+            open(self.wd.analysis / "ledger.md", "a").close()
+        with self.assertRaises(kernel_bootstrap.KernelRefusal):
+            open(self.wd.analysis / "runs.log", "w").close()
+        # The kernel's own channels stay open.
+        with open(self.wd.analysis / "audit.log", "a", encoding="utf-8"):
+            pass
+        with open(status, "w", encoding="utf-8"):
+            pass
+        kinds = [e["event"] for e in events]
+        self.assertIn("open-refused", kinds)
 
     def test_run_fails_closed_preflight(self):
         self.stub_baseline()
@@ -319,9 +366,10 @@ class TestKernelRun(Base):
         self.assertIn("socket-connect", kinds)
 
     def test_bootstrap_self_test(self):
-        r = subprocess.run([sys.executable, "-m", "ddalib.kernel_bootstrap", "--self-test"],
-                           capture_output=True, text=True, cwd=str(REPO / "scripts"),
-                           env={**os.environ, "PYTHONPATH": str(REPO / "scripts")})
+        r = subprocess.run([sys.executable, "-I", "-P",
+                            str(REPO / "scripts" / "ddalib" / "kernel_bootstrap.py"), "--self-test"],
+                           capture_output=True, text=True, errors="replace", cwd=str(self.tmp),
+                           env={k: v for k, v in os.environ.items() if k != "PYTHONPATH"})
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertTrue(all(json.loads(r.stdout)["checks"].values()))
 
@@ -350,11 +398,7 @@ class TestG6(Base):
         self.assertIn("orphan", reason)
 
     def test_g6_pass_after_clean_run(self):
-        d = self.tmp / "stubs"
-        d.mkdir(exist_ok=True)
-        for name, body in STUBS.items():
-            (d / f"{name}.py").write_text(body, encoding="utf-8")
-        os.environ["PYTHONPATH"] = str(d) + os.pathsep + os.environ.get("PYTHONPATH", "")
+        self.stub_baseline()
         self.lock()
         self.paired_session()
         self.register("v1")
@@ -366,6 +410,37 @@ class TestG6(Base):
         self.assertEqual(rc, 0, err + out)
         self.assertIn("G6 pass", out)
         self.assertIn("heartbeat complete", out)
+
+    def test_g6_kernel_start_and_hash_bound(self):
+        self.stub_baseline()
+        self.lock()
+        self.paired_session()
+        self.register("v1")
+        sp = self.write_variant_script("v1")
+        os.environ["DDA_RAW"] = str(self.raw)
+        kernel.do_run(self.wd, "v1", str(sp), [], session="s-g6b", seed=3)
+        kernel.mark_locked(self.wd, "v1")
+        runs = [r for r in chain.read_records(ledger.specs_tried(self.wd)) if r.get("type") == "run"]
+        self.assertTrue(runs and runs[0].get("kernel_hash"))
+        # A fabricated run (entry + file, but the kernel never booted) fails.
+        chain.append(ledger.specs_tried(self.wd), {"type": "freeze", "variant": "v1",
+                                                 "frozen_hash": runs[0]["body_hash"], "run_id": "fake1"})
+        (self.wd.analysis / "runs" / "kernels" / "fake1.json").write_text('{"fake": true}',
+                                                                          encoding="utf-8")
+        chain.append(ledger.specs_tried(self.wd), {"type": "run", "variant": "v1", "run_id": "fake1",
+                                                  "body_hash": runs[0]["body_hash"],
+                                                  "kernel": "runs/kernels/fake1.json",
+                                                  "kernel_hash": hashlib.sha256(b'{"fake": true}').hexdigest(),
+                                                  "returncode": 0})
+        passed, reason, _ = ledger.gate_g6(self.wd)
+        self.assertFalse(passed)
+        self.assertIn("kernel-start", reason)
+        # Tampering with a real kernel record breaks the hash binding.
+        kp = self.wd.analysis / "runs" / "kernels" / f"{runs[0]['run_id']}.json"
+        kp.write_text(kp.read_text(encoding="utf-8") + " ", encoding="utf-8")
+        passed, reason, _ = ledger.gate_g6(self.wd)
+        self.assertFalse(passed)
+        self.assertIn("hash mismatch", reason)
 
     def test_g6_missing_kernel_record_fails(self):
         self.lock()

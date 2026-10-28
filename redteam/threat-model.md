@@ -18,10 +18,25 @@ are detect-only at best — spawns are audit-logged, and the G6 audit
 cross-check reports data opens with no matching run as a hook fault or
 evasion. Each kernel run records per-library wrapper status in its kernel
 record; any unenforced path downgrades that run to `network policy:
-detect-only`. On this install the baseline data stack is absent, so the
-startup check correctly refuses to start the kernel (`dda run` fails
-closed); the harness asserts that refusal plus the stub-level wrapper
-checks rather than a live run.
+detect-only`. Where the full stack is installed the harness additionally
+runs live probes: real duckdb/polars/pyarrow/pandas calls inside a real
+kernel — sanctioned reads must succeed and be audit-logged, raw-root
+writes, `INSTALL httpfs`, and `.analysis` writes from user code must be
+refused. Where the stack is absent the startup check correctly refuses to
+start the kernel (`dda run` fails closed); the harness asserts that
+refusal deterministically (a stub package that raises on import, so the
+check reproduces on any host) plus the stub-level wrapper checks. The
+kernel child launches isolated (`python -I -P`, no `PYTHONPATH`): a
+swapped `ddalib` on the path cannot become the kernel, and the bootstrap
+pins `ddalib` back to the repo scripts dir on boot. Every query surface
+is scanned (`execute` results are re-wrapped, plus `executemany`,
+`sql`/`query`, and `cursor`), `allowed_directories` is set before
+`enable_external_access=false` (duckdb rejects the reverse order), and
+writer wrappers check every argument — destinations that arrive second
+(e.g. `pyarrow.parquet.write_table(table, where)`) are covered. The
+`run` entry hash-binds its kernel record and G6 requires a matching
+kernel-start in the audit log, so a fabricated run entry plus an
+edited record file no longer passes.
 
 ## Missed today
 

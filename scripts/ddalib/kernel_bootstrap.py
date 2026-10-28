@@ -7,7 +7,9 @@ user code runs it:
 1. re-validates the lock (refuses to run user code when invalid);
 2. installs a `sys.addaudithook` that logs every `open` on a data-root path
    and every `socket.connect` to the audit log, refuses write-mode opens on
-   raw roots and snapshots, refuses non-allowlisted hosts, and logs spawns;
+   raw roots, snapshots, and evidence files (`.analysis`, except the kernel's
+   own status file and the audit log it appends to), refuses non-allowlisted
+   hosts, and logs spawns;
 3. applies the native lockdown + reader wrappers for duckdb, polars and
    pyarrow (each recorded as enforced / not-installed / wrap-failed);
 4. seeds randomness and installs the row-cap / PII-masking display formatter.
@@ -32,11 +34,23 @@ import time
 from pathlib import Path
 
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent
+# Test/harness channel: an extra import dir for baseline stubs (lets the
+# startup check run host-independently). This is the ONLY honourable
+# path injection: PYTHONPATH/PYTHONHOME are ignored because `dda run`
+# launches this file with `python -I -P`, and `ddalib` itself is pinned
+# to SCRIPTS_DIR below (a swapped `ddalib` anywhere else is refused).
+if os.environ.get("DDA_BASELINE_DIR"):
+    sys.path.insert(0, os.environ["DDA_BASELINE_DIR"])
 sys.path.insert(0, str(SCRIPTS_DIR))
 
 from ddalib import chain, lockstate  # noqa: E402
 from ddalib.layout import Workdir  # noqa: E402
 from ddalib.matching import canon, under  # noqa: E402
+
+if not Path(getattr(chain, "__file__", "") or "").resolve().is_relative_to(SCRIPTS_DIR):
+    raise SystemExit("dda kernel: refusing to run with a swapped ddalib "
+                     f"(loaded from {getattr(chain, '__file__', '?')}, "
+                     f"expected under {SCRIPTS_DIR})")
 
 STATUS_ENV = "DDA_KERNEL_STATUS"
 
@@ -71,6 +85,10 @@ class Ctx:
             self.hosts |= {h.lower() for h in loc.get("hosts") or []}
         snaps = canon(str(wd.root / "derived" / "snapshots"))
         self.snapshots = snaps or ""
+        self.analysis_dir = canon(str(wd.analysis))
+        self.audit_path = canon(str(wd.analysis / "audit.log"))
+        status_env = os.environ.get(STATUS_ENV)
+        self.status_path = canon(status_env) if status_env else ""
         allowed = [p for ps in self.roots.values() for p in ps]
         self.allowed_dirs = sorted(set(allowed + [canon(str(wd.root / "derived")),
                                                   canon(str(wd.root / "outputs"))]))
@@ -99,14 +117,36 @@ class Ctx:
 
     # ---------- classification ----------
 
-    def alias_of(self, path: str) -> str | None:
+    def aliases_of(self, path: str) -> list[str]:
+        """Every alias whose roots contain the path (a path can sit under
+        several aliases; logging only the first would blind exposure scans
+        for the others)."""
         c = canon(path, os.getcwd())
         if not c:
-            return None
-        for alias, paths in self.roots.items():
-            if any(under(c, p) for p in paths):
-                return alias
-        return None
+            return []
+        return sorted(a for a, paths in self.roots.items() if any(under(c, p) for p in paths))
+
+    def alias_of(self, path: str) -> str | None:
+        found = self.aliases_of(path)
+        return found[0] if found else None
+
+    def is_analysis(self, path: str) -> bool:
+        c = canon(path, os.getcwd())
+        return bool(c and self.analysis_dir and (c == self.analysis_dir or under(c, self.analysis_dir)))
+
+    def is_evidence_exempt(self, path: str) -> bool:
+        """Write paths the kernel itself needs: its status file (plus the
+        `.pid.tmp` sibling write_status() renames into place) and the audit
+        log it appends to (plus chain spill dirs). Everything else under
+        .analysis is hand-off evidence and refused from inside the kernel."""
+        c = canon(path, os.getcwd())
+        if not c:
+            return False
+        if self.status_path and (c == self.status_path or c.startswith(self.status_path + ".")):
+            return True
+        if self.audit_path and (c == self.audit_path or c.startswith(self.audit_path + ".")):
+            return True
+        return False
 
     def is_snapshot(self, path: str) -> bool:
         c = canon(path, os.getcwd())
@@ -133,9 +173,21 @@ def _is_write_mode(mode, flags) -> bool:
     return False
 
 
+_HOOK_STATE: dict = {"ctx": None, "installed": False}
+
+
 def install_audit_hook(ctx: Ctx):
-    """sys.addaudithook: log data-root opens and connects; refuse writes and strangers."""
+    """sys.addaudithook: log data-root opens and connects; refuse writes and strangers.
+
+    Idempotent: a second call in one process re-points the single hook at
+    the new Ctx instead of stacking a stale hook that would refuse — and
+    shadow — the live one.
+    """
+    _HOOK_STATE["ctx"] = ctx
+    if _HOOK_STATE["installed"]:
+        return {"audit_hook": "installed"}
     def hook(event, args):
+        ctx = _HOOK_STATE["ctx"]
         if event == "open":
             path, mode = (list(args) + [None, None])[:2] if args else (None, None)
             flags = args[2] if len(args) > 2 else None
@@ -147,20 +199,30 @@ def install_audit_hook(ctx: Ctx):
                     p = p.decode("utf-8")
                 except UnicodeDecodeError:
                     return
-            alias = ctx.alias_of(p)
-            snap = ctx.is_snapshot(p)
-            if alias is None and not snap:
-                return
             write = _is_write_mode(mode, flags)
-            ctx.log("open", [a for a in (alias,) if a],
+            if ctx.is_analysis(p):
+                # Evidence files are hand-off: user code may read them, but
+                # only the kernel's own status file and audit-log appends
+                # may write. Reads pass silently (no data values live here).
+                if not write or ctx.is_evidence_exempt(p):
+                    return
+                ctx.log("open-refused", [], path=p[:300], mode=str(mode)[:20],
+                        reason="write to .analysis evidence (only derived/ or outputs/)")
+                raise KernelRefusal("dda kernel: writes to .analysis evidence are refused "
+                                    "(write derived data to derived/ or outputs/)")
+            aliases = ctx.aliases_of(p)
+            snap = ctx.is_snapshot(p)
+            if not aliases and not snap:
+                return
+            ctx.log("open", aliases,
                     path=p[:300], mode=str(mode)[:20], write=write,
                     snapshot=snap, refused=False)
             if not ctx.recheck():
-                raise KernelRefusal(f"dda kernel: lock is not valid; data reads are refused ({alias or 'snapshot'})")
-            if write and (snap or alias is not None and _is_raw_write(ctx, p)):
-                ctx.log("open-refused", [a for a in (alias,) if a],
+                raise KernelRefusal(f"dda kernel: lock is not valid; data reads are refused ({aliases[0] if aliases else 'snapshot'})")
+            if write and (snap or aliases and _is_raw_write(ctx, p)):
+                ctx.log("open-refused", aliases,
                         path=p[:300], mode=str(mode)[:20], reason="write to raw root or snapshot")
-                raise KernelRefusal(f"dda kernel: write access to raw data is refused ({alias or 'snapshot'}); "
+                raise KernelRefusal(f"dda kernel: write access to raw data is refused ({aliases[0] if aliases else 'snapshot'}); "
                                     "write derived data to derived/ or outputs/")
         elif event == "socket.connect":
             addr = args[1] if len(args) > 1 else None
@@ -179,6 +241,7 @@ def install_audit_hook(ctx: Ctx):
                 detail = event
             ctx.log("spawn", [], detail=detail)
     sys.addaudithook(hook)
+    _HOOK_STATE["installed"] = True
     return {"audit_hook": "installed"}
 
 
@@ -205,16 +268,23 @@ def _refuse_remote(ctx: Ctx, target) -> str | None:
 
 def _check_local(ctx: Ctx, target, *, write: bool, what: str):
     _refuse_remote(ctx, target)
-    alias = ctx.alias_of(str(target))
-    snap = ctx.is_snapshot(str(target))
-    if alias is None and not snap:
+    if ctx.is_analysis(str(target)):
+        if write and not ctx.is_evidence_exempt(str(target)):
+            ctx.log(f"{what}-refused", [], path=str(target)[:300],
+                    reason="write to .analysis evidence")
+            raise KernelRefusal(f"dda kernel: {what} write to .analysis evidence refused; "
+                                "write derived data to derived/ or outputs/")
         return
-    ctx.log(f"{what}-{'write' if write else 'read'}", [a for a in (alias,) if a],
+    aliases = ctx.aliases_of(str(target))
+    snap = ctx.is_snapshot(str(target))
+    if not aliases and not snap:
+        return
+    ctx.log(f"{what}-{'write' if write else 'read'}", aliases,
             path=str(target)[:300], snapshot=snap)
     if not ctx.recheck():
-        raise KernelRefusal(f"dda kernel: lock is not valid; data reads are refused ({alias or 'snapshot'})")
-    if write and (snap or alias is not None):
-        raise KernelRefusal(f"dda kernel: write to raw data refused ({alias or 'snapshot'}); "
+        raise KernelRefusal(f"dda kernel: lock is not valid; data reads are refused ({aliases[0] if aliases else 'snapshot'})")
+    if write and (snap or aliases):
+        raise KernelRefusal(f"dda kernel: write to raw data refused ({aliases[0] if aliases else 'snapshot'}); "
                             "write derived data to derived/ or outputs/")
 
 
@@ -227,43 +297,82 @@ def wrap_duckdb(mod, ctx: Ctx) -> str:
         dirs = list(ctx.allowed_dirs)
         if not ctx.recheck():
             dirs = [d for d in dirs if d not in raw_paths]
-        con.execute("SET autoinstall_known_extensions = false")
-        con.execute("SET autoload_known_extensions = false")
-        con.execute("SET enable_external_access = false")
+        # Order matters (§10.1b): allowed_directories FIRST — duckdb refuses
+        # to change it once enable_external_access is false — then no
+        # extensions, then no external access, then freeze everything.
         quoted = ", ".join("'" + d.replace("'", "''") + "'" for d in sorted(set(dirs)) if d)
         if quoted:
             con.execute(f"SET allowed_directories = [{quoted}]")
+        con.execute("SET autoinstall_known_extensions = false")
+        con.execute("SET autoload_known_extensions = false")
+        con.execute("SET enable_external_access = false")
         con.execute("SET lock_configuration = true")
         return con
+
+    def _guard_result(res):
+        # execute/executemany/cursor always hand back a live connection, so
+        # the result is always re-wrapped (an unguarded handle would let the
+        # very next call bypass the scan). Data results (sql/query relations)
+        # never pass through here.
+        if isinstance(res, GuardedCon):
+            return res
+        return GuardedCon(res)
 
     def scan_sql(sql: str) -> None:
         for m in re.finditer(r"'((?:[^'\\]|\\.|'')+)'", sql):
             cand = m.group(1)
             if "/" in cand or "\\" in cand or cand.lower().endswith((".csv", ".parquet", ".json", ".db", ".duckdb")):
-                alias = ctx.alias_of(cand)
-                if alias is not None or ctx.is_snapshot(cand):
-                    ctx.log("duckdb-read", [a for a in (alias,) if a], statement=sql[:300])
+                aliases = ctx.aliases_of(cand)
+                if aliases or ctx.is_snapshot(cand):
+                    ctx.log("duckdb-read", aliases, statement=sql[:300])
         up = sql.upper()
         if re.search(r"\b(COPY\s+.*\s+TO|EXPORT\s+DATABASE|ATTACH)\b", up):
             for m in re.finditer(r"TO\s+'((?:[^'\\]|\\.|'')+)'", sql, re.IGNORECASE):
                 tgt = m.group(1)
-                if ctx.alias_of(tgt) is not None or ctx.is_snapshot(tgt):
+                if ctx.aliases_of(tgt) or ctx.is_snapshot(tgt):
                     raise KernelRefusal("dda kernel: COPY TO / EXPORT / ATTACH onto a raw root or snapshot "
                                         "is refused (duckdb cannot make one directory read-only)")
             if re.search(r"\bATTACH\s+'", up):
                 for m in re.finditer(r"ATTACH\s+'((?:[^'\\]|\\.|'')+)'", sql, re.IGNORECASE):
                     tgt = m.group(1)
-                    if ctx.alias_of(tgt) is not None or ctx.is_snapshot(tgt):
+                    if ctx.aliases_of(tgt) or ctx.is_snapshot(tgt):
                         raise KernelRefusal("dda kernel: ATTACH of a raw-root or snapshot file is refused")
 
     class GuardedCon:
+        """A duckdb connection whose every query entry point is scanned.
+
+        `execute` returns the live connection, so the result is re-wrapped:
+        an unguarded handle would let the very next `.execute` bypass the
+        scan. Same for `cursor`; `sql`/`query` results are data, but their
+        SQL argument is still scanned.
+        """
         def __init__(self, inner):
             self._inner = inner
 
         def execute(self, sql, *a, **k):
             if isinstance(sql, str):
                 scan_sql(sql)
-            return self._inner.execute(sql, *a, **k)
+            return _guard_result(self._inner.execute(sql, *a, **k))
+
+        def executemany(self, sql, *a, **k):
+            if isinstance(sql, str):
+                scan_sql(sql)
+            return _guard_result(self._inner.executemany(sql, *a, **k))
+
+        def sql(self, sql, *a, **k):
+            if isinstance(sql, str):
+                scan_sql(sql)
+            return self._inner.sql(sql, *a, **k)
+
+        def query(self, sql, *a, **k):
+            if isinstance(sql, str):
+                scan_sql(sql)
+            return self._inner.query(sql, *a, **k)
+
+        def cursor(self, *a, **k):
+            # The cursor inherits the parent connection's locked-down
+            # settings; only the query surface needs guarding.
+            return _guard_result(self._inner.cursor(*a, **k))
 
         def __getattr__(self, name):
             return getattr(self._inner, name)
@@ -300,6 +409,29 @@ def wrap_duckdb(mod, ctx: Ctx) -> str:
     return "enforced"
 
 
+def _path_candidates(a, k) -> list:
+    """Every argument that could be a path: all positionals, the known
+    path keywords, and any other str/PathLike keyword (one list level
+    flattened). Writers often take the destination SECOND
+    (e.g. `pyarrow.parquet.write_table(table, where)`), so checking only
+    the first argument would let a raw-root write sail through."""
+    cands: list = list(a)
+    for key in ("source", "file", "path", "uri", "where", "base_dir", "output",
+                "output_file", "sink"):
+        if key in k and k[key] is not None:
+            cands.append(k[key])
+    for key, val in k.items():
+        if val is not None and val not in cands:
+            cands.append(val)
+    flat: list = []
+    for c in cands:
+        if isinstance(c, (list, tuple)):
+            flat.extend(c)
+        else:
+            flat.append(c)
+    return [c for c in flat if isinstance(c, (str, os.PathLike))]
+
+
 def _wrap_first_arg(mod, names: tuple, ctx: Ctx, what: str):
     wrapped = 0
     for name in names:
@@ -315,8 +447,7 @@ def _wrap_first_arg(mod, names: tuple, ctx: Ctx, what: str):
 
         def _mk(o):
             def fn(*a, **k):
-                src = k.get("source") or k.get("file") or k.get("path") or k.get("uri") or (a[0] if a else None)
-                if src is not None:
+                for src in _path_candidates(a, k):
                     _check_local(ctx, src, write=False, what=what)
                 return o(*a, **k)
             return fn
@@ -341,8 +472,7 @@ def _wrap_writer(mod, names: tuple, ctx: Ctx, what: str):
 
         def _mk(o):
             def fn(*a, **k):
-                dst = k.get("where") or k.get("file") or k.get("path") or k.get("uri") or (a[0] if a else None)
-                if dst is not None:
+                for dst in _path_candidates(a, k):
                     _check_local(ctx, dst, write=True, what=what)
                 return o(*a, **k)
             return fn
@@ -368,13 +498,67 @@ def wrap_pyarrow(mod, ctx: Ctx) -> str:
     try:
         from pyarrow import parquet as _pq  # noqa: F401
         n += _wrap_first_arg(mod, ("parquet.read_table", "parquet.ParquetFile", "parquet.read_metadata"), ctx, "pyarrow")
-        n += _wrap_writer(mod, ("parquet.write_table", "parquet.write_to_dataset"), ctx, "pyarrow")
+        n += _wrap_writer(mod, ("parquet.write_table", "parquet.write_to_dataset",
+                                 "parquet.ParquetWriter"), ctx, "pyarrow")
     except Exception:
         pass
     n += _wrap_first_arg(mod, ("dataset.dataset", "csv.read_csv", "csv.open_csv", "feather.read_table",
-                               "feather.read_feather", "ipc.new_file"), ctx, "pyarrow")
-    n += _wrap_writer(mod, ("dataset.write_dataset", "csv.write_csv", "feather.write_feather"), ctx, "pyarrow")
+                              "feather.read_feather"), ctx, "pyarrow")
+    n += _wrap_writer(mod, ("dataset.write_dataset", "csv.write_csv", "feather.write_feather",
+                           "ipc.new_file"), ctx, "pyarrow")
+    n += _wrap_pyarrow_fs(mod, ctx)
     return f"enforced ({n} entry points)"
+
+
+def _wrap_pyarrow_fs(mod, ctx: Ctx) -> int:
+    """Wrap the `pyarrow.fs` remote filesystem constructors (§10.1b).
+
+    `FileSystem.from_uri` carries the full URI, so its host is checked
+    exactly like any other remote target. The bare remote constructors
+    (`S3FileSystem()`, `GcsFileSystem()`, ...) take no uniform host
+    argument, so they are logged as detect-only: the kernel audit hook
+    cannot see native sockets, and reads through them appear only here.
+    """
+    try:
+        fs = mod.fs
+    except AttributeError:
+        try:
+            from pyarrow import fs as fs  # noqa: F401
+        except Exception:
+            return 0
+    wrapped = 0
+    from_uri = getattr(fs, "FileSystem", None)
+    from_uri = getattr(from_uri, "from_uri", None) if from_uri is not None else None
+    if callable(from_uri):
+        orig = from_uri
+
+        def guarded_from_uri(uri, *a, **k):
+            _refuse_remote(ctx, uri)
+            ctx.log("pyarrow-read", [], path=str(uri)[:300])
+            return orig(uri, *a, **k)
+
+        fs.FileSystem.from_uri = staticmethod(guarded_from_uri)
+        wrapped += 1
+    for cls_name in ("S3FileSystem", "GcsFileSystem", "HadoopFileSystem", "HdfsFileSystem",
+                     "HttpFileSystem", "AzureBlobFileSystem"):
+        cls = getattr(fs, cls_name, None)
+        if cls is None:
+            continue
+        orig_init = cls.__init__
+
+        def _mk_init(o, name=cls_name):
+            def __init__(self, *a, **k):
+                ctx.log("pyarrow-fs", [], filesystem=name,
+                        note="remote filesystem constructor (detect-only: native I/O)")
+                o(self, *a, **k)
+            return __init__
+
+        try:
+            cls.__init__ = _mk_init(orig_init)
+            wrapped += 1
+        except (TypeError, AttributeError):
+            continue
+    return wrapped
 
 
 def apply_wrappers(ctx: Ctx) -> dict[str, str]:
@@ -514,10 +698,17 @@ def boot() -> tuple[Ctx, dict]:
 
 
 def main(argv: list[str]) -> int:
+    # `-I` ignores PYTHONUTF8, so pin stdio to UTF-8 here: the parent reads
+    # the tails as UTF-8 and the status JSON must be exact bytes.
+    for fh in (sys.stdout, sys.stderr):
+        try:
+            fh.reconfigure(encoding="utf-8", errors="backslashreplace")
+        except Exception:
+            pass
     if argv[:1] == ["--self-test"]:
         return self_test()
     if not argv:
-        print("usage: python -m ddalib.kernel_bootstrap <script> [args...]", file=sys.stderr)
+        print("usage: python -I -P <scripts>/ddalib/kernel_bootstrap.py <script> [args...]", file=sys.stderr)
         return 2
     ctx, status = boot()
     if not status.get("ok"):
@@ -545,23 +736,50 @@ def self_test() -> int:
     raw = tmp / "raw"
     raw.mkdir()
     (raw / "orders.csv").write_text("id,amount\n1,10\n", encoding="utf-8")
+    analysis = tmp / ".analysis"
+    analysis.mkdir()
+    (analysis / "ledger.md").write_text("# ledger\n", encoding="utf-8")
+    audit_p = analysis / "audit.log"
+    audit_p.write_text("", encoding="utf-8")
+    status_p = tmp / ".kernel-test.json"
     events: list[dict] = []
 
     class FakeCtx:
         variant, run_id, session = "v1", "r1", "test"
-        roots = {"sales": [canon(str(raw))]}
+        roots = {"sales": [canon(str(raw))], "sales2": [canon(str(raw))]}
         hosts = {"db.example.internal"}
         snapshots = canon(str(tmp / "snaps"))
         allowed_dirs = [canon(str(raw))]
+        analysis_dir = canon(str(analysis))
+        audit_path = canon(str(audit_p))
+        status_path = canon(str(status_p))
 
         def __init__(self):
             self._valid = True
 
-        def alias_of(self, path):
+        def aliases_of(self, path):
             c = canon(path, os.getcwd())
             if c and under(c, canon(str(raw))):
-                return "sales"
-            return None
+                return ["sales", "sales2"]
+            return []
+
+        def alias_of(self, path):
+            found = self.aliases_of(path)
+            return found[0] if found else None
+
+        def is_analysis(self, path):
+            c = canon(path, os.getcwd())
+            return bool(c and (c == self.analysis_dir or under(c, self.analysis_dir)))
+
+        def is_evidence_exempt(self, path):
+            c = canon(path, os.getcwd())
+            if not c:
+                return False
+            if c == self.status_path or c.startswith(self.status_path + "."):
+                return True
+            if c == self.audit_path or c.startswith(self.audit_path + "."):
+                return True
+            return False
 
         def is_snapshot(self, path):
             c = canon(path, os.getcwd())
@@ -589,6 +807,9 @@ def self_test() -> int:
     checks["read-logged"] = ok and any(e["event"] == "open" and not e.get("write") for e in events)
     ok, _ = tried(lambda: open(raw / "orders.csv", "a"))
     checks["write-refused"] = (not ok) and any(e["event"] == "open-refused" for e in events)
+    # Every alias covering a path is logged, not just the first.
+    logged = [e for e in events if e["event"] == "open" and not e.get("write")]
+    checks["all-aliases-logged"] = bool(logged) and logged[-1]["aliases"] == ["sales", "sales2"]
     # Runtime-built path (string concatenation, the §0.1 limit for string-match hooks).
     p = str(raw) + "/" + "orders" + ".csv"
     ok, _ = tried(lambda: open(p, "a"))
@@ -596,6 +817,17 @@ def self_test() -> int:
     outside = tmp / "elsewhere.txt"
     ok, _ = tried(lambda: open(outside, "w"))
     checks["outside-raw-allowed"] = ok
+    # Evidence is hand-off: user code may read .analysis, never write it
+    # (except the kernel's own status file and audit-log appends).
+    ok, _ = tried(lambda: open(analysis / "ledger.md").read())
+    checks["evidence-read-allowed"] = ok
+    ok, _ = tried(lambda: open(analysis / "ledger.md", "a"))
+    checks["evidence-write-refused"] = (not ok) and any(
+        e["event"] == "open-refused" and "analysis" in str(e.get("reason", "")) for e in events)
+    ok, _ = tried(lambda: open(audit_p, "a"))
+    checks["audit-append-allowed"] = ok
+    ok, _ = tried(lambda: open(status_p, "w"))
+    checks["status-write-allowed"] = ok
     import socket as _sock
     ok, _ = tried(lambda: _sock.socket().connect(("169.254.169.254", 80)))
     checks["strange-host-refused"] = not ok
@@ -611,6 +843,13 @@ def self_test() -> int:
             self.sets.append(sql)
             return self
 
+        def executemany(self, sql, *a, **k):
+            self.sets.append(sql)
+            return self
+
+        def cursor(self, *a, **k):
+            return StubCon()
+
     made = {}
 
     class StubDuck:
@@ -623,11 +862,26 @@ def self_test() -> int:
     gcon = stub.connect()
     gcon.execute("SELECT * FROM 'x.csv'")
     sets = " ".join(made["con"].sets).lower()
-    checks["duckdb-lockdown-sets"] = all(s in sets for s in (
-        "allowed_directories", "autoinstall_known_extensions", "autoload_known_extensions",
-        "enable_external_access", "lock_configuration"))
+    needed = ("allowed_directories", "autoinstall_known_extensions", "autoload_known_extensions",
+              "enable_external_access", "lock_configuration")
+    checks["duckdb-lockdown-sets"] = all(s in sets for s in needed)
+    # Spec order: allowed_directories first (duckdb rejects changing it
+    # after enable_external_access=false), lock last so it freezes all.
+    checks["duckdb-set-order"] = (
+        sets.index("allowed_directories") < sets.index("enable_external_access")
+        < sets.index("lock_configuration"))
     ok, _ = tried(lambda: gcon.execute("COPY (SELECT 1) TO '" + str(raw / "out.csv") + "'"))
     checks["duckdb-copy-to-raw-refused"] = not ok
+    # Every query surface is scanned: the connection execute() returns, the
+    # cursor, executemany, and the module-level sql/query shims.
+    ok, _ = tried(lambda: gcon.execute("SELECT 1").execute(
+        "COPY (SELECT 1) TO '" + str(raw / "out2.csv") + "'"))
+    checks["duckdb-chained-execute-scanned"] = not ok
+    ok, _ = tried(lambda: gcon.cursor().execute(
+        "COPY (SELECT 1) TO '" + str(raw / "out3.csv") + "'"))
+    checks["duckdb-cursor-scanned"] = not ok
+    ok, _ = tried(lambda: gcon.executemany("COPY (SELECT 1) TO '" + str(raw / "out4.csv") + "'", []))
+    checks["duckdb-executemany-scanned"] = not ok
 
     class StubPl:
         def read_csv(self, src, **k):
@@ -637,6 +891,50 @@ def self_test() -> int:
     wrap_polars(stubpl, ctx)
     ok, _ = tried(lambda: stubpl.read_csv(raw / "orders.csv"))
     checks["polars-read-logged"] = ok and any(e["event"] == "polars-read" for e in events)
+
+    class StubPa:
+        class parquet:
+            @staticmethod
+            def write_table(table, where, **k):
+                return ("wrote", str(where))
+
+            @staticmethod
+            def read_table(source, **k):
+                return ("read", str(source))
+
+    stubpa = StubPa()
+    n_pa = 0
+    n_pa += _wrap_first_arg(stubpa, ("parquet.read_table",), ctx, "pyarrow")
+    n_pa += _wrap_writer(stubpa, ("parquet.write_table",), ctx, "pyarrow")
+    # The destination is the SECOND positional (table, where): a
+    # first-arg-only check would miss it and let a raw write through.
+    ok, _ = tried(lambda: stubpa.parquet.write_table("TABLE", raw / "out.parquet"))
+    checks["writer-second-arg-refused"] = (not ok) and any(
+        e["event"] == "pyarrow-write" for e in events)
+    ok, _ = tried(lambda: stubpa.parquet.read_table(raw / "orders.csv"))
+    checks["reader-second-arg-logged"] = ok and any(
+        e["event"] == "pyarrow-read" for e in events)
+    # pyarrow.fs remote constructors: from_uri is host-checked, the bare
+    # remote constructors are logged detect-only.
+    class FakeFS:
+        class FileSystem:
+            @staticmethod
+            def from_uri(uri, *a, **k):
+                return ("fs", uri)
+
+        class S3FileSystem:
+            def __init__(self, *a, **k):
+                pass
+
+    class StubPaFs:
+        fs = FakeFS()
+
+    n_fs = _wrap_pyarrow_fs(StubPaFs(), ctx)
+    ok, _ = tried(lambda: FakeFS.FileSystem.from_uri("s3://evil.example/x"))
+    checks["pyarrow-from-uri-refused"] = not ok
+    n_ev = len(events)
+    FakeFS.S3FileSystem()
+    checks["pyarrow-fs-logged"] = any(e["event"] == "pyarrow-fs" for e in events[n_ev:]) and n_fs >= 2
 
     results = {"checks": checks, "events": len(events)}
     print(json.dumps(results, indent=2, sort_keys=True))

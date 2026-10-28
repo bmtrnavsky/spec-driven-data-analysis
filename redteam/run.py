@@ -41,6 +41,7 @@ HOOK = REPO / "hooks" / "dda_hook.py"
 DDA = REPO / "scripts" / "dda.py"
 sys.path.insert(0, str(REPO / "scripts"))
 
+from ddalib import chain
 from ddalib.cli import BLOCKING_HOOKS  # noqa: E402
 
 BOUND = "rt-bound-0001"
@@ -406,10 +407,23 @@ class Harness:
                     "prevented", vdup.stderr.strip()[:150],
                     "a change to any header field is a new variant id (§4.3)")
         # 3. The kernel does not start without the full baseline stack (§10.1a).
+        #    Host-independent: a stub dir whose duckdb raises on import shadows
+        #    any real stack through DDA_BASELINE_DIR, so the refusal reproduces
+        #    on every host (with or without the stack installed).
         (self.wd / ".analysis" / "variants" / "v1.py").write_text(
             "open(r'" + rawf + "').read()\n", encoding="utf-8")
-        r = self.dda("run", "--variant", "v1", "--workdir", str(self.wd),
-                     str(self.wd / ".analysis" / "variants" / "v1.py"), check=False)
+        broken = self.scratch / "broken-baseline"
+        broken.mkdir(exist_ok=True)
+        for pkg in ("pandas", "numpy", "pyarrow", "polars", "duckdb", "scipy", "statsmodels",
+                    "sklearn", "matplotlib", "seaborn", "openpyxl", "xlrd", "ipykernel",
+                    "IPython", "jupyter_client"):
+            body = ("raise ImportError('redteam: %s is missing (§10.1a)')\n" % pkg) if pkg == "duckdb" else ""
+            (broken / f"{pkg}.py").write_text(body, encoding="utf-8")
+        env_nb = dict(self.env)
+        env_nb["DDA_BASELINE_DIR"] = str(broken)
+        r = subprocess.run([self.py, str(DDA), "run", "--variant", "v1", "--workdir", str(self.wd),
+                            str(self.wd / ".analysis" / "variants" / "v1.py")],
+                           env=env_nb, capture_output=True, text=True, errors="replace")
         missing = "does not start" in (r.stdout + r.stderr)
         self.record("kernel.start-no-baseline", "kernel",
                     "`dda run` with an incomplete baseline stack refuses to start",
@@ -438,9 +452,10 @@ class Harness:
         # 5. Native paths: each mandated library is either enforced by a wrapper
         #    or else the kernel refuses to start and the footer downgrades to
         #    detect-only for that path (§10.1b limits).
-        st = subprocess.run([self.py, "-m", "ddalib.kernel_bootstrap", "--self-test"],
-                            cwd=str(REPO / "scripts"), env={**self.env, "PYTHONPATH": str(REPO / "scripts")},
-                            capture_output=True, text=True)
+        st = subprocess.run([self.py, "-I", "-P", str(REPO / "scripts" / "ddalib" / "kernel_bootstrap.py"),
+                               "--self-test"],
+                            cwd=str(self.scratch), env=self.env,
+                            capture_output=True, text=True, errors="replace")
         try:
             checks = json.loads(st.stdout).get("checks", {})
         except ValueError:
@@ -469,9 +484,22 @@ class Harness:
                             "kernel record marks the path detect-only",
                             "startup check (10.1a) + footer downgrade (10.1b limits)")
             else:
-                self.record(cid, "native paths", attack, "pending", "pending phase 3",
-                            lib + " present but live-wrapper probe not implemented in the harness",
-                            "SPEC 14 phase 3")
+                self._live_native_probe(lib, cid, attack, rawf)
+        for lib, cid, attack in (
+                ("polars", "native.polars-write-raw", "polars write_csv onto a raw root"),
+                ("pyarrow", "native.pyarrow-write-raw", "pyarrow write_table onto a raw root")):
+            probe = subprocess.run([self.py, "-c", "import " + lib], capture_output=True, text=True, env=self.env)
+            if probe.returncode != 0:
+                self.record(cid, "native paths", attack,
+                            "detected", "detected",
+                            lib + " not installed here: kernel start check refuses to start; "
+                            "kernel record marks the path detect-only",
+                            "startup check (10.1a) + footer downgrade (10.1b limits)")
+            else:
+                self._live_native_probe(lib, cid, attack, rawf)
+        # Kernel user code must not be able to write hand-off evidence.
+        self._live_native_probe("", "native.kernel-evidence-write",
+                                "kernel user code opens .analysis evidence for append", rawf)
         # 6. Orphan runs fail G6: a data read with no registered variant id.
         orph_py = ("import sys; sys.path.insert(0, sys.argv[1]); from pathlib import Path; "
                    "from ddalib import chain; "
@@ -484,6 +512,115 @@ class Harness:
         self.record("g6.orphan", "gates", "G6 after a data read with no variant id",
                     "detected" if g.returncode != 0 and "orphan" in g.stdout else "missed", "detected",
                     g.stdout.strip()[:150], "orphan-run check (4.3, stage-6 gate)")
+
+    def _lib_present(self, lib: str) -> bool:
+        p = subprocess.run([self.py, "-c", "import " + lib], capture_output=True, text=True, env=self.env)
+        return p.returncode == 0
+
+    def _ensure_parquet_fixture(self) -> bool:
+        parq = self.raw / "raw.parquet"
+        if parq.is_file():
+            return True
+        for code in (
+                "import polars as pl; pl.DataFrame({'id':[1,2],'amount':[10,20]}).write_parquet(r'%s')" % parq,
+                "import pyarrow as pa, pyarrow.parquet as pq; "
+                "pq.write_table(pa.table({'id':[1,2],'amount':[10,20]}), r'%s')" % parq,
+                "import pandas as pd; pd.DataFrame({'id':[1,2],'amount':[10,20]}).to_parquet(r'%s')" % parq):
+            r = subprocess.run([self.py, "-c", code], capture_output=True, text=True, env=self.env)
+            if r.returncode == 0 and parq.is_file():
+                return True
+        return False
+
+    def _kernel_probe_run(self, vid: str, body: str):
+        """Register + run one probe variant; return (proc, run_logged)."""
+        self.dda("variant", vid, str(self.wd), "--why", "redteam live wrapper probe",
+                 "--set", "population=all", "--set", "model=diff")
+        sp = self.wd / ".analysis" / "variants" / (vid + ".py")
+        sp.write_text(body, encoding="utf-8")
+        r = self.dda("run", "--variant", vid, "--workdir", str(self.wd), str(sp), check=False)
+        run_id = None
+        for rec in chain.read_records(self.wd / ".analysis" / "specs-tried.jsonl"):
+            if rec.get("type") == "run" and rec.get("variant") == vid:
+                run_id = rec.get("run_id")
+        logged = False
+        if run_id:
+            for a in chain.read_records(self.wd / ".analysis" / "audit.log"):
+                if (a.get("type") == "audit" and str(a.get("run_id")) == str(run_id)
+                        and a.get("aliases")):
+                    logged = True
+                    break
+        return r, logged
+
+    def _full_baseline(self) -> bool:
+        code = ("import pandas, numpy, pyarrow, polars, duckdb, scipy, statsmodels, sklearn, "
+                "matplotlib, seaborn, openpyxl, xlrd, ipykernel, IPython, jupyter_client")
+        p = subprocess.run([self.py, "-c", code], capture_output=True, text=True, env=self.env)
+        return p.returncode == 0
+
+    def _live_native_probe(self, lib: str, cid: str, attack: str, rawf: str):
+        """Exercise the REAL installed library inside a real kernel: allowed
+        reads must succeed AND appear in the audit log; raw writes and
+        remote fetches must be refused."""
+        if not self._full_baseline():
+            self.record(cid, "native paths", attack + " (no runnable kernel here)",
+                        "detected", "detected",
+                        "incomplete stack here: no kernel can start; covered by kernel.start-no-baseline, "
+                        "wrappers marked detect-only", "startup check (10.1a)")
+            return
+        rawdir = self.raw.as_posix()
+        need_parquet = cid in ("native.pandas-read_parquet", "native.polars-scan_parquet")
+        if need_parquet and not self._ensure_parquet_fixture():
+            self.record(cid, "native paths", attack, "pending", "pending phase 3",
+                        "no parquet writer available here to build the fixture", "fixture")
+            return
+        bodies = {
+            "native.pandas-read_parquet":
+                ("import pandas as pd; print(pd.read_parquet(r'%s').shape)" % (rawdir + "/raw.parquet"),
+                 "allowed"),
+            "native.polars-read_csv":
+                ("import polars as pl; print(pl.read_csv(r'%s').shape)" % rawf, "allowed"),
+            "native.polars-scan_parquet":
+                ("import polars as pl; print(pl.scan_parquet(r'%s').collect().shape)" % (rawdir + "/raw.parquet"),
+                 "allowed"),
+            "native.pyarrow-dataset":
+                ("import pyarrow.dataset as ds; print(ds.dataset([r'%s'], format='csv').count_rows())" % rawf,
+                 "allowed"),
+            "native.duckdb-select-raw":
+                ("import duckdb; print(duckdb.sql(\"SELECT * FROM read_csv('%s')\").fetchall())" % rawf,
+                 "allowed"),
+            "native.duckdb-copy-to-raw":
+                ("import duckdb; duckdb.sql(\"COPY (SELECT 1 AS a) TO '%s'\")" % (rawdir + "/evil-dd.csv"),
+                 "prevented"),
+            "native.duckdb-install-httpfs":
+                ("import duckdb; duckdb.sql('INSTALL httpfs')", "prevented"),
+            "native.polars-write-raw":
+                ("import polars as pl; pl.DataFrame({'a':[1]}).write_csv(r'%s')" % (rawdir + "/evil-pl.csv"),
+                 "prevented"),
+            "native.pyarrow-write-raw":
+                ("import pyarrow as pa, pyarrow.parquet as pq; "
+                 "pq.write_table(pa.table({'a':[1]}), r'%s')" % (rawdir + "/evil-pa.parquet"),
+                 "prevented"),
+            "native.kernel-evidence-write":
+                ("open('.analysis/runs.log', 'a').write('forged\\n')", "prevented"),
+        }
+        body, expected = bodies[cid]
+        r, logged = self._kernel_probe_run("rt-" + cid.split(".", 1)[1].replace("_", "-"), body)
+        out = (r.stdout + r.stderr)
+        if expected == "allowed":
+            ok = r.returncode == 0 and logged
+            self.record(cid, "native paths", attack + " (live: real lib in a real kernel)",
+                        "allowed" if ok else "missed", "allowed",
+                        ("rc=0 + audit-logged" if ok else out.strip()[-200:]),
+                        "audit hook + native wrappers (§10.1, §10.1b)")
+        else:
+            ok = r.returncode != 0 and "refus" in out.lower()
+            if cid == "native.duckdb-install-httpfs":
+                ok = r.returncode != 0 and ("httpfs" in out.lower() or "extension" in out.lower()
+                                            or "refus" in out.lower())
+            self.record(cid, "native paths", attack + " (live: real lib in a real kernel)",
+                        "prevented" if ok else "missed", "prevented",
+                        (out.strip()[-200:] if ok else "exit %d, no refusal: %s" % (r.returncode, out.strip()[-200:])),
+                        "audit hook + native wrappers (§10.1, §10.1b)")
 
     def pending_phases(self):
         pend = [
