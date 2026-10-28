@@ -72,8 +72,28 @@ def _norm_fp(s: str) -> str:
 
 
 def approver_matches(approvers: list, *candidates: str) -> str | None:
-    """Return the approver name whose fingerprint/key/key_id matches a candidate, else None."""
-    norms = [(_norm_fp(c), c) for c in candidates if c]
+    """Return the approver name whose key matches a candidate, else None.
+
+    Exact-only (§4.5): a candidate matches when its normalized form EQUALS
+    the approver's normalized ``fingerprint``/``key_id`` (case/punctuation
+    differences ignored), or its whitespace-normalized form EQUALS the
+    approver's full ``key``. Substrings never match, and names never match:
+    ``%GS``/``%GK`` signer text is self-asserted and forgeable without the
+    key, so only ``%GF``/``%GP``-style key material counts.
+    """
+    normed: set[str] = set()
+    raws: set[str] = set()
+    for c in candidates:
+        if c is None:
+            continue
+        s = str(c)
+        if not s.strip():
+            continue
+        raws.add(" ".join(s.split()))
+        for tok in [s, *s.split()]:
+            n = _norm_fp(tok)
+            if n:
+                normed.add(n)
     for a in approvers:
         if not isinstance(a, dict):
             continue
@@ -81,20 +101,12 @@ def approver_matches(approvers: list, *candidates: str) -> str | None:
             v = a.get(key)
             if isinstance(v, str) and v.strip():
                 nv = _norm_fp(v)
-                for nn, _ in norms:
-                    if nv and (nn == nv or (len(nn) >= 8 and nn in nv) or (len(nv) >= 8 and nv in nn)):
-                        return a.get("name")
+                if nv and nv in normed:
+                    return a.get("name")
         k = a.get("key")
         if isinstance(k, str) and k.strip():
-            ks = " ".join(k.split())
-            for _, c in norms:
-                cs = " ".join(str(c).split())
-                if ks and (ks in cs or cs in ks):
-                    return a.get("name")
-        nm = a.get("name")
-        for _, c in norms:
-            if isinstance(nm, str) and nm and str(c).strip() == nm:
-                return nm
+            if " ".join(k.split()) in raws:
+                return a.get("name")
     return None
 
 

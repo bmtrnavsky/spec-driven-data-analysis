@@ -62,17 +62,29 @@ def _ssh_lines() -> tuple[list[str], str]:
     ssh_add = shutil.which("ssh-add")
     if not ssh_add:
         return [], "ssh-add not installed"
+    # Fingerprints (-l), not full public keys (-L): fingerprints are what
+    # approver entries carry, and full key material must not land in logs.
     try:
-        r = subprocess.run([ssh_add, "-L"], capture_output=True, text=True, timeout=15)
+        r = subprocess.run([ssh_add, "-l"], capture_output=True, text=True, timeout=15)
     except (OSError, subprocess.SubprocessError):
         return [], "ssh-add did not run"
     if r.returncode != 0:
-        return [], "no ssh-agent reachable (ssh-add -L failed)"
+        # Some agents only answer -L; still enumerate rather than pass blind.
+        try:
+            r2 = subprocess.run([ssh_add, "-L"], capture_output=True, text=True, timeout=15)
+        except (OSError, subprocess.SubprocessError):
+            return [], "ssh-add did not run"
+        if r2.returncode != 0:
+            return [], "no ssh-agent reachable (ssh-add -l failed)"
+        return [ln for ln in r2.stdout.splitlines() if ln.strip()], ""
     return [ln for ln in r.stdout.splitlines() if ln.strip()], ""
 
 
 def _is_sk_keytype(line: str) -> bool:
-    return line.split()[0].startswith("sk-") if line.split() else False
+    parts = line.split()
+    if parts and parts[0].lower().startswith("sk-"):
+        return True  # ssh-add -L full-key form
+    return "-SK)" in line.upper()  # ssh-add -l fingerprint form, e.g. (ED25519-SK)
 
 
 def _ssh_agent_check(approvers: list) -> dict:
@@ -142,7 +154,46 @@ def key_checks(wd: Workdir | None = None, approvers: list | None = None) -> list
             approvers = load_config(wd).get("approvers") or [] if wd is not None else []
         except DdaError:
             approvers = []
-    return [_gpg_agent_check(approvers), _ssh_agent_check(approvers), _git_config_check(wd, approvers)]
+    gpg = _gpg_agent_check(approvers)
+    ssh = _ssh_agent_check(approvers)
+    gitc = _git_config_check(wd, approvers)
+    return [gpg, ssh, gitc, _windows_agent_check(ssh["detail"])]
+
+
+def _windows_agent_check(ssh_note: str) -> dict:
+    """Windows-only agents ssh-add may not see (§4.5): Pageant, the Windows
+    OpenSSH agent pipe, 1Password's agent. A present-but-unenumerated agent
+    fails: its keys are borrowable and invisible to the ssh-agent check."""
+    if os.name != "nt":
+        return _check("pass", "windows-agents", "not a Windows host")
+    procs = ""
+    try:
+        r = subprocess.run(["tasklist", "/FO", "CSV", "/NH"],
+                           capture_output=True, text=True, timeout=30)
+        if r.returncode == 0:
+            procs = r.stdout.lower()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    if "pageant.exe" in procs:
+        return _check("fail", "windows-agents",
+                      "pageant.exe is running: PuTTY/Pageant keys are invisible to ssh-add; "
+                      "unload approver keys or stop Pageant")
+    pipe_present = False
+    try:
+        pipe_present = Path(r"\\.\pipe\openssh-ssh-agent").exists()
+    except OSError:
+        pipe_present = False
+    unenumerated = any(s in (ssh_note or "") for s in
+                       ("not installed", "did not run", "no ssh-agent reachable"))
+    if pipe_present and unenumerated:
+        return _check("fail", "windows-agents",
+                      "the Windows OpenSSH agent pipe is present but ssh-add could not "
+                      "enumerate it; confirm no approver key is loaded there")
+    detail = "no Pageant; Windows OpenSSH agent pipe " + \
+        ("enumerated via ssh-add" if pipe_present else "absent")
+    if "1password" in procs:
+        detail += "; 1Password is running — if its SSH agent is enabled, confirm no approver key is stored there"
+    return _check("pass", "windows-agents", detail)
 
 
 # ---------- runtime checks (§6.9) ----------
@@ -185,16 +236,23 @@ def hook_entry_checks() -> list[dict]:
         out.append(_check("fail", "hook-registration", f"{type(exc).__name__}: {exc}"))
     for name in (*BLOCKING_HOOKS, "runlog", "driftnudge"):
         try:
-            r = subprocess.run([sys.executable, "-I", "-S", str(hook), name], input="{}",
+            # A well-formed UNBOUND payload: a healthy hook answers {} rc 0
+            # without touching anything. Any nonzero exit (including the
+            # fail-closed block exit 2) is a failure, never a pass: exit 2
+            # here means the hook would block sessions it must let through.
+            probe = json.dumps({"hook_event_name": "pre_tool_call", "tool_name": "read_file",
+                                "tool_input": {"path": "dda-doctor-dry-run"},
+                                "session_id": "dda-doctor-dry-run-unbound", "extra": {}})
+            r = subprocess.run([sys.executable, "-I", "-S", str(hook), name], input=probe,
                                capture_output=True, text=True, timeout=30)
-            json.loads(r.stdout)
-            if name in BLOCKING_HOOKS and r.returncode == 2:
-                out.append(_check("pass", f"hook-dry-run:{name}",
-                                  "fail-closed entry point returns valid JSON (bound-session fault path)"))
-            elif r.returncode == 0:
+            body = json.loads(r.stdout)
+            if not isinstance(body, dict):
+                raise ValueError("entry point did not emit a JSON object")
+            if r.returncode == 0:
                 out.append(_check("pass", f"hook-dry-run:{name}", "entry point returns valid JSON"))
             else:
-                out.append(_check("fail", f"hook-dry-run:{name}", f"rc={r.returncode} {r.stderr[-200:]}"))
+                out.append(_check("fail", f"hook-dry-run:{name}",
+                                  f"rc={r.returncode} on an unbound dry-run {r.stderr[-200:]}"))
         except Exception as exc:
             out.append(_check("fail", f"hook-dry-run:{name}", f"{type(exc).__name__}: {exc}"))
     return out

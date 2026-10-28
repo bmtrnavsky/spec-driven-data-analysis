@@ -831,6 +831,104 @@ class Harness:
                     "detected" if ok3 else "missed", "detected",
                     g.stdout.strip()[:150], "config-status lookup in approvals.index.jsonl (phase 4)")
 
+    def key_borrowing(self):
+        """Phase 4 key-borrowing probes (SPEC §4.5): an agent that can drive
+        an approver key must be downgraded to unverified. Stubs stand in for
+        real agents/keys; nothing here touches the operator's real config."""
+        from ddalib import approvals as _ap
+        from ddalib import doctor as _doc
+        fp = "SHA256:REDTEAMPROBEKEY1"
+        appr = [{"name": "brad", "fingerprint": fp}]
+        self.record("approval.exact-fingerprint-matches", "approvals/doctor",
+                    "exact approver fingerprint verifies",
+                    "allowed" if _ap.approver_matches(appr, fp) == "brad" else "missed", "allowed",
+                    "sanity: the strict matcher still accepts exact key material")
+        strict = [
+            ("approval.substring-fingerprint-no-match", fp[:-4]),
+            ("approval.name-spoof-no-match", "brad"),
+            ("approval.signer-text-spoof-no-match", 'gpg: Good signature from "brad"'),
+            ("approval.keyid-substring-no-match", "REDTEAM"),
+        ]
+        for cid, cand in strict:
+            hit = _ap.approver_matches(
+                [{"name": "brad", "fingerprint": fp, "key": "ssh-ed25519 AAAAC3NzREDTEAM brad@host"}],
+                cand)
+            self.record(cid, "approvals/doctor", f"forged signer evidence {cand[:40]!r} verifies nothing",
+                        "prevented" if hit is None else "missed", "prevented",
+                        "no match" if hit is None else f"matched {hit}",
+                        "approver_matches is exact-only: no substrings, no names (§4.5)")
+        hit = _ap.approver_matches(
+            [{"name": "brad", "fingerprint": fp, "key": "ssh-ed25519 AAAAC3NzREDTEAM brad@host"}],
+            "AAAAC3NzREDTEAM")
+        self.record("approval.key-fragment-no-match", "approvals/doctor",
+                    "full-key fragment verifies nothing",
+                    "prevented" if hit is None else "missed", "prevented",
+                    "no match" if hit is None else f"matched {hit}",
+                    "full-key equality only (§4.5)")
+        # Stub ssh-add -l listing the approver fingerprint: doctor must fail.
+        bindir = self.scratch / "fakebin"
+        bindir.mkdir(exist_ok=True)
+        if os.name == "nt":
+            (bindir / "ssh-add.bat").write_text(
+                "@echo off\r\necho 256 %s redteam-key (ED25519)\r\n" % fp, encoding="utf-8")
+            (bindir / "gpgconf.bat").write_text(
+                "@echo off\r\n"
+                "echo default-cache-ttl:0:0:Passphrase cache TTL:0:0:default-cache-ttl:0:0:600\r\n"
+                "echo max-cache-ttl:0:0:Max passphrase cache TTL:0:0:max-cache-ttl:0:0:7200\r\n",
+                encoding="utf-8")
+        else:
+            (bindir / "ssh-add").write_text(
+                "#!/bin/sh\necho '256 %s redteam-key (ED25519)'\n" % fp, encoding="utf-8")
+            (bindir / "gpgconf").write_text(
+                "#!/bin/sh\n"
+                "echo 'default-cache-ttl:0:0:Passphrase cache TTL:0:0:default-cache-ttl:0:0:600'\n"
+                "echo 'max-cache-ttl:0:0:Max passphrase cache TTL:0:0:max-cache-ttl:0:0:7200'\n",
+                encoding="utf-8")
+            os.chmod(bindir / "ssh-add", 0o755)
+            os.chmod(bindir / "gpgconf", 0o755)
+        old_path = os.environ.get("PATH", "")
+        os.environ["PATH"] = str(bindir) + os.pathsep + old_path
+        try:
+            ssh = _doc._ssh_agent_check(appr)
+            self.record("keys.ssh-borrow-detected", "approvals/doctor",
+                        "approver key listed by the reachable ssh-agent",
+                        "detected" if ssh["status"] == "fail" else "missed", "detected",
+                        ssh["detail"][:150], "ssh-agent check downgrades every approval (§4.5)")
+            gpg = _doc._gpg_agent_check(appr)
+            self.record("keys.gpg-cache-detected", "approvals/doctor",
+                        "passphrase caching on while an approval exists",
+                        "detected" if gpg["status"] == "fail" else "missed", "detected",
+                        gpg["detail"][:150], "gpg-agent cache check (§4.5)")
+        finally:
+            os.environ["PATH"] = old_path
+        # Auto-signing and a signingkey naming the approver, in an isolated
+        # global config (never the operator's real ~/.gitconfig).
+        fake_global = self.scratch / "rt-global-gitconfig"
+        fake_system = self.scratch / "rt-system-gitconfig"
+        fake_system.write_text("", encoding="utf-8")
+        old = {k: os.environ.get(k) for k in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM")}
+        os.environ["GIT_CONFIG_GLOBAL"] = str(fake_global)
+        os.environ["GIT_CONFIG_SYSTEM"] = str(fake_system)
+        try:
+            fake_global.write_text("[commit]\n\tgpgsign = true\n", encoding="utf-8")
+            gc = _doc._git_config_check(None, appr)
+            self.record("keys.auto-sign-detected", "approvals/doctor",
+                        "commit.gpgsign=true in an applying scope",
+                        "detected" if gc["status"] == "fail" else "missed", "detected",
+                        gc["detail"][:150], "auto-signing would sign agent commits unseen (§4.5)")
+            fake_global.write_text("[user]\n\tsigningkey = %s\n" % fp, encoding="utf-8")
+            gc2 = _doc._git_config_check(None, appr)
+            self.record("keys.signingkey-borrow-detected", "approvals/doctor",
+                        "user.signingkey names an approver key",
+                        "detected" if gc2["status"] == "fail" else "missed", "detected",
+                        gc2["detail"][:150], "bare `git commit` would borrow the approver key (§4.5)")
+        finally:
+            for k, v in old.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
     def host_recon(self):
         def git(*a):
             r = subprocess.run(["git", *a], capture_output=True, text=True)
@@ -858,6 +956,7 @@ class Harness:
             self.phase2()
             self.phase3()
             self.phase4()
+            self.key_borrowing()
             self.dda("release", str(self.wd))
             ul = Path(self.env["DDA_HOME"]) / "unbound-access.log"
             self.lines_at_release = len(ul.read_text(encoding="utf-8").splitlines()) if ul.is_file() else 0

@@ -403,6 +403,28 @@ class ApprovalsTests(Base):
         self.assertEqual(rc, 0, err)
         return out
 
+    def test_approver_matches_exact_fingerprint_only(self):
+        # §4.5: only exact %GF/%GP-style key material matches. Substrings,
+        # partial fingerprints, full-key fragments, and bare names never do.
+        from ddalib import approvals
+        appr = [{"name": "brad", "fingerprint": "SHA256:ABCDEF123456",
+                 "key_id": "ABCDEF12",
+                 "key": "ssh-ed25519 AAAAC3NzDEMOKEY brad@host"}]
+        self.assertEqual(approvals.approver_matches(appr, "SHA256:ABCDEF123456"), "brad")
+        self.assertEqual(approvals.approver_matches(appr, "sha256:abcdef123456"), "brad")
+        self.assertEqual(approvals.approver_matches(appr, "ABCDEF12"), "brad")
+        self.assertEqual(approvals.approver_matches(
+            appr, "ssh-ed25519 AAAAC3NzDEMOKEY brad@host"), "brad")
+        # Forgeries that must NOT match:
+        self.assertIsNone(approvals.approver_matches(appr, "ABCDEF"))  # partial fp
+        self.assertIsNone(approvals.approver_matches(appr, "SHA256:ABCDEF123456EXTRA"))  # superstring
+        self.assertIsNone(approvals.approver_matches(appr, "AAAAC3NzDEMOKEY"))  # key fragment
+        self.assertIsNone(approvals.approver_matches(appr, "brad"))  # bare name
+        self.assertIsNone(approvals.approver_matches(
+            appr, 'gpg: Good signature from "brad"'))  # %GS-style name text
+        self.assertIsNone(approvals.approver_matches(appr, ""))  # empty
+        self.assertIsNone(approvals.approver_matches([], "SHA256:ABCDEF123456"))
+
     def test_config_approvers_validation(self):
         self.wd.config_path.write_text(
             "version: 1\ndefault_tier: EXPLORE\napprovers:\n  - name: brad\n", encoding="utf-8")
@@ -482,20 +504,37 @@ class DoctorTests(Base):
         names = [c["name"] for c in rep["sections"]["keys"]]
         self.assertIn("gpg-agent", names)
         self.assertIn("ssh-agent", names)
+        self.assertIn("windows-agents", names)
         self.assertIn("git-signing-config", names)
         for checks in rep["sections"].values():
             for c in checks:
                 self.assertIn(c["status"], ("pass", "fail", "skip"))
 
     def test_doctor_sees_auto_signing(self):
-        rc, out, err = self.cli("doctor", "--json")
-        self.assertIn(rc, (0, 1), err)
-        before = json.loads(out)
-        subprocess.run(["git", "config", "--global", "commit.gpgsign", "true"], check=True)
+        # Never touch the operator's real ~/.gitconfig: redirect the
+        # global and system scopes at temp files for the duration.
+        fake_global = self.tmp / "fake-global-gitconfig"
+        fake_global.write_text("[user]\n\tname = dda-test\n", encoding="utf-8")
+        fake_system = self.tmp / "fake-system-gitconfig"
+        fake_system.write_text("", encoding="utf-8")
+        old = {k: os.environ.get(k) for k in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM")}
+        os.environ["GIT_CONFIG_GLOBAL"] = str(fake_global)
+        os.environ["GIT_CONFIG_SYSTEM"] = str(fake_system)
         try:
-            rc2, out2, _ = self.cli("doctor", "--json")
+            rc, out, err = self.cli("doctor", "--json")
+            self.assertIn(rc, (0, 1), err)
+            before = json.loads(out)
+            subprocess.run(["git", "config", "--global", "commit.gpgsign", "true"], check=True)
+            try:
+                rc2, out2, _ = self.cli("doctor", "--json")
+            finally:
+                subprocess.run(["git", "config", "--global", "--unset", "commit.gpgsign"], check=True)
         finally:
-            subprocess.run(["git", "config", "--global", "--unset", "commit.gpgsign"], check=True)
+            for k, v in old.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
         after = json.loads(out2)
         git_checks = [c for c in after["sections"]["keys"] if c["name"] == "git-signing-config"]
         self.assertTrue(git_checks and git_checks[0]["status"] == "fail")

@@ -407,8 +407,9 @@ An approval must be something the agent cannot produce.
     gpg-agent`) must have `ignore-cache-for-signing`, or
     `default-cache-ttl 0` and `max-cache-ttl 0`. The default 600-second
     cache fails.
-  - `ssh-agent`: `ssh-add -L` must not list a non-`-sk` approver key on
-    any agent the Hermes shell can reach: `SSH_AUTH_SOCK`, the Windows
+  - `ssh-agent`: `ssh-add -l` (fingerprints, with `-L` as fallback) must
+    not list a non-`-sk` approver key — matched exact-only against the
+    approver fingerprints — on any agent the Hermes shell can reach: `SSH_AUTH_SOCK`, the Windows
     OpenSSH agent service (`\\.\pipe\openssh-ssh-agent`), Pageant, and
     1Password's agent. A running Windows `ssh-agent` service holding the
     key fails.
