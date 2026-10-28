@@ -74,12 +74,16 @@ def _norm_fp(s: str) -> str:
 def approver_matches(approvers: list, *candidates: str) -> str | None:
     """Return the approver name whose key matches a candidate, else None.
 
-    Exact-only (§4.5): a candidate matches when its normalized form EQUALS
-    the approver's normalized ``fingerprint``/``key_id`` (case/punctuation
-    differences ignored), or its whitespace-normalized form EQUALS the
-    approver's full ``key``. Substrings never match, and names never match:
-    ``%GS``/``%GK`` signer text is self-asserted and forgeable without the
-    key, so only ``%GF``/``%GP``-style key material counts.
+    Exact-only (§4.5): a candidate matches when its WHOLE normalized form
+    EQUALS the approver's normalized ``fingerprint``/``key_id``
+    (case/punctuation differences ignored), or its whitespace-normalized
+    WHOLE form EQUALS the approver's full ``key``. Substrings, tokens, and
+    names never match: ``%GS``/``%GK`` signer text and ``git verify-commit``
+    output are self-asserted and forgeable without the key (an attacker can
+    embed a victim fingerprint in a user ID), so only whole ``%GF``/``%GP``
+    values count. Callers holding structured multi-field lines (e.g. the
+    ``ssh-add -l`` ``<bits> <fingerprint> <comment> (<type>)`` columns)
+    must extract the fingerprint column themselves before calling.
     """
     normed: set[str] = set()
     raws: set[str] = set()
@@ -90,10 +94,9 @@ def approver_matches(approvers: list, *candidates: str) -> str | None:
         if not s.strip():
             continue
         raws.add(" ".join(s.split()))
-        for tok in [s, *s.split()]:
-            n = _norm_fp(tok)
-            if n:
-                normed.add(n)
+        n = _norm_fp(s)
+        if n:
+            normed.add(n)
     for a in approvers:
         if not isinstance(a, dict):
             continue
@@ -215,9 +218,12 @@ def _adding_commits(wd: Workdir, rel: str) -> list[str]:
 def _signer_fields(wd: Workdir, sha: str) -> tuple[bool, list[str]]:
     v = _git(wd, "verify-commit", sha)
     sig_ok = v.returncode == 0
-    sig_text = (v.stderr or "") + "\n" + (v.stdout or "")
-    f = _git(wd, "log", "-1", "--format=%G?%n%GF%n%GP%n%GS%n%GK", sha)
-    fields = [ln.strip() for ln in (f.stdout.splitlines() + sig_text.splitlines()) if ln.strip()]
+    # Key material only: whole %GF/%GP values. %GS/%GK signer text and
+    # `git verify-commit` output are attacker-influenceable (a forged key
+    # can carry a victim fingerprint in its user ID), so they are never
+    # match candidates — sig_ok carries the cryptographic verdict.
+    f = _git(wd, "log", "-1", "--format=%GF%n%GP", sha)
+    fields = [ln.strip() for ln in f.stdout.splitlines() if ln.strip()]
     return sig_ok, fields
 
 

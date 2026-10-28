@@ -425,6 +425,29 @@ class ApprovalsTests(Base):
         self.assertIsNone(approvals.approver_matches(appr, ""))  # empty
         self.assertIsNone(approvals.approver_matches([], "SHA256:ABCDEF123456"))
 
+    def test_approver_matches_forged_userid_no_wordsplit(self):
+        # Opus verify deleg_52940ae2: word-splitting let a forged key whose
+        # user ID embeds the victim fingerprint verify. Whole-value-only:
+        # %GS/%GK signer text and verify-commit output never match, even
+        # when they contain the fingerprint as a token/substring.
+        from ddalib import approvals
+        fp = "SHA256:ABCDEF123456"
+        appr = [{"name": "brad", "fingerprint": fp,
+                 "key_id": "ABCDEF12",
+                 "key": "ssh-ed25519 AAAAC3NzDEMOKEY brad@host"}]
+        forgeries = [
+            f"Evil User ({fp})",  # fingerprint embedded in a forged user ID
+            f"gpg: Good signature from \"evil ({fp})\"",
+            f"Good signature from evil <evil@host> [{fp}]",
+            f"256 {fp} evil-key (ED25519)",  # ssh-add -l-style line is NOT key material
+            f"prefix {fp} suffix",  # fingerprint as one whitespace token
+            "SHA256:ABCDEF123456\nbrad",  # multi-line smuggling
+        ]
+        for cand in forgeries:
+            self.assertIsNone(approvals.approver_matches(appr, cand), cand)
+        # Whole %GF/%GP values still match exactly.
+        self.assertEqual(approvals.approver_matches(appr, fp), "brad")
+
     def test_config_approvers_validation(self):
         self.wd.config_path.write_text(
             "version: 1\ndefault_tier: EXPLORE\napprovers:\n  - name: brad\n", encoding="utf-8")

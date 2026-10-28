@@ -96,7 +96,16 @@ def _ssh_agent_check(approvers: list) -> dict:
     for line in lines:
         if _is_sk_keytype(line):
             continue  # FIDO2 touch key: the agent cannot use it unattended
-        if approver_matches(approvers, line):
+        # approver_matches is whole-value-only (no word-splitting), so pull
+        # the structured fingerprint column out of `ssh-add -l` output
+        # ("<bits> <fingerprint> <comment> (<type>)") explicitly. Full-key
+        # (`ssh-add -L`) lines are passed whole: only a full-key equality
+        # counts, never a fragment.
+        cands: list[str] = [line]
+        parts = line.split()
+        if len(parts) >= 2 and not parts[0].lower().startswith(("sk-", "ssh-", "ecdsa-")):
+            cands.append(parts[1])
+        if approver_matches(approvers, *cands):
             bad.append(line.split()[0] + " ...")
     if bad:
         return _check("fail", "ssh-agent",
