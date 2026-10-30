@@ -19,6 +19,30 @@ from pathlib import Path
 from . import chain, ledger, lockhash, lockstate
 from .layout import Workdir, read_text_lf
 
+
+def review_summary(wd: Workdir) -> str:
+    """One-line review state for the footer skeleton: recorded goldfish calls
+    (request ids + models) or recorded self re-reads, else none. Imported
+    lazily by footer to avoid a cycle (review imports ledger only)."""
+    from . import review as _review
+    try:
+        summary = _review.review_summary(wd)
+    except Exception:
+        return "none recorded"
+    try:
+        selfdir = wd.analysis / "reviews" / "self"
+        rounds = set()
+        if selfdir.is_dir():
+            for p in selfdir.glob("teardown-round*.md"):
+                m = re.match(r"^teardown-round([0-9]+[a-z]?)(?:-.*)?\.md$", p.name)
+                if m and p.stat().st_size > 0:
+                    rounds.add(m.group(1))
+        if rounds:
+            summary += "; self re-reads: rounds " + ",".join(sorted(rounds))
+    except OSError:
+        pass
+    return summary
+
 FULL_FIELDS = (
     "question", "tier", "spec version", "lock hash", "lock timestamp", "lock label", "amendments", "variants",
     "definitions", "data", "kernel", "reproduce", "review", "approvals", "correction evals", "hook faults",
@@ -131,6 +155,31 @@ def check(wd: Workdir, text: str, short: bool = False) -> list[str]:
         named = sorted(a for a in exp["aliases"] if re.search(rf"(?<![\w-]){re.escape(a)}(?![\w-])", g("sources")))
         if named != exp["aliases"]:
             problems.append(f"footer sources wrong (expected {', '.join(exp['aliases'])})")
+    # Review names the recorded rounds (§5.0): goldfish request ids/models
+    # when goldfish calls exist, self re-reads otherwise. Phase 7 check;
+    # presence-only before that.
+    try:
+        from . import review as _review
+        goldfish_recs = _review.existing_calls(wd, "teardown") + _review.existing_calls(wd, "post-result")
+    except Exception:
+        goldfish_recs = []
+    if goldfish_recs:
+        text = (fields.get("review", "") or "").lower()
+        named = any(str(r.get("provider_request_id") or "").lower() in text
+                    for r in goldfish_recs if r.get("provider_request_id"))
+        if "round" not in text and not named:
+            problems.append("footer review omits recorded goldfish rounds "
+                            f"({len(goldfish_recs)} call(s) in reviews/goldfish/): "
+                            "name the rounds, request ids, and models (§5.0 Recording)")
+    else:
+        try:
+            selfdir = wd.analysis / "reviews" / "self"
+            has_self = bool(selfdir.is_dir() and any(selfdir.glob("teardown-round*.md")))
+        except OSError:
+            has_self = False
+        if has_self and "self" not in (fields.get("review", "") or "").lower():
+            problems.append("footer review omits recorded self re-reads "
+                            "(reviews/self/): say who reviewed (§5.0)")
     return problems
 
 
@@ -158,7 +207,8 @@ def skeleton(wd: Workdir, short: bool = False) -> str:
         "definitions": ", ".join(exp["pins"]) or "none", "sources": ", ".join(exp["aliases"]),
         "review": (f"config approval: {exp['config_approval'] or 'unknown'} "
                    f"({(exp['config_hash'] or '')[:12]}); "
-                   f"approver fingerprints: {', '.join(exp['fingerprints']) or 'none configured'}"),
+                   f"approver fingerprints: {', '.join(exp['fingerprints']) or 'none configured'}; "
+                   f"goldfish: {review_summary(wd)}"),
         "approvals": (f"config {(exp['config_hash'] or '')[:12]}: {exp['config_approval'] or 'unknown'}; "
                       "other kinds verified or unverified per approvals.index.jsonl"),
         # Author-filled fields: fillable non-empty defaults so a fresh skeleton

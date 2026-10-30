@@ -2,7 +2,8 @@
 
 Implemented: init, status, start, release, hash, install, version (phase 1);
 lock, verify-chain, gate (G4), footer, abandon (phase 2); meta, variant, run,
-gate G6 (phase 3); approve, approved, doctor (phase 4).
+gate G6 (phase 3); approve, approved, doctor (phase 4); packet, review run,
+gate G3 (phase 7).
 Everything else in the spec's command set is registered but fails closed
 (exit 3, "not implemented in this build") so a script or gate that calls
 it can never mistake a missing feature for a pass.
@@ -25,12 +26,11 @@ EXIT_NOT_IMPLEMENTED = 3
 
 # Spec commands not yet built, with the build phase that delivers them (§14).
 PENDING = {
-    "evals": 9, "packet": 7,
-    "review": 7, "profile": 8, "verify": 8,
+    "evals": 9, "profile": 8, "verify": 8,
 }
 # Gates and the phase that builds each one's checks (§3, §14). G0/G8/G9 (5),
-# G1 (6), G4, G3/G7 (7), G5/G7 (8), G6 (3) are built; the rest fail closed.
-GATE_PHASE = {"G2": 4, "G3": 7, "G5": 8, "G6": 3, "G7": 8}
+# G1 (6), G4, G6 (3), G3 (7) are built; G2, G5, G7 fail closed.
+GATE_PHASE = {"G2": 4, "G5": 8, "G7": 8}
 
 BLOCKING_HOOKS = ("lockguard", "evidenceguard", "rawguard", "defguard", "footercheck")
 
@@ -205,9 +205,9 @@ def cmd_gate(args) -> int:
         ledger.write_wayfinder(wd, g, passed, reason)
         print(f"{g}: {'pass' if passed else 'fail'} — {reason}")
         return 0 if passed else 1
-    if g in ("G0", "G1", "G8", "G9"):
-        from . import gates5, gates6
-        fn = {"G0": gates5.gate_g0, "G1": gates6.gate_g1,
+    if g in ("G0", "G1", "G3", "G8", "G9"):
+        from . import gates5, gates6, gates7
+        fn = {"G0": gates5.gate_g0, "G1": gates6.gate_g1, "G3": gates7.gate_g3,
               "G8": gates5.gate_g8, "G9": gates5.gate_g9}[g]
         if g == "G8" and getattr(args, "report", None):
             passed, reason, _ = fn(wd, report=args.report)
@@ -452,6 +452,58 @@ def cmd_run(args) -> int:
     return 0
 
 
+def cmd_packet(args) -> int:
+    from . import review as _review
+    wd = _wd(args)
+    try:
+        stage = _review.normalize_stage(args.stage)
+    except DdaError as exc:
+        print(f"dda: {exc}", file=sys.stderr)
+        return 1
+    try:
+        info = _review.do_packet(wd, stage)
+    except DdaError as exc:
+        print(f"dda packet {stage}: {exc}", file=sys.stderr)
+        return exc.code
+    print(f"packet {stage}: {info['packet_hash']} ({info['files']} files, ~{info['tokens']} tokens)")
+    print(f"  {info['dir']}")
+    return 0
+
+
+def cmd_review(args) -> int:
+    from . import review as _review
+    wd = _wd(args)
+    if args.review_cmd == "list":
+        from pathlib import Path as _Path
+        raw = args.stage
+        if raw is not None and _Path(str(raw)).exists():
+            wd = Workdir.at(str(raw), getattr(args, "milestone", None))
+            stage = None
+        else:
+            try:
+                stage = _review.normalize_stage(raw) if raw else None
+            except DdaError as exc:
+                print(f"dda: {exc}", file=sys.stderr)
+                return 1
+        calls = _review.existing_calls(wd, stage) if stage else (
+            _review.existing_calls(wd, "teardown") + _review.existing_calls(wd, "post-result"))
+        if not calls:
+            print("no goldfish calls recorded")
+            return 0
+        for c in sorted(calls, key=lambda c: (str(c.get("stage")), str(c.get("round")), int(c.get("seq") or 0))):
+            print(f"{c.get('stage')} round {c.get('round')} seq {c.get('seq')}: {c.get('verdict')} "
+                  f"(req {c.get('provider_request_id')}, model {c.get('model')}, "
+                  f"packet {str(c.get('packet_hash'))[:12]})")
+        return 0
+    try:
+        info = _review.do_review_run(wd, args.stage, round_=args.round, model=args.model)
+    except DdaError as exc:
+        print(f"dda review run: {exc}", file=sys.stderr)
+        return exc.code
+    print(f"goldfish {info['stage']}: {info['summary']}")
+    return 0
+
+
 def cmd_pending(args) -> int:
     phase = PENDING[args.command]
     print(f"dda {args.command}: not implemented in this build (arrives in build phase {phase}, SPEC §14). "
@@ -593,6 +645,27 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("version")
     s.set_defaults(func=cmd_version)
+
+    s = sub.add_parser("packet", help="assemble the goldfish review packet for a stage")
+    s.add_argument("stage", help="teardown (pre-data) or post-result")
+    s.add_argument("workdir", nargs="?")
+    s.add_argument("--milestone")
+    s.set_defaults(func=cmd_packet)
+
+    s = sub.add_parser("review", help="one-shot goldfish review calls (no tools, no memory)")
+    rs = s.add_subparsers(dest="review_cmd", required=True)
+    r = rs.add_parser("run", help="send one goldfish request for a stage")
+    r.add_argument("stage", help="teardown (pre-data) or post-result")
+    r.add_argument("workdir", nargs="?")
+    r.add_argument("--milestone")
+    r.add_argument("--round", default=None, help="re-run only this round (at most once per round)")
+    r.add_argument("--model", default=None, help="model id (default: config goldfish_models[0] or 'default')")
+    r.set_defaults(func=cmd_review)
+    r = rs.add_parser("list", help="list recorded goldfish calls")
+    r.add_argument("stage", nargs="?", default=None)
+    r.add_argument("workdir", nargs="?")
+    r.add_argument("--milestone")
+    r.set_defaults(func=cmd_review)
 
     for name in PENDING:
         s = sub.add_parser(name, help=f"(build phase {PENDING[name]}; fails closed)")

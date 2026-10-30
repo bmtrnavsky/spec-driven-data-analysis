@@ -4,15 +4,15 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Hermes Plugin](https://img.shields.io/badge/Hermes-Plugin-teal.svg)](https://hermes-agent.nousresearch.com/docs)
-[![Version](https://img.shields.io/badge/version-0.6.0--phase6-orange.svg)](SPEC.md)
+[![Version](https://img.shields.io/badge/version-0.7.0--phase7-orange.svg)](SPEC.md)
 
 Part of the Disciplined series with
 [disciplined-vibe-coding](https://github.com/bmtrnavsky/disciplined-vibe-coding) same house rules: lock the plan before the work, verify before claiming done.
 
 Spec-first data analysis for Hermes: lock the plan before the data, block
 the shortcuts with hooks, re-check every hook rule at a gate. The design is
-in [SPEC.md](SPEC.md). This tree contains build phases 0–6 (SPEC §14).
-Current build: `0.6.0-phase6` (`python scripts/dda.py version`).
+in [SPEC.md](SPEC.md). This tree contains build phases 0–7 (SPEC §14).
+Current build: `0.7.0-phase7` (`python scripts/dda.py version`).
 
 ## Status
 
@@ -25,7 +25,8 @@ Current build: `0.6.0-phase6` (`python scripts/dda.py version`).
 | 4 | `dda doctor` (interpreter, hooks, approver keys, workdir, heartbeat), signed approvals (`dda approve` / `dda approved`, approver chain, config approval at G4), footer approval fields | built |
 | 5 | `dda gitcheck`, full `footercheck` and `report` (5) | built |
 | 6 | `definitions`, `defguard`, and content-hashed pins; gate G1 (6) | built |
-| 7–9 | Goldfish review, `dda packet` / `dda review` (7); `dda verify` / `dda profile` (8); `correct` and `dda evals` (9). Gates G2–G3, G5, G7 also arrive here | not built; commands fail closed (exit 3) |
+| 7 | Goldfish review, `dda packet` / `dda review run`, gate G3 (7) | built |
+| 8–9 | `dda verify` / `dda profile` (8); `correct` and `dda evals` (9). Gates G2, G5, G7 also arrive here | not built; commands fail closed (exit 3) |
 
 The CLI is `dda` (pronounced "dee-dee-ay", short for disciplined data analysis).
 
@@ -48,6 +49,10 @@ python scripts/dda.py variant --locked <id> [workdir]  # mark the reported varia
 python scripts/dda.py variant --list [workdir]
 python scripts/dda.py run --variant <id> [--seed N] [--workdir WD] variants/<id>.py [-- args...]
 python scripts/dda.py footer <workdir> [--check FILE] [--short]
+python scripts/dda.py packet teardown|post-result [workdir]   # assemble the goldfish review packet
+python scripts/dda.py review run teardown|post-result [workdir] [--round N] [--model ID]  # one-shot goldfish call
+python scripts/dda.py review list [stage] [workdir]           # list recorded goldfish calls
+python scripts/dda.py gate G3 <workdir>       # teardown review rounds + human spec approval
 python scripts/dda.py abandon <workdir> --reason "..."
 python scripts/dda.py approve <kind> [artifact] [workdir] [--key K] [-m "..."]  # signed human approval; run in your own terminal
 python scripts/dda.py approved <kind> [artifact] [workdir]  # verify an approval, record the verdict

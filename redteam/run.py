@@ -823,11 +823,185 @@ class Harness:
             pass
         shutil.rmtree(wd / "reports", ignore_errors=True)
 
+    def phase7(self):
+        # Goldfish packet + review run + gate G3 (§5.0, §3 row 3): one-shot
+        # calls with empty tools, every call recorded, tier-scaled rounds,
+        # human spec approval at DECIDE+.
+        import re as _re
+        wd = self.wd
+        spec = wd / ".analysis" / "spec.md"
+        good = spec.read_bytes()
+        (wd / "definitions" / "rtmetric.md").write_text(
+            "---\nname: rtmetric\nversion: 1\n---\nOrders / sessions, daily grain, UTC.\n",
+            encoding="utf-8")
+        from ddalib import lockhash as _lh
+        from ddalib.layout import Workdir as _W
+        pin = _lh.load_definition(_W.at(wd), "rtmetric").pin
+        h = pin.split("#", 1)[1]
+        full = good.decode("utf-8")
+
+        def _fill(text, header, body):
+            new, n = _re.subn("^" + _re.escape(header) + chr(13) + "?$" , header + chr(10) + chr(10) + body,
+                              text, count=1, flags=_re.MULTILINE)
+            assert n == 1, "phase7 fixture missed section %r" % header
+            return new
+
+        valid = full
+        valid = _fill(valid, "## Metrics", "- rtmetric@1#%s\n" % h)
+        valid = _fill(valid, "## Hypotheses", "v2 raises conversion.\n")
+        valid = _fill(valid, "## Thresholds that would change the decision", "a 1pt drop kills v2.\n")
+        valid = _fill(valid, "## Exclusion and outlier rules", "exclude staff orders.\n")
+        spec.write_text(valid, encoding="utf-8", newline="")
+        try:
+            # EXPLORE self path: G3 needs self re-reads for rounds 1 and 3.
+            g = self.dda("gate", "G3", str(wd), check=False)
+            self.record("g3.explore-no-review-fails", "gates",
+                        "G3 fails EXPLORE with no review of any kind",
+                        "prevented" if g.returncode != 0 else "missed", "prevented",
+                        g.stdout.strip()[:150], "tier-scaled rounds recorded (§3 row 3)")
+            selfd = wd / ".analysis" / "reviews" / "self"
+            selfd.mkdir(parents=True, exist_ok=True)
+            (selfd / "teardown-round1.md").write_text("# round 1\n\nChecked cold. No objection.\n", encoding="utf-8")
+            g = self.dda("gate", "G3", str(wd), check=False)
+            self.record("g3.explore-partial-review-fails", "gates",
+                        "G3 fails EXPLORE with round 3 missing",
+                        "prevented" if g.returncode != 0 else "missed", "prevented",
+                        g.stdout.strip()[:150], "every required round recorded (§5.3)")
+            (selfd / "teardown-round3.md").write_text("# round 3\n\nChecked cold. No objection.\n", encoding="utf-8")
+            g = self.dda("gate", "G3", str(wd), check=False)
+            self.record("g3.explore-self-passes", "gates",
+                        "G3 passes EXPLORE with self re-reads for rounds 1 and 3",
+                        "allowed" if g.returncode == 0 else "missed", "allowed",
+                        g.stdout.strip()[:150], "EXPLORE self cold re-read (§5.3)")
+            # Packet: fixed set, no data rows, cap enforced with sizes.
+            r = self.dda("packet", "teardown", str(wd), check=False)
+            mans = sorted((wd / ".analysis" / "packets").glob("*/manifest.json"))
+            ok = r.returncode == 0 and len(mans) == 1
+            blob = ""
+            if ok:
+                for p in (wd / ".analysis" / "packets").rglob("*"):
+                    if p.is_file():
+                        blob += p.read_text(encoding="utf-8", errors="replace")
+                ok = "2,20" not in blob
+            self.record("goldfish.packet-no-data", "review",
+                        "packet assembles the fixed set with no raw rows",
+                        "allowed" if ok else "missed", "allowed",
+                        (r.stdout or r.stderr).strip()[:150],
+                        "fixed file set, never data/derived/raw rows (§5.0)")
+            cfg = wd / ".analysis" / "config.yaml"
+            cfg_txt = cfg.read_text(encoding="utf-8")
+            cfg.write_text(cfg_txt + "\ngoldfish_max_tokens: 10\n", encoding="utf-8")
+            r = self.dda("packet", "teardown", str(wd), check=False)
+            ok = r.returncode != 0 and "spec.md" in (r.stdout + r.stderr) and _re.search(r"\d", r.stdout + r.stderr)
+            self.record("goldfish.packet-cap-fails", "review",
+                        "oversize packet fails with the file list and sizes",
+                        "prevented" if ok else "missed", "prevented",
+                        (r.stdout or r.stderr).strip()[-150:], "size cap, never drop spec/lock (§5.0)")
+            cfg.write_text(cfg_txt, encoding="utf-8")
+            # EXPLORE refuses goldfish calls: self re-reads, not model calls.
+            self.env["DDA_GOLDFISH_STUB"] = "pass"
+            try:
+                r = self.dda("review", "run", "teardown", str(wd), check=False)
+                self.record("goldfish.self-tier-refused", "review",
+                            "goldfish call refused at EXPLORE (self re-read tier)",
+                            "prevented" if r.returncode != 0 else "missed", "prevented",
+                            (r.stdout or r.stderr).strip()[:150], "tier-scaled review kinds (§5.3)")
+                # DECIDE glance: empty-tools one-shot call, fully recorded.
+                decide = valid.replace("This is an EXPLORE analysis.", "This is a DECIDE analysis.")
+                decide = decide.replace("quick-cut", "glance")
+                spec.write_text(decide, encoding="utf-8", newline="")
+                r = self.dda("packet", "teardown", str(wd), check=False)
+                r = self.dda("review", "run", "teardown", str(wd), check=False)
+                recs = sorted((wd / ".analysis" / "reviews" / "goldfish").glob("teardown-*.json"))
+                tools_empty = False
+                brief_ok = False
+                if r.returncode == 0 and recs:
+                    try:
+                        rec = json.loads(recs[0].read_text(encoding="utf-8"))
+                        cfgm = json.loads((wd / ".analysis" / "packets" / rec["packet_hash"] / "manifest.json").read_text(encoding="utf-8"))
+                        tools_empty = (rec.get("request", {}).get("tools") == [] and
+                                       sorted(f["path"] for f in rec["request"].get("user_files", [])) ==
+                                       sorted(f["path"] for f in cfgm["files"]))
+                        import hashlib as _hl
+                        brief_ok = rec.get("brief_hash") == _hl.sha256(
+                            rec["request"]["system"].encode()).hexdigest()
+                    except (ValueError, KeyError, OSError):
+                        pass
+                self.record("goldfish.empty-tools", "review",
+                            "goldfish request carries no tools and only packet files; brief hash matches bytes sent",
+                            "prevented" if (tools_empty and brief_ok) else "missed", "prevented",
+                            (r.stdout or r.stderr).strip()[:150],
+                            "one-shot call: tools empty, no memory/context (§5.0 Call)")
+                # Re-roll is counted: tweak the spec (new hash), fail a full
+                # run, then pass each round once — both calls recorded;
+                # G3 needs the earlier objections answered.
+                decide2 = decide.replace("v2 raises conversion.",
+                                         "v2 raises conversion by shortening checkout.")
+                spec.write_text(decide2, encoding="utf-8", newline="")
+                r = self.dda("packet", "teardown", str(wd), check=False)
+                gdir = wd / ".analysis" / "reviews" / "goldfish"
+                before = set(p.name for p in gdir.glob("teardown-*.json")) if gdir.is_dir() else set()
+                self.env["DDA_GOLDFISH_STUB"] = "fail"
+                r1 = self.dda("review", "run", "teardown", str(wd), check=False)
+                self.env["DDA_GOLDFISH_STUB"] = "pass"
+                r2a = self.dda("review", "run", "teardown", "--round", "1", str(wd), check=False)
+                r2b = self.dda("review", "run", "teardown", "--round", "3", str(wd), check=False)
+                new = sorted(set(p.name for p in gdir.glob("teardown-*.json")) - before)
+                fail_ids = {}
+                for name in new:
+                    try:
+                        rec = json.loads((gdir / name).read_text(encoding="utf-8"))
+                        if rec.get("verdict") == "fail":
+                            fail_ids.setdefault(str(rec.get("round")), rec.get("provider_request_id", ""))
+                    except ValueError:
+                        pass
+                counted = (r.returncode == 0 and r1.returncode != 0 and r2a.returncode == 0
+                           and r2b.returncode == 0 and set(fail_ids) == {"1", "3"})
+                self.record("goldfish.reroll-counted", "review",
+                            "failed call and re-run both recorded; latest must pass",
+                            "detected" if counted else "missed", "detected",
+                            (r2b.stdout or r2b.stderr).strip()[:150],
+                            "every call for the packet/stage counted, no re-roll (§5.0 Recording)")
+                # DECIDE needs the human spec approval.
+                g = self.dda("gate", "G3", str(wd), check=False)
+                self.record("g3.decide-no-approval-fails", "gates",
+                            "G3 fails DECIDE with no human spec approval",
+                            "prevented" if (g.returncode != 0 and "approv" in g.stdout.lower()) else "missed",
+                            "prevented", g.stdout.strip()[:150], "tier+spec approval (§3.2 case 2)")
+                a = self.dda("approve", "spec", "--no-sign", str(wd), check=False)
+                v = self.dda("approved", "spec", str(wd), check=False)
+                g = self.dda("gate", "G3", str(wd), check=False)
+                self.record("g3.decide-unanswered-fails", "gates",
+                            "G3 fails while earlier round-1 objections have no recorded answer",
+                            "prevented" if g.returncode != 0 else "missed", "prevented",
+                            g.stdout.strip()[:150], "earlier objections answered in the review file (§5.0)")
+                if fail_ids.get("1"):
+                    (selfd / "teardown-round1.md").write_text(
+                        "# response round 1\n\nAnswered %s: trimmed the cut as asked.\n" % fail_ids["1"],
+                        encoding="utf-8")
+                if fail_ids.get("3"):
+                    (selfd / "teardown-round3.md").write_text(
+                        "# response round 3\n\nAnswered %s: base rate added to the spec.\n" % fail_ids["3"],
+                        encoding="utf-8")
+                g = self.dda("gate", "G3", str(wd), check=False)
+                ok = (a.returncode == 0 and v.returncode == 0 and g.returncode == 0
+                      and "unverified" in g.stdout.lower())
+                self.record("g3.decide-answered-passes", "gates",
+                            "G3 passes DECIDE with goldfish rounds, answered objections, and disclosed unverified approval",
+                            "allowed" if ok else "missed", "allowed",
+                            g.stdout.strip()[:150],
+                            "verified, or unverified and disclosed (§3.2 case 2)")
+            finally:
+                self.env.pop("DDA_GOLDFISH_STUB", None)
+        finally:
+            spec.write_bytes(good)
+            try:
+                (wd / "definitions" / "rtmetric.md").unlink()
+            except OSError:
+                pass
+
     def pending_phases(self):
-        pend = [
-            ("goldfish.empty-tools", 7),
-            ("goldfish.reroll-counted", 7),
-        ]
+        pend = []
         for cid, phase in pend:
             self.record(cid, "later phase", cid, "pending", "pending phase %d" % phase,
                         "component not built until phase %d; harness slot reserved" % phase,
@@ -1093,6 +1267,7 @@ class Harness:
             self.phase4()
             self.key_borrowing()
             self.phase5_6()
+            self.phase7()
             self.dda("release", str(self.wd))
             ul = Path(self.env["DDA_HOME"]) / "unbound-access.log"
             self.lines_at_release = len(ul.read_text(encoding="utf-8").splitlines()) if ul.is_file() else 0

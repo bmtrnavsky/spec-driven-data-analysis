@@ -221,6 +221,22 @@ def load_config(wd: Workdir) -> dict:
                 errors.append(f"approvers[{i}].name: must be a non-empty handle (letters, digits, _.-)")
             if not any(isinstance(a.get(k), str) and a.get(k).strip() for k in ("fingerprint", "key", "key_id")):
                 errors.append(f"approvers[{i}] ({name!r}): needs at least one of fingerprint, key, key_id")
+    cap = cfg.get("goldfish_max_tokens", 150000)
+    if isinstance(cap, bool) or not isinstance(cap, int) or cap <= 0:
+        errors.append("goldfish_max_tokens must be a positive integer")
+    models = cfg.get("goldfish_models", [])
+    if models is None:
+        models = []
+    if not isinstance(models, list) or not all(isinstance(m, str) and m for m in models):
+        errors.append("goldfish_models must be a list of non-empty model ids")
+    else:
+        cfg["goldfish_models"] = models
+    key_env = cfg.get("goldfish_api_key_env", "DDA_GOLDFISH_API_KEY")
+    if not isinstance(key_env, str) or not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", key_env):
+        errors.append("goldfish_api_key_env must be an env var name")
+    base_url = cfg.get("goldfish_base_url", "https://api.openai.com/v1")
+    if not isinstance(base_url, str) or not re.match(r"^https?://", base_url):
+        errors.append("goldfish_base_url must be an http(s) URL")
     if errors:
         raise DdaError("config.yaml invalid:\n  - " + "\n  - ".join(errors))
     cfg["data_roots"] = roots
