@@ -327,12 +327,14 @@ import re as _re
 GIT_SAFETY_EXTS = frozenset({
     ".csv", ".tsv", ".tab",
     ".parquet", ".pq", ".feather", ".arrow", ".ipc",
+    ".avro", ".orc",
     ".xlsx", ".xls", ".xlsm", ".xlsb", ".ods",
     ".json", ".jsonl", ".ndjson", ".geojson",
     ".db", ".sqlite", ".sqlite3", ".db3", ".duckdb",
     ".pkl", ".pickle", ".pck", ".npy", ".npz",
     ".h5", ".hdf5", ".h5ad",
     ".sav", ".dta", ".sas7bdat", ".xpt", ".rdata", ".rds",
+    ".zip", ".tar", ".tgz", ".7z", ".gz", ".bz2", ".xz", ".zst",
     ".key", ".pem", ".p12", ".pfx", ".jks", ".kdbx", ".env",
 })
 
@@ -343,20 +345,50 @@ _GIT_SAFETY_NAME_RES = tuple(_re.compile(rx) for rx in (
 
 _GIT_SAFETY_SECRET_RES = (
     (_re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----"), "private key material"),
-    (_re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "possible AWS access key"),
-    (_re.compile(r"\b(ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]{16,}\b"), "possible GitHub token"),
-    (_re.compile(r"\bsk-(live|test)-[A-Za-z0-9]{16,}\b"), "possible Stripe secret key"),
-    (_re.compile(r"\bxox[bap]-[A-Za-z0-9-]{10,}\b"), "possible Slack token"),
-    (_re.compile(r"(?i)\b(api[_-]?key|client[_-]?secret|secret|passwd|password)\b\s*[:=]\s*\S+"),
+    (_re.compile(r"(?<![A-Za-z0-9])AKIA[0-9A-Z]{16}(?![A-Za-z0-9])"), "possible AWS access key"),
+    (_re.compile(r"(?<![A-Za-z0-9])(?:ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]{16,}(?![A-Za-z0-9])"),
+     "possible GitHub token"),
+    (_re.compile(r"(?<![A-Za-z0-9])sk-(?:live|test|proj)-[A-Za-z0-9-]{16,}(?![A-Za-z0-9])"),
+     "possible Stripe secret key"),
+    (_re.compile(r"(?<![A-Za-z0-9])xox[bap]-[A-Za-z0-9-]{10,}(?![A-Za-z0-9])"), "possible Slack token"),
+    (_re.compile(r"(?i)(?<![A-Za-z0-9])(?:api[_-]?key|client[_-]?secret|secret|passwd|password)(?![A-Za-z0-9])"
+                 r"(?:\s*(?:[:=]|\bis\b)\s*\S{2,}|\s+\S{4,})"),
      "possible embedded credential"),
 )
 
-_GIT_SAFETY_MAX_CONTENT = 1_000_000
+_GIT_SAFETY_SAMPLE_HEAD = 65_536
+_GIT_SAFETY_SAMPLE_TAIL = 65_536
 
 
-def _git_safety_evidence(wd: Workdir, lock: dict | None) -> tuple[set[str], tuple[str, ...]]:
+def _git_safety_sample(data: bytes) -> bytes:
+    """Head+tail sample so secrets past either edge are still caught."""
+    cap = _GIT_SAFETY_SAMPLE_HEAD + _GIT_SAFETY_SAMPLE_TAIL
+    if len(data) <= cap:
+        return data
+    return data[:_GIT_SAFETY_SAMPLE_HEAD] + b"\n" + data[-_GIT_SAFETY_SAMPLE_TAIL:]
+
+
+def _git_safety_known(wd: Workdir) -> tuple:
+    """Known dda governance files under evidence dirs: exempt from extension
+    and filename checks, but still content-scanned for secrets (SPEC §11:
+    dda's own committed records, not analysis data)."""
+    specs_rel = wd.specs_dir.relative_to(wd.root).as_posix()
+    runs_rel = (wd.analysis / "runs").relative_to(wd.root).as_posix()
+    appr_rel = (wd.analysis / "approvals").relative_to(wd.root).as_posix()
+    return (
+        _re.compile(_re.escape(specs_rel) + r"/v\d+\.md\Z"),
+        _re.compile(_re.escape(runs_rel) + r"/kernels/[^/]+\.json\Z"),
+        _re.compile(_re.escape(runs_rel) + r"/blobs/[0-9a-f]{64}\Z"),
+        _re.compile(_re.escape(appr_rel) + r"/[^/]+\.json\Z"),
+    )
+
+
+def _git_safety_evidence(wd: Workdir, lock: dict | None) -> set[str]:
     """Lock/governance evidence paths exempt from the safety scan (SPEC §11:
-    these are dda's own committed records, not analysis data)."""
+    these are dda's own committed records, not analysis data). Sub-directories
+    that hold evidence (specs/, runs/, approvals/) are NOT blanket-exempt:
+    only known governance filenames under them skip the extension/name
+    checks, and everything there is still content-scanned for secrets."""
     exact: set[str] = set()
 
     def add(p: Path) -> None:
@@ -375,29 +407,73 @@ def _git_safety_evidence(wd: Workdir, lock: dict | None) -> tuple[set[str], tupl
     add(audit_log(wd))
     add(specs_tried(wd))
     add(approvals_index(wd))
+    for chained in workdir_chains(wd):
+        add(chained)
     for pin in (lock.get("pins") if lock else []) or []:
         add(wd.definitions / f"{pin.split('@', 1)[0]}.md")
-    prefixes = tuple(
-        (wd.specs_dir.relative_to(wd.root).as_posix() + "/",
-         blobs_dir(wd).relative_to(wd.root).as_posix() + "/",
-         (wd.analysis / "runs").relative_to(wd.root).as_posix() + "/",
-         (wd.analysis / "approvals").relative_to(wd.root).as_posix() + "/")
-    )
-    return exact, prefixes
+    return exact
+
+
+def _git_safety_stream_git_blob(wd: Workdir, rel: str) -> bytes | None:
+    """Stream a git object with bounded memory, keeping head+tail."""
+    git = shutil.which("git")
+    if not git:
+        return None
+    try:
+        proc = subprocess.Popen([git, "-C", str(wd.root), "show", ":" + rel],
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    except OSError:
+        return None
+    head = b""
+    tail = b""
+    try:
+        assert proc.stdout is not None
+        head = proc.stdout.read(_GIT_SAFETY_SAMPLE_HEAD)
+        buf = bytearray(tail)
+        while True:
+            chunk = proc.stdout.read(65_536)
+            if not chunk:
+                break
+            buf = (bytes(buf) + chunk)[-_GIT_SAFETY_SAMPLE_TAIL:]
+        tail = bytes(buf)
+    except OSError:
+        return None
+    finally:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+        proc.wait()
+    if proc.returncode != 0 or not head:
+        return None
+    if not tail or len(head) < _GIT_SAFETY_SAMPLE_HEAD:
+        return head
+    return head + b"\n" + tail
 
 
 def _git_safety_blob(wd: Workdir, rel: str) -> bytes | None:
-    """Best-effort content for a git-listed path: workdir file, else index blob."""
+    """Best-effort content for a git-listed path: head+tail sample of the
+    workdir file, else the index blob streamed with bounded memory."""
     p = wd.root / rel
     try:
-        if p.is_file() and p.stat().st_size <= _GIT_SAFETY_MAX_CONTENT:
-            return p.read_bytes()
+        if p.is_file():
+            size = p.stat().st_size
+            if size <= _GIT_SAFETY_SAMPLE_HEAD + _GIT_SAFETY_SAMPLE_TAIL:
+                return p.read_bytes()
+            with open(p, "rb") as fh:
+                head = fh.read(_GIT_SAFETY_SAMPLE_HEAD)
+                fh.seek(-_GIT_SAFETY_SAMPLE_TAIL, 2)
+                tail = fh.read(_GIT_SAFETY_SAMPLE_TAIL)
+            return head + b"\n" + tail
     except OSError:
         pass
+    streamed = _git_safety_stream_git_blob(wd, rel)
+    if streamed is not None:
+        return streamed
     try:
         r = _git(wd.root, "show", ":" + rel, check=False)
         if r.returncode == 0:
-            return r.stdout.encode("utf-8", "ignore")[:_GIT_SAFETY_MAX_CONTENT]
+            return _git_safety_sample(r.stdout.encode("utf-8", "ignore"))
     except Exception:
         pass
     return None
@@ -417,7 +493,8 @@ def git_safety_scan(wd: Workdir) -> list[str]:
         lock = lockstate.read_lock(wd)
     except DdaError:
         lock = None
-    exact, prefixes = _git_safety_evidence(wd, lock)
+    exact = _git_safety_evidence(wd, lock)
+    known_res = _git_safety_known(wd)
     tracked = [t for t in _git(wd.root, "ls-files", "-z").stdout.split("\0") if t]
     st = _git(wd.root, "status", "--porcelain=v1", "--untracked-files=all", "-z").stdout
     toks = st.split("\0")
@@ -441,20 +518,22 @@ def git_safety_scan(wd: Workdir) -> list[str]:
         norm = rel.strip()
         if not norm or norm.startswith(".git/") or norm == ".git":
             continue
-        if norm in exact or norm.startswith(prefixes):
+        if norm in exact:
             continue
-        if "/.spill/" in norm or norm.endswith(".spill"):
+        if "/.spill/" in norm:
             continue
+        known = any(rx.match(norm) for rx in known_res)
         low = norm.lower()
         base = low.rsplit("/", 1)[-1]
         reason = ""
-        if base == ".env" or base.startswith(".env."):
-            reason = "secret file"
-        elif any(s in GIT_SAFETY_EXTS for s in Path(low).suffixes):
-            reason = "data/secret format"
-        elif any(rx.search(base) for rx in _GIT_SAFETY_NAME_RES):
-            reason = "suspicious secret-like name"
-        else:
+        if not known:
+            if base == ".env" or base.startswith(".env."):
+                reason = "secret file"
+            elif any(s in GIT_SAFETY_EXTS for s in Path(low).suffixes):
+                reason = "data/secret format"
+            elif any(rx.search(base) for rx in _GIT_SAFETY_NAME_RES):
+                reason = "suspicious secret-like name"
+        if not reason:
             blob = _git_safety_blob(wd, norm)
             if blob and b"\0" not in blob[:8192]:
                 try:

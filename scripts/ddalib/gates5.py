@@ -8,14 +8,27 @@ from . import lockhash, lockstate
 
 
 def _sentence_fragments(question: str) -> list[str]:
-    """Split on sentence boundaries: . ! ? ; and line breaks.
+    """Split on sentence boundaries: . ! ? ; : / — – … ？ ！ ； and line breaks.
 
-    A terminator only splits when followed by whitespace/end-of-string, so
-    decimals and version numbers (``v2.5``) do not count as new sentences.
+    A terminator splits when followed by whitespace/end-of-string, or
+    immediately by a capital letter, digit, or opening quote/paren
+    (``Did it rise?Ship it`` is two sentences). Decimal points, clock
+    times, and letter/letter slashes (``v2.5``, ``12:30``, ``A/B``) are
+    masked first so they do not count as new sentences.
     """
     flat = " ".join(question.split())
-    parts = re.split(r"[.!?;]+(?:\s+|$)", flat)
-    return [p for p in parts if p.strip()]
+    masked = re.sub(r"(?<=\d)[.:/](?=\d)", "\x00", flat)
+    masked = re.sub(r"(?<=[A-Za-z0-9])/(?=[A-Za-z0-9])", "\x01", masked)
+    parts = re.split(
+        r"[.!?;:/—–…？！；]+(?:\s+|$)|(?<=[.!?;:/—–…？！；])(?=[A-Z0-9\"'(\[])",
+        masked,
+    )
+    out = []
+    for p in parts:
+        p = p.replace("\x00", ".").replace("\x01", "/")
+        if p.strip():
+            out.append(p)
+    return out
 
 
 def gate_g0(wd: Workdir) -> tuple[bool, str, dict]:
@@ -51,10 +64,24 @@ def gate_g8(wd: Workdir, report: str | None = None) -> tuple[bool, str, dict]:
         if not target.is_file():
             return False, "G8 fail: --report %s does not exist" % report, {}
         targets = [target]
+        repdir = wd.root / "reports"
+        others = 0
+        if repdir.is_dir():
+            try:
+                tres = target.resolve()
+            except OSError:
+                tres = target
+            others = sum(1 for q in repdir.glob("*.md") if q.resolve() != tres)
+        scope_note = " (scope: --report %s%s)" % (
+            report, "; %d other report(s) not checked" % others if others else "")
     else:
+        scope_note = ""
         targets = []
         answer = wd.analysis / "answer.md"
-        if answer.is_file() and _footer.extract(read_text_lf(answer)) is not None:
+        if answer.is_file():
+            if _footer.extract(read_text_lf(answer)) is None:
+                return False, ("G8 fail: .analysis/answer.md present without a verifiable "
+                                "provenance footer (run `dda report` to stamp it)"), {}
             targets.append(answer)
         repdir = wd.root / "reports"
         if repdir.exists():
@@ -71,7 +98,7 @@ def gate_g8(wd: Workdir, report: str | None = None) -> tuple[bool, str, dict]:
         if len(bad) >= 6:
             break
     if bad:
-        return False, "G8 fail: footer does not verify: " + "; ".join(bad[:6]), {}
+        return False, "G8 fail: footer does not verify: " + "; ".join(bad[:6]) + scope_note, {}
     tier = (lock.get("tier") or "EXPLORE").upper()
     if tier == "PUBLISH":
         from . import approvals as _approvals
@@ -79,7 +106,7 @@ def gate_g8(wd: Workdir, report: str | None = None) -> tuple[bool, str, dict]:
         if st != "verified":
             return False, "G8 fail: PUBLISH needs a verified human sign-off for this report", {}
     names = ", ".join(t.name for t in targets)
-    return True, "G8 pass: report(s) %s footer verifies" % names, {}
+    return True, "G8 pass: report(s) %s footer verifies%s" % (names, scope_note), {}
 
 
 def gate_g9(wd: Workdir) -> tuple[bool, str, dict]:

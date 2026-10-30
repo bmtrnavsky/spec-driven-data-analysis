@@ -263,6 +263,19 @@ def cmd_report(args) -> int:
     problems = footer.check(wd, text)
     if problems:
         raise DdaError("report: footer does not verify: " + "; ".join(problems[:5]))
+    # Stamp the glance (short) footer back into answer.md so the G8 default
+    # scope — which requires a verifiable footer on answer.md whenever it
+    # exists — keeps passing the documented lock → answer → report workflow.
+    try:
+        stamped = read_text_lf(body)
+    except DdaError:
+        stamped = ""
+    if stamped and footer.extract(stamped) is None:
+        short_sk = footer.skeleton(wd, short=True)
+        if short_sk:
+            candidate = stamped.rstrip() + "\n\n" + short_sk
+            if not footer.check(wd, candidate, short=True):
+                body.write_text(candidate, encoding="utf-8")
     out = repdir / (slug + ".md")
     out.write_text(text, encoding="utf-8")
     print(f"report: wrote {out}")
