@@ -6,23 +6,40 @@ import re
 from .layout import Workdir, read_text_lf
 from . import lockhash, lockstate
 
+# Invisible characters stripped before G0 sentence segmentation so they
+# cannot hide a boundary (e.g. "?<U+200B>Should" or "?<U+2060>should").
+_INVISIBLE_RE = re.compile(
+    "[\u00ad\u034f\u180e\u200b\u200c\u200d\u200e\u200f"
+    "\u2060\u2061\u2062\u2063\u2064\u2066\u2067\u2068\u2069\u206a\u206b\u206c\u206d\u206e\u206f"
+    "\ufeff]"
+)
+
+# Abbreviations whose period must not split a sentence (case-insensitive;
+# \b keeps "1st."-style numerics and mid-word matches unmasked).
+_ABBREV_RE = re.compile(
+    r"\b(?:Mr|Mrs|Ms|Dr|Prof|Rev|Gen|Col|Maj|Sgt|Lt|Capt|St|Jr|Sr|vs|etc)\."
+    r"|\b[eE]\.[gG]\.|\b[iI]\.[eE]\.",
+    re.IGNORECASE,
+)
+
 
 def _sentence_fragments(question: str) -> list[str]:
-    """Split on sentence boundaries: . ! ? ; : / — – … ？ ！ ； and line breaks.
+    """Split on sentence boundaries: . ! ? ; : / — – … ？ ！ ； 。 and line breaks.
 
-    A terminator splits when followed by whitespace/end-of-string, or
-    immediately by a capital letter, digit, or opening quote/paren
-    (``Did it rise?Ship it`` is two sentences). Decimal points, clock
-    times, and letter/letter slashes (``v2.5``, ``12:30``, ``A/B``) are
-    masked first so they do not count as new sentences.
+    Every terminator run splits, even with no following space and even
+    before a lowercase letter (``Rise?Ship it``, ``Rise?ship it`` are two
+    sentences). Decimal points, clock times, and letter/letter slashes
+    (``v2.5``, ``12:30``, ``A/B``) are masked first so they do not count
+    as new sentences, as are common abbreviations (``Mr.``, ``Mrs.``,
+    ``Dr.``, ``e.g.``, ...). Zero-width and other invisible characters
+    are stripped first so they cannot hide a boundary.
     """
     flat = " ".join(question.split())
+    flat = _INVISIBLE_RE.sub("", flat)
+    flat = _ABBREV_RE.sub(lambda m: m.group(0).replace(".", "\x00"), flat)
     masked = re.sub(r"(?<=\d)[.:/](?=\d)", "\x00", flat)
     masked = re.sub(r"(?<=[A-Za-z0-9])/(?=[A-Za-z0-9])", "\x01", masked)
-    parts = re.split(
-        r"[.!?;:/—–…？！；]+(?:\s+|$)|(?<=[.!?;:/—–…？！；])(?=[A-Z0-9\"'(\[])",
-        masked,
-    )
+    parts = re.split(r"[.!?;:/—–…？！；。]+", masked)
     out = []
     for p in parts:
         p = p.replace("\x00", ".").replace("\x01", "/")
@@ -60,7 +77,14 @@ def gate_g8(wd: Workdir, report: str | None = None) -> tuple[bool, str, dict]:
         return False, "G8 fail: lock not valid (%s: %s)" % (state, detail), {}
     if report is not None:
         p = _Path(report)
-        target = p if p.is_absolute() else wd.root / p
+        if p.is_absolute() or ".." in p.parts:
+            return False, "G8 fail: --report must be a workdir-relative path without '..'", {}
+        target = wd.root / p
+        try:
+            resolved_root = wd.root.resolve()
+            target.resolve().relative_to(resolved_root)
+        except (OSError, ValueError):
+            return False, "G8 fail: --report escapes the workdir", {}
         if not target.is_file():
             return False, "G8 fail: --report %s does not exist" % report, {}
         targets = [target]

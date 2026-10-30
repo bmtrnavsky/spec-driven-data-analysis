@@ -346,26 +346,46 @@ _GIT_SAFETY_NAME_RES = tuple(_re.compile(rx) for rx in (
 _GIT_SAFETY_SECRET_RES = (
     (_re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----"), "private key material"),
     (_re.compile(r"(?<![A-Za-z0-9])AKIA[0-9A-Z]{16}(?![A-Za-z0-9])"), "possible AWS access key"),
+    (_re.compile(r"(?<![A-Za-z0-9])ASIA[0-9A-Z]{16}(?![A-Za-z0-9])"), "possible AWS temporary key"),
     (_re.compile(r"(?<![A-Za-z0-9])(?:ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]{16,}(?![A-Za-z0-9])"),
      "possible GitHub token"),
+    (_re.compile(r"(?<![A-Za-z0-9])sk-ant-[A-Za-z0-9\-_]{16,}(?![A-Za-z0-9])"),
+     "possible Anthropic API key"),
     (_re.compile(r"(?<![A-Za-z0-9])sk-(?:live|test|proj)-[A-Za-z0-9-]{16,}(?![A-Za-z0-9])"),
      "possible Stripe secret key"),
+    (_re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9]{20,}(?![A-Za-z0-9])"),
+     "possible OpenAI API key"),
+    (_re.compile(r"(?<![A-Za-z0-9])AIza[0-9A-Za-z\-_]{35}(?![A-Za-z0-9])"), "possible GCP API key"),
+    (_re.compile(r"(?<![A-Za-z0-9])ya29\.[0-9A-Za-z\-_]{20,}(?![A-Za-z0-9])"),
+     "possible GCP OAuth token"),
     (_re.compile(r"(?<![A-Za-z0-9])xox[bap]-[A-Za-z0-9-]{10,}(?![A-Za-z0-9])"), "possible Slack token"),
-    (_re.compile(r"(?i)(?<![A-Za-z0-9])(?:api[_-]?key|client[_-]?secret|secret|passwd|password)(?![A-Za-z0-9])"
-                 r"(?:\s*(?:[:=]|\bis\b)\s*\S{2,}|\s+\S{4,})"),
+    (_re.compile(r"(?<![A-Za-z0-9])bearer\s+[A-Za-z0-9\-._~+/=]{20,}(?![A-Za-z0-9])", _re.IGNORECASE),
+     "possible bearer token"),
+    (_re.compile(r"(?<![A-Za-z0-9])(?:api[_-]?key|client[_-]?secret|secret|passwd|password)(?![A-Za-z0-9])"
+                 r"(?:[\"']?\s*[:=]\s*[\"']?\S{2,}|[\"']?\s+\bis\b\s+[\"']?\S{2,}|[\"']?\s+[\"']?\S{4,})",
+                 _re.IGNORECASE),
      "possible embedded credential"),
 )
 
 _GIT_SAFETY_SAMPLE_HEAD = 65_536
+_GIT_SAFETY_SAMPLE_MID = 65_536
 _GIT_SAFETY_SAMPLE_TAIL = 65_536
+# Blobs larger than this are sampled in windows rather than read whole
+# (streamed straight from the git object store).
+_GIT_SAFETY_STREAM_CAP = 8 * 1024 * 1024
 
 
 def _git_safety_sample(data: bytes) -> bytes:
-    """Head+tail sample so secrets past either edge are still caught."""
-    cap = _GIT_SAFETY_SAMPLE_HEAD + _GIT_SAFETY_SAMPLE_TAIL
-    if len(data) <= cap:
+    """Bound a blob for regex scanning: small blobs scan whole; large blobs
+    keep head+middle+tail windows so a secret anywhere can still be caught."""
+    cap = _GIT_SAFETY_SAMPLE_HEAD + _GIT_SAFETY_SAMPLE_MID + _GIT_SAFETY_SAMPLE_TAIL
+    if len(data) <= max(cap, _GIT_SAFETY_STREAM_CAP):
         return data
-    return data[:_GIT_SAFETY_SAMPLE_HEAD] + b"\n" + data[-_GIT_SAFETY_SAMPLE_TAIL:]
+    mid = len(data) // 2
+    half = _GIT_SAFETY_SAMPLE_MID // 2
+    return (data[:_GIT_SAFETY_SAMPLE_HEAD] + b"\n"
+            + data[mid - half:mid + half] + b"\n"
+            + data[-_GIT_SAFETY_SAMPLE_TAIL:])
 
 
 def _git_safety_known(wd: Workdir) -> tuple:
@@ -415,7 +435,7 @@ def _git_safety_evidence(wd: Workdir, lock: dict | None) -> set[str]:
 
 
 def _git_safety_stream_git_blob(wd: Workdir, rel: str) -> bytes | None:
-    """Stream a git object with bounded memory, keeping head+tail."""
+    """Stream a git object with bounded memory, keeping head+middle+tail."""
     git = shutil.which("git")
     if not git:
         return None
@@ -424,18 +444,19 @@ def _git_safety_stream_git_blob(wd: Workdir, rel: str) -> bytes | None:
                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     except OSError:
         return None
-    head = b""
-    tail = b""
+    chunks: list[bytes] = []
+    total = 0
     try:
         assert proc.stdout is not None
-        head = proc.stdout.read(_GIT_SAFETY_SAMPLE_HEAD)
-        buf = bytearray(tail)
         while True:
             chunk = proc.stdout.read(65_536)
             if not chunk:
                 break
-            buf = (bytes(buf) + chunk)[-_GIT_SAFETY_SAMPLE_TAIL:]
-        tail = bytes(buf)
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > _GIT_SAFETY_STREAM_CAP:
+                break
+        data = b"".join(chunks)
     except OSError:
         return None
     finally:
@@ -444,27 +465,28 @@ def _git_safety_stream_git_blob(wd: Workdir, rel: str) -> bytes | None:
         except OSError:
             pass
         proc.wait()
-    if proc.returncode != 0 or not head:
+    if proc.returncode != 0 or not data:
         return None
-    if not tail or len(head) < _GIT_SAFETY_SAMPLE_HEAD:
-        return head
-    return head + b"\n" + tail
+    return _git_safety_sample(data)
 
 
 def _git_safety_blob(wd: Workdir, rel: str) -> bytes | None:
-    """Best-effort content for a git-listed path: head+tail sample of the
-    workdir file, else the index blob streamed with bounded memory."""
+    """Best-effort content for a git-listed path: the whole workdir file up
+    to a cap (else head+middle+tail windows), else the index blob streamed
+    with bounded memory."""
     p = wd.root / rel
     try:
         if p.is_file():
             size = p.stat().st_size
-            if size <= _GIT_SAFETY_SAMPLE_HEAD + _GIT_SAFETY_SAMPLE_TAIL:
+            if size <= _GIT_SAFETY_STREAM_CAP:
                 return p.read_bytes()
             with open(p, "rb") as fh:
                 head = fh.read(_GIT_SAFETY_SAMPLE_HEAD)
+                fh.seek(size // 2 - _GIT_SAFETY_SAMPLE_MID // 2)
+                middle = fh.read(_GIT_SAFETY_SAMPLE_MID)
                 fh.seek(-_GIT_SAFETY_SAMPLE_TAIL, 2)
                 tail = fh.read(_GIT_SAFETY_SAMPLE_TAIL)
-            return head + b"\n" + tail
+            return head + b"\n" + middle + b"\n" + tail
     except OSError:
         pass
     streamed = _git_safety_stream_git_blob(wd, rel)
@@ -483,8 +505,10 @@ def git_safety_scan(wd: Workdir) -> list[str]:
     """Paths that must not go to git: data formats, key material, secret names.
 
     Scans everything git sees (tracked files = committed + staged, plus
-    untracked-but-not-ignored files from `git status`), minus dda's own
-    lock/governance evidence. Content-scans textish files for key material so
+    untracked-but-not-ignored files from `git status`), including inside
+    `.spill` directories. Dda's own lock/governance evidence skips the
+    extension/name checks but is still content-scanned for key material.
+    Content-scans textish files for key material so
     secrets in `.txt` or extensionless files are caught too.
     """
     wd.require_initialized()
@@ -518,15 +542,17 @@ def git_safety_scan(wd: Workdir) -> list[str]:
         norm = rel.strip()
         if not norm or norm.startswith(".git/") or norm == ".git":
             continue
-        if norm in exact:
-            continue
-        if "/.spill/" in norm:
-            continue
+        in_exact = norm in exact
+        if in_exact:
+            # Exact governance paths skip the extension/name checks, but
+            # are still content-scanned for secrets (a bypass must not be
+            # able to hide key material behind an exempt filename).
+            pass
         known = any(rx.match(norm) for rx in known_res)
         low = norm.lower()
         base = low.rsplit("/", 1)[-1]
         reason = ""
-        if not known:
+        if not known and not in_exact:
             if base == ".env" or base.startswith(".env."):
                 reason = "secret file"
             elif any(s in GIT_SAFETY_EXTS for s in Path(low).suffixes):
