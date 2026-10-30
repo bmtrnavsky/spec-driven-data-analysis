@@ -21,11 +21,33 @@ REQUIRED_SECTIONS = (
 )
 
 # Inline formulas have no place in Metrics: pins only. An `=`, a `/`
-# division, or a statistical-function call outside a pin means the spec
-# computes instead of citing (SPEC §7: "Specs cite pins only; inline formulas
-# in a spec fail G1").
-_FORMULA_RE = re.compile(r"=|/|\b(?:sum|mean|avg|average|median|count|ratio|rate|cohort)\s*\(")
-_BULLET_RE = re.compile(r"^\s*[-*]\s+")
+# division, an operator (`*`, `+`, `-`, `^`), or a function call outside a
+# pin means the spec computes instead of citing (SPEC §7: "Specs cite pins
+# only; inline formulas in a spec fail G1").
+#
+# Notes on the operator arms, so future bypasses stay closed without
+# false-positive whack-a-mole:
+# - `*`/`+`/`^` must sit between operands (word chars, brackets, parens);
+#   markdown emphasis or bullets alone do not match.
+# - `-` needs whitespace on at least one side: `revenue - refunds` is a
+#   formula, `well-known` is a word. `a-b` is indistinguishable from a
+#   hyphenated word and stays a documented residual.
+# - function calls are generic (`name(` with no space): the old
+#   enumerated list let `stdev(`/`max(` through, and case let `MEAN(`
+#   through. A space before the paren (`abc (note)`) is prose, not a call.
+_FORMULA_RE = re.compile(
+    r"=|/"
+    r"|(?<=[\w)\]])\s*[*+^]\s*(?=[\w(\[])"
+    r"|(?<=\w)\s+-\s*(?=\w)|(?<=\w)\s*-\s+(?=\w)"
+    r"|\b[a-z_][a-z0-9_]*\("
+    r"|\b(?:sum|mean|avg|average|median|count|ratio|rate|cohort)\s*\(",
+    re.IGNORECASE,
+)
+# Leading line markers stripped before the formula check: bullets (`-`,
+# `*`, `+`, `>`), ordered numbers (`1.`, `2)`), outline brackets. Every
+# non-empty Metrics line must name a pin whatever its marker, so markers
+# carry no meaning here beyond whitespace.
+_MARKER_RE = re.compile(r"^(?:\s*(?:[-*+>•]|\d+[.)]|\[[ xX]\])\s*)+")
 
 
 def gate_g1(wd: Workdir) -> tuple[bool, str, dict]:
@@ -57,14 +79,13 @@ def gate_g1(wd: Workdir) -> tuple[bool, str, dict]:
         stripped = line.strip()
         if not stripped:
             continue
-        rest = lockhash.PIN_RE.sub("", stripped)
-        if _BULLET_RE.match(stripped):
-            if not lockhash.PIN_RE.search(stripped):
-                problems.append(f"G1 fail: metric bullet names no pin: {stripped[:60]}")
-            elif _FORMULA_RE.search(rest):
+        if not lockhash.PIN_RE.search(stripped):
+            problems.append(f"G1 fail: metric line names no pin: {stripped[:60]}")
+        else:
+            rest = lockhash.PIN_RE.sub("", stripped)
+            body = _MARKER_RE.sub("", rest)
+            if _FORMULA_RE.search(body):
                 problems.append(f"G1 fail: inline formula in Metrics: {stripped[:60]}")
-        elif _FORMULA_RE.search(rest):
-            problems.append(f"G1 fail: inline formula in Metrics: {stripped[:60]}")
         if len(problems) >= 6:
             break
     if problems:
