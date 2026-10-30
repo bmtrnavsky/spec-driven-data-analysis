@@ -1062,7 +1062,14 @@ Two separate checks that are never conflated:
 - The plugin ships a `.gitignore` template. `dda gitcheck` runs at G9 and
   before every `dda lock` commit. It fails if any staged file is under a
   data root, `derived/`, or `outputs/`; contains values under a declared
-  PII column name; or matches a secret pattern.
+  PII column name; or matches a secret pattern. Gitignored files are
+  scanned too (name + secret-content checks — a spill cannot hide behind
+  an ignore entry; force-adding lands it back under the full scan), and
+  dda's own governance JSONs (`reviews/goldfish/`, packet manifests) skip
+  the format/name checks so committing reviews keeps G9 satisfiable —
+  while still being content-scanned for key material.
+- A selective `dda gate G8 --report <file>` fails while other reports go
+  unchecked: a passing verdict must never bless a scope it did not check.
 - Reports carry aggregates only. Row-level excerpts need PUBLISH sign-off
   and PII masking.
 

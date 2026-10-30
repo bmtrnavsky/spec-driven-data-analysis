@@ -130,8 +130,14 @@ def gate_g8(wd: Workdir, report: str | None = None) -> tuple[bool, str, dict]:
             except OSError:
                 tres = target
             others = sum(1 for q in repdir.rglob("*.md") if q.resolve() != tres)
-        scope_note = " (scope: --report %s%s)" % (
-            report, "; %d other report(s) not checked" % others if others else "")
+        if others:
+            # A selective pass that leaves other reports unchecked is a
+            # bypass, not a gate: a footerless sibling would go unverified
+            # while the verdict says pass. Fail and name the scope.
+            return False, (f"G8 fail: --report {report} checks one report while "
+                           f"{others} other report(s) go unchecked "
+                           f"(run default-scope `dda gate G8` to check all)"), {}
+        scope_note = " (scope: --report %s)" % report
     else:
         scope_note = ""
         targets = []

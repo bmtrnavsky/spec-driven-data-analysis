@@ -212,7 +212,9 @@ class TestG8Workflow(HolesSetup):
         self.assertEqual(rc, 0, out)
         (self.wd.root / "reports" / "bad.md").write_text("# Bad\n\nNo footer.\n", encoding="utf-8")
         rc, out = self.cli("gate", "G8", "--report", "reports/good.md")
-        self.assertEqual(rc, 0, f"G8 --report failed on the good report: {out}")
+        self.assertNotEqual(rc, 0, f"G8 --report exited 0 with an unchecked report present: {out}")
+        self.assertIn("scope", out.lower(), f"partial scope not recorded in verdict: {out}")
+        self.assertIn("good.md", out, f"--report target not recorded in verdict: {out}")
 
 
 class TestG9CommittedData(HolesSetup):

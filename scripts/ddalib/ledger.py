@@ -362,16 +362,30 @@ _GIT_SAFETY_SECRET_RES = (
     (_re.compile(r"(?<![A-Za-z0-9])xox[bap]-[A-Za-z0-9-]{10,}(?![A-Za-z0-9])"), "possible Slack token"),
     (_re.compile(r"(?<![A-Za-z0-9])bearer\s+[A-Za-z0-9\-._~+/=]{20,}(?![A-Za-z0-9])", _re.IGNORECASE),
      "possible bearer token"),
-    (_re.compile(r"(?<![A-Za-z0-9])(?:api[_-]?key|client[_-]?secret|secret|passwd|password)(?![A-Za-z0-9])"
-                 r"(?:[\"']?\s*[:=]\s*[\"']?\S{2,}|[\"']?\s+\bis\b\s+[\"']?\S{2,}|[\"']?\s+[\"']?\S{4,})",
+    (_re.compile(r"(?<![A-Za-z0-9])(?:api[ _-]?key|client[ _-]?secret|secret|passwd|password|token|auth|credential)(?![A-Za-z0-9])"
+                 r"(?:[\"']?\s*[:=]\s*[\"']?\S+|[\"']?\s+\bis\b\s+[\"']?\S+|[\"']?\s+[\"']?\S+)",
                  _re.IGNORECASE),
      "possible embedded credential"),
     # Keyword glued to word chars (camelCase/shorthand: secretKey, password2,
     # clientsecret) hides behind the boundary above but is still a credential
-    # assignment when a separator follows — require [: =] so prose like
-    # "tokens expire soon" does not match.
+    # assignment when a separator follows. The `:` arm needs quote parity
+    # (`"k": "v"` or `k: v`, never `"k": 450`): dda's own JSON envelopes
+    # record counters like `"tokens_in": 450`, which are not credentials,
+    # while YAML `password: hunter2` and JS `secretKey = "v"` still match.
     (_re.compile(r"(?<![A-Za-z0-9_])(?:api[_-]?key|client[_-]?secret|secret|passwd|password|token|auth)[A-Za-z0-9_]+"
-                 r"[\"']?\s*[:=]\s*[\"']?\S{2,}",
+                 r"[\"']?(?:\s*=\s*[\"']?|[\"']\s*:\s*[\"']|(?<![\"'])\s*:\s*[\"']?)\S+",
+                 _re.IGNORECASE),
+     "possible embedded credential"),
+    # Glued key names with NO [: =/is] between name and value
+    # (`secretKey <value>`, `myToken <value>`). The value must look like a
+    # token (8+ secret-alphabet chars) so prose like "tokens expire soon"
+    # does not match; the [: =/is] forms above already catch short values.
+    (_re.compile(r"(?<![A-Za-z0-9_])(?:api[_-]?key|client[_-]?secret|secret|passwd|password|token|auth)[A-Za-z0-9_]+"
+                 r"\s+[\"']?[A-Za-z0-9\-_+/=]{8,}[\"']?",
+                 _re.IGNORECASE),
+     "possible embedded credential"),
+    (_re.compile(r"(?<![A-Za-z0-9_])[A-Za-z][A-Za-z0-9_]*(?:api[_-]?key|client[_-]?secret|secret|passwd|password|token|auth)s?[A-Za-z0-9_]*"
+                 r"\s+[\"']?[A-Za-z0-9\-_+/=]{8,}[\"']?",
                  _re.IGNORECASE),
      "possible embedded credential"),
     (_re.compile(r"(?<![A-Za-z0-9_/+])eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?![A-Za-z0-9_-])"),
@@ -402,15 +416,24 @@ def _git_safety_sample(data: bytes) -> bytes:
 def _git_safety_known(wd: Workdir) -> tuple:
     """Known dda governance files under evidence dirs: exempt from extension
     and filename checks, but still content-scanned for secrets (SPEC §11:
-    dda's own committed records, not analysis data)."""
+    dda's own committed records, not analysis data). This includes the
+    review/packet JSONs: committing goldfish calls and packet manifests is
+    the documented flow, so without this exemption G9 could never pass
+    once reviews exist."""
     specs_rel = wd.specs_dir.relative_to(wd.root).as_posix()
     runs_rel = (wd.analysis / "runs").relative_to(wd.root).as_posix()
     appr_rel = (wd.analysis / "approvals").relative_to(wd.root).as_posix()
+    rev_rel = (wd.analysis / "reviews").relative_to(wd.root).as_posix()
+    pack_rel = (wd.analysis / "packets").relative_to(wd.root).as_posix()
     return (
         _re.compile(_re.escape(specs_rel) + r"/v\d+\.md\Z"),
         _re.compile(_re.escape(runs_rel) + r"/kernels/[^/]+\.json\Z"),
         _re.compile(_re.escape(runs_rel) + r"/blobs/[0-9a-f]{64}\Z"),
         _re.compile(_re.escape(appr_rel) + r"/[^/]+\.json\Z"),
+        _re.compile(_re.escape(rev_rel) + r"/goldfish/[^/]+\.json\Z"),
+        _re.compile(_re.escape(rev_rel) + r"/goldfish/[^/]+\.md\Z"),
+        _re.compile(_re.escape(pack_rel) + r"/[^/]+/manifest\.json\Z"),
+        _re.compile(_re.escape(pack_rel) + r"/[^/]+/.+\Z"),
     )
 
 
@@ -512,15 +535,123 @@ def _git_safety_blob(wd: Workdir, rel: str) -> bytes | None:
     return None
 
 
+_TABULAR_NUM_RE = _re.compile(r"^-?\d[\d.,%]*$")
+
+
+def _looks_like_tabular(text: str) -> bool:
+    """Delimited-rows sniff for extensionless files: several non-empty lines
+    share one delimiter with identical field counts and a third of the cells
+    look numeric — or the file is a run of single numeric tokens. Plain prose
+    (ragged delimiters, no numbers) does not match."""
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    if len(lines) < 4:
+        return False
+    for delim in (",", "\t", "|", ";"):
+        counts = [ln.count(delim) for ln in lines]
+        if counts[0] >= 1 and len(set(counts)) == 1:
+            cells = [c.strip() for ln in lines for c in ln.split(delim)]
+            cells = [c for c in cells if c]
+            if cells and sum(1 for c in cells if _TABULAR_NUM_RE.match(c)) / len(cells) >= 1 / 3:
+                return True
+    if len(lines) >= 5:
+        toks = [ln.strip() for ln in lines]
+        if sum(1 for t in toks if _TABULAR_NUM_RE.match(t)) / len(toks) >= 0.8:
+            return True
+    return False
+
+
+def _classify_git_path(clean: str, base: str, blob: bytes | None, *,
+                       ignored: bool, in_exact: bool, known: bool) -> str | None:
+    """Reason a path must not go to git, or None. `clean` is the NFKC'd,
+    lowercased, trailing-dot/space-stripped rel; `base` its final component.
+
+    Classification (SPEC §11):
+    - exact/known governance paths skip extension/name checks but are always
+      content-scanned for secrets.
+    - gitignored paths cannot reach git, so extension/format checks are
+      meaningless there (force-adding lands them back in the status set,
+      where the full scan applies) — but secrets anywhere in the workdir
+      are a spill risk, so ignored files still get the name and
+      content-secret checks. Files under dda-managed build-output dirs
+      (`derived/`, `outputs/`) are skipped: they are gitignored binary
+      aggregates by construction.
+    """
+    if base in ("derived", "outputs") or clean.startswith(("derived/", "outputs/")):
+        if ignored:
+            return None
+    if not known and not in_exact:
+        if not ignored:
+            if base == ".env" or base.startswith(".env."):
+                return "secret file"
+            if any(s in GIT_SAFETY_EXTS for s in Path(clean).suffixes):
+                return "data/secret format"
+            if not Path(clean).suffix and blob is not None and b"\0" not in blob:
+                try:
+                    text = blob.decode("utf-8", "ignore")
+                except Exception:
+                    text = ""
+                if _looks_like_tabular(text):
+                    return "possible data file without an extension (delimited rows)"
+        if any(rx.search(base) for rx in _GIT_SAFETY_NAME_RES):
+            return "suspicious secret-like name"
+    if blob:
+        if b"\0" in blob:
+            # NUL bytes mean binary: a data/key file hiding behind a
+            # missing or text-looking extension. Exempt governance
+            # files are dda-written text and never trip this, and
+            # gitignored paths skip it (aggregates live there).
+            if not known and not in_exact and not ignored:
+                return "binary content (possible data file without a text extension)"
+        else:
+            try:
+                sample = blob.decode("utf-8", "ignore")
+            except Exception:
+                sample = ""
+            for rx, label in _GIT_SAFETY_SECRET_RES:
+                if rx.search(sample):
+                    return label
+    return None
+
+
+def _scan_reason(wd: Workdir | None, rel: str, blob: bytes | None, *,
+                 ignored: bool = False) -> str | None:
+    """Classify one workdir-relative path (unit-testable entry point used by
+    `git_safety_scan`). `rel` may be a bare filename in tests."""
+    norm = rel.strip()
+    # NFKC before the suffix/name checks: Unicode homoglyphs (fullwidth
+    # stops, letter-like punctuation) fold to their ASCII counterparts,
+    # so "backup．csv" (U+FF0E) cannot dodge the format list.
+    low = unicodedata.normalize("NFKC", norm).lower()
+    # Windows strips trailing dots/spaces from names, so `orders.csv.`
+    # and `secret. ` are `orders.csv` and `secret` on disk: strip them
+    # before the checks or the scan sees a different file than the OS does.
+    clean = low.rstrip(". ") or low
+    base = clean.rsplit("/", 1)[-1]
+    exact: set[str] = set()
+    known_res: tuple = ()
+    if wd is not None:
+        try:
+            lock = lockstate.read_lock(wd)
+        except DdaError:
+            lock = None
+        exact = _git_safety_evidence(wd, lock)
+        known_res = _git_safety_known(wd)
+    in_exact = clean in exact
+    known = any(rx.match(clean) for rx in known_res)
+    return _classify_git_path(clean, base, blob, ignored=ignored,
+                              in_exact=in_exact, known=known)
+
+
 def git_safety_scan(wd: Workdir) -> list[str]:
     """Paths that must not go to git: data formats, key material, secret names.
 
     Scans everything git sees (tracked files = committed + staged, plus
-    untracked-but-not-ignored files from `git status`), including inside
-    `.spill` directories. Dda's own lock/governance evidence skips the
-    extension/name checks but is still content-scanned for key material.
-    Content-scans textish files for key material so
-    secrets in `.txt` or extensionless files are caught too.
+    untracked-but-not-ignored files from `git status`), plus gitignored
+    files (which cannot reach git but can hide spills — `.analysis/*.spill/`
+    is ignored by the template yet must still be scanned). Dda's own
+    lock/governance evidence skips the extension/name checks but is still
+    content-scanned for key material. Content-scans textish files for key
+    material so secrets in `.txt` or extensionless files are caught too.
     """
     wd.require_initialized()
     lock = None
@@ -548,49 +679,28 @@ def git_safety_scan(wd: Workdir) -> list[str]:
                 continue
         if path:
             status_paths.append(path)
+    ign = _git(wd.root, "ls-files", "--others", "--ignored",
+               "--exclude-standard", "-z", check=False)
+    ignored_paths = [t for t in ign.stdout.split("\0") if t] if ign.returncode == 0 else []
+    seen = set(tracked) | set(status_paths)
     problems: list[str] = []
-    for rel in sorted(set(tracked) | set(status_paths)):
+    for rel in sorted(seen):
         norm = rel.strip()
         if not norm or norm.startswith(".git/") or norm == ".git":
             continue
-        in_exact = norm in exact
-        if in_exact:
-            # Exact governance paths skip the extension/name checks, but
-            # are still content-scanned for secrets (a bypass must not be
-            # able to hide key material behind an exempt filename).
-            pass
-        known = any(rx.match(norm) for rx in known_res)
-        # NFKC before the suffix/name checks: Unicode homoglyphs (fullwidth
-        # stops, letter-like punctuation) fold to their ASCII counterparts,
-        # so "backup．csv" (U+FF0E) cannot dodge the format list.
-        low = unicodedata.normalize("NFKC", norm).lower()
-        base = low.rsplit("/", 1)[-1]
-        reason = ""
-        if not known and not in_exact:
-            if base == ".env" or base.startswith(".env."):
-                reason = "secret file"
-            elif any(s in GIT_SAFETY_EXTS for s in Path(low).suffixes):
-                reason = "data/secret format"
-            elif any(rx.search(base) for rx in _GIT_SAFETY_NAME_RES):
-                reason = "suspicious secret-like name"
-        if not reason:
-            blob = _git_safety_blob(wd, norm)
-            if blob:
-                if b"\0" in blob:
-                    # NUL bytes mean binary: a data/key file hiding behind a
-                    # missing or text-looking extension. Exempt governance
-                    # files are dda-written text and never trip this.
-                    if not known and not in_exact:
-                        reason = "binary content (possible data file without a text extension)"
-                else:
-                    try:
-                        sample = blob.decode("utf-8", "ignore")
-                    except Exception:
-                        sample = ""
-                    for rx, label in _GIT_SAFETY_SECRET_RES:
-                        if rx.search(sample):
-                            reason = label
-                            break
+        reason = _scan_reason(wd, norm, _git_safety_blob(wd, norm), ignored=False)
+        if reason:
+            problems.append(f"{norm} ({reason})")
+    # Gitignored files cannot reach git — but a spill or a key hidden behind
+    # a gitignore entry is still a leak in the workdir, and the template
+    # itself ignores `.analysis/*.spill/`. Classify them with ignored=True:
+    # name + secret-content checks, no format/binary checks (force-adding
+    # such a file lands it in the status set, where the full scan applies).
+    for rel in sorted(set(ignored_paths) - seen):
+        norm = rel.strip()
+        if not norm or norm.startswith(".git/") or norm == ".git":
+            continue
+        reason = _scan_reason(wd, norm, _git_safety_blob(wd, norm), ignored=True)
         if reason:
             problems.append(f"{norm} ({reason})")
     return problems

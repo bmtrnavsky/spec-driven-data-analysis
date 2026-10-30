@@ -260,7 +260,7 @@ class TestG8Scope(R2Setup):
         self._good_report()
         (self.wd.root / "reports" / "bad.md").write_text("# Bad\n\nNo footer.\n", encoding="utf-8")
         rc, out = self.cli("gate", "G8", "--report", "reports/good.md")
-        self.assertEqual(rc, 0, f"G8 --report failed on the good report: {out}")
+        self.assertNotEqual(rc, 0, f"G8 --report exited 0 with an unchecked report present: {out}")
         self.assertIn("scope", out.lower(), f"--report scope not recorded in verdict: {out}")
         self.assertIn("good.md", out, f"--report target not recorded in verdict: {out}")
         way = (self.wd.analysis / "wayfinder.md").read_text(encoding="utf-8")
