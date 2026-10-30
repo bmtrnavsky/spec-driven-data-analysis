@@ -1,4 +1,13 @@
-# disciplined-data-analysis
+# Spec-Driven Data Analysis
+
+![Spec Driven Data Analysis](docs/social-preview.png)
+
+[![Hermes Plugin](https://img.shields.io/badge/Hermes-Plugin-teal.svg)](https://hermes-agent.nousresearch.com/docs)
+[![Version](https://img.shields.io/badge/version-0.4.0--phase4-orange.svg)](SPEC.md)
+
+Part of the Disciplined series with
+[disciplined-vibe-coding](https://github.com/bmtrnavsky/disciplined-vibe-coding)
+— same house rules: lock the plan before the work, verify before claiming done.
 
 Spec-first data analysis for Hermes: lock the plan before the data, block
 the shortcuts with hooks, re-check every hook rule at a gate. The design is
@@ -15,6 +24,8 @@ Current build: `0.4.0-phase4` (`python scripts/dda.py version`).
 | 3 | Kernel runner with audit hook, native lockdown and reader wrappers, `dda meta`, variants with freeze-on-first-run, specs-tried ledger, and the orphan check (G6) | built |
 | 4 | `dda doctor` (interpreter, hooks, approver keys, workdir, heartbeat), signed approvals (`dda approve` / `dda approved`, approver chain, config approval at G4), footer approval fields | built |
 | 5–9 | `dda gitcheck`, full `footercheck` and `report` (5); definitions and content-hashed pins (6); goldfish review, `dda packet` / `dda review` (7); `dda verify` / `dda profile` (8); `correct` and `dda evals` (9). Gates G0–G3, G5, G7–G9 also arrive here | not built; commands fail closed (exit 3) |
+
+The CLI is `dda` (pronounced "dee-dee-ay", short for disciplined data analysis).
 
 ## Use
 
