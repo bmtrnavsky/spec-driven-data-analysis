@@ -477,7 +477,16 @@ policing what a session does.
   unfavourable ones. G3 and G7 count every call for the packet and
   stage, so the elephant cannot re-roll until it gets a pass ("goldfish
   shopping"): a round passes only if the latest call passes and every
-  earlier call's objections are answered in the review file.
+  earlier call's objections are answered in the review file. G3 binds each
+  record two ways: the call must have a matching `review` entry in
+  `runs.log` (same stage/round/seq/spec/packet/request — a forged JSON
+  with no chain entry does not count), and its packet directory and
+  manifest must still be on disk for that spec hash.
+- **Test stub.** `DDA_GOLDFISH_STUB=pass|fail` fakes a provider response
+  for the test suite and the red-team harness only. It is honored only
+  under `DDA_TEST_MODE=1` (harness opt-in) or `PYTEST_CURRENT_TEST`
+  (set automatically by pytest); production runs ignore it and fail
+  closed on the missing provider key.
 - **Independence.** The two goldfish at PUBLISH are two calls to
   **different models** when available (config `goldfish_models`). With
   only one model, the footer says "second goldfish: same model —
@@ -836,7 +845,7 @@ An empty or wrong field fails G8 and is blocked by `footercheck`.
 | Data: source alias, as-of, row count, snapshot hash or fingerprint per source; drift since snapshot | profile, verify |
 | Kernel: environment lock hash, seed, network policy (enforced or detect-only, per library), audit-hook and wrapper status | kernel record |
 | Reproduce: one `dda` command that regenerates outputs from the locked variant | variants/ |
-| Review: rounds run, by whom (self / goldfish request ids and models / human), approver fingerprints, config approval status | reviews/, approvals.index.jsonl |
+| Review: rounds run, by whom (self / every goldfish round's request id and model / human), approver fingerprints, config approval status | reviews/, approvals.index.jsonl |
 | Approvals: kinds present, verified or unverified | approvals/ |
 | Correction evals: matched, run, passed | verify.md |
 | Hook faults and chain status | heartbeat, verify-chain |

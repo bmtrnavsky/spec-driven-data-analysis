@@ -155,22 +155,26 @@ def check(wd: Workdir, text: str, short: bool = False) -> list[str]:
         named = sorted(a for a in exp["aliases"] if re.search(rf"(?<![\w-]){re.escape(a)}(?![\w-])", g("sources")))
         if named != exp["aliases"]:
             problems.append(f"footer sources wrong (expected {', '.join(exp['aliases'])})")
-    # Review names the recorded rounds (§5.0): goldfish request ids/models
-    # when goldfish calls exist, self re-reads otherwise. Phase 7 check;
-    # presence-only before that.
+    # Review names every recorded round's request id (§5.0 Recording): a
+    # stale skeleton that names one id — or just the word "round" — must
+    # not verify once more calls exist.
     try:
         from . import review as _review
-        goldfish_recs = _review.existing_calls(wd, "teardown") + _review.existing_calls(wd, "post-result")
+        goldfish_recs = [r for r in _review.existing_calls(wd, "teardown")
+                         + _review.existing_calls(wd, "post-result")
+                         if r.get("provider_request_id")]
     except Exception:
         goldfish_recs = []
     if goldfish_recs:
         text = (fields.get("review", "") or "").lower()
-        named = any(str(r.get("provider_request_id") or "").lower() in text
-                    for r in goldfish_recs if r.get("provider_request_id"))
-        if "round" not in text and not named:
-            problems.append("footer review omits recorded goldfish rounds "
+        missing = [str(r.get("provider_request_id"))
+                   for r in goldfish_recs
+                   if str(r.get("provider_request_id") or "").lower() not in text]
+        if missing:
+            problems.append("footer review omits recorded goldfish request id(s) "
+                            f"{', '.join(missing[:4])} "
                             f"({len(goldfish_recs)} call(s) in reviews/goldfish/): "
-                            "name the rounds, request ids, and models (§5.0 Recording)")
+                            "name every round's request id and model (§5.0 Recording)")
     else:
         try:
             selfdir = wd.analysis / "reviews" / "self"

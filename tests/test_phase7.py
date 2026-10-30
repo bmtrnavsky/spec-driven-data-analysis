@@ -313,7 +313,7 @@ class TestFooterReview(P7Setup):
         self.assertTrue(any("goldfish" in p for p in problems),
                         f"stale footer must not pass once goldfish rounds exist: {problems}")
         fixed = stale.replace("- **Review:**",
-                              "- **Review:** goldfish teardown rounds 1,3 (req stub-0001, model default); ")
+                              "- **Review:** goldfish teardown rounds 1,3 (req stub-0001; req stub-0002, model default); ")
         self.assertEqual(_footer.check(self.wd, "# R\n\nbody\n\n" + fixed), [])
 
 

@@ -39,6 +39,25 @@ DEFAULT_KEY_ENV = "DDA_GOLDFISH_API_KEY"
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_MODEL = "default"
 STUB_ENV = "DDA_GOLDFISH_STUB"
+# The stub transport fakes a passing provider. It exists for tests and the
+# red-team harness only, and is honored exclusively under an explicit
+# test flag: `DDA_TEST_MODE=1` (harness opt-in) or `PYTEST_CURRENT_TEST`
+# (set automatically by pytest). In production the variable is ignored and
+# the run fails closed on the missing provider key. An attacker or a
+# sloppy session that exports DDA_GOLDFISH_STUB=pass in a real terminal
+# gets no fake reviews.
+TEST_ENV = "DDA_TEST_MODE"
+
+
+def _stub_allowed() -> bool:
+    return os.environ.get(TEST_ENV) == "1" or "PYTEST_CURRENT_TEST" in os.environ
+
+
+def _stub_verdict() -> str | None:
+    if not _stub_allowed():
+        return None
+    stub = os.environ.get(STUB_ENV)
+    return stub if stub in ("pass", "fail") else None
 
 STAGE_ALIASES = {
     "teardown": "teardown", "pre-data": "teardown", "predata": "teardown",
@@ -143,8 +162,9 @@ def goldfish_config(wd: Workdir) -> dict:
 
 
 def provider_available(wd: Workdir) -> bool:
-    """A goldfish call can run: stub transport (tests/redteam) or a real key."""
-    if os.environ.get(STUB_ENV) in ("pass", "fail"):
+    """A goldfish call can run: stub transport (tests/redteam only, gated
+    on the test flag) or a real key."""
+    if _stub_verdict() is not None:
         return True
     return bool(os.environ.get(goldfish_config(wd)["key_env"]))
 
@@ -353,8 +373,8 @@ def _stub_response(rounds: list[str], verdict: str) -> tuple[str, str]:
 
 
 def _provider_call(cfg: dict, model: str, system: str, user: str) -> tuple[str, str, int, int]:
-    stub = os.environ.get(STUB_ENV)
-    if stub in ("pass", "fail"):
+    stub = _stub_verdict()
+    if stub is not None:
         return _stub_response([], stub)  # rounds filled by caller
     key = os.environ.get(cfg["key_env"], "")
     if not key:
@@ -468,8 +488,8 @@ def do_review_run(wd: Workdir, stage: str, round_: str | None = None,
                            "A second failure is stop-and-ask (§3.2 case 4, §5.3)")
     brief = build_brief(stage, rounds)
     brief_hash = lockhash.sha256_hex(brief.encode())
-    stub = os.environ.get(STUB_ENV)
-    if stub in ("pass", "fail"):
+    stub = _stub_verdict()
+    if stub is not None:
         text, rid_base = _stub_response(rounds, stub)
         tin = estimate_tokens((brief).encode())
         tout = estimate_tokens(text.encode())
