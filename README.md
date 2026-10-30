@@ -7,8 +7,7 @@
 [![Version](https://img.shields.io/badge/version-0.4.0--phase4-orange.svg)](SPEC.md)
 
 Part of the Disciplined series with
-[disciplined-vibe-coding](https://github.com/bmtrnavsky/disciplined-vibe-coding)
-— same house rules: lock the plan before the work, verify before claiming done.
+[disciplined-vibe-coding](https://github.com/bmtrnavsky/disciplined-vibe-coding) same house rules: lock the plan before the work, verify before claiming done.
 
 Spec-first data analysis for Hermes: lock the plan before the data, block
 the shortcuts with hooks, re-check every hook rule at a gate. The design is
