@@ -206,7 +206,10 @@ def cmd_gate(args) -> int:
     if g in ("G0", "G8", "G9"):
         from . import gates5
         fn = {"G0": gates5.gate_g0, "G8": gates5.gate_g8, "G9": gates5.gate_g9}[g]
-        passed, reason, _ = fn(wd)
+        if g == "G8" and getattr(args, "report", None):
+            passed, reason, _ = fn(wd, report=args.report)
+        else:
+            passed, reason, _ = fn(wd)
         ledger.write_wayfinder(wd, g, passed, reason)
         print(f"{g}: {'pass' if passed else 'fail'} — {reason}")
         return 0 if passed else 1
@@ -242,6 +245,9 @@ def cmd_report(args) -> int:
     lock = lockstate.read_lock(wd)
     if not lock:
         raise DdaError("no spec.lock (run `dda lock` first)")
+    state, detail, _ = lockstate.quick_status(wd)
+    if state != "valid":
+        raise DdaError(f"report: lock is not valid ({state}: {detail}); re-lock before reporting")
     repdir = wd.root / "reports"
     repdir.mkdir(exist_ok=True)
     slug = args.slug
@@ -249,11 +255,14 @@ def cmd_report(args) -> int:
     if not body.is_file():
         raise DdaError("no .analysis/answer.md to assemble the report from")
     text = read_text_lf(body)
-    sk = footer.skeleton(wd)
-    if not sk:
-        raise DdaError("no lock footer available")
-    if "<!-- dda:footer" not in text:
+    if footer.extract(text) is None:
+        sk = footer.skeleton(wd)
+        if not sk:
+            raise DdaError("no lock footer available")
         text = text.rstrip() + "\n\n" + sk
+    problems = footer.check(wd, text)
+    if problems:
+        raise DdaError("report: footer does not verify: " + "; ".join(problems[:5]))
     out = repdir / (slug + ".md")
     out.write_text(text, encoding="utf-8")
     print(f"report: wrote {out}")
@@ -263,14 +272,8 @@ def cmd_report(args) -> int:
 def cmd_gitcheck(args) -> int:
     wd = _wd(args)
     wd.require_initialized()
-    from .ledger import _git
-    staged = _git(wd.root, "diff", "--cached", "--name-only").stdout
-    bad_exts = (".csv", ".parquet", ".db", ".sqlite", ".key", ".pem", ".env")
-    problems = []
-    for line in staged.splitlines():
-        name = line.strip().lower()
-        if name.endswith(bad_exts) or "secret" in name or "password" in name:
-            problems.append("staged data/secret file: %s" % line.strip())
+    from .ledger import git_safety_scan
+    problems = git_safety_scan(wd)
     if problems:
         for p in problems:
             print("FAIL " + p)
@@ -464,6 +467,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("gate")
     s.add_argument("workdir", nargs="?")
     s.add_argument("--milestone")
+    s.add_argument("--report", default=None, help="G8 only: check just this report file")
     s.set_defaults(func=cmd_gate)
 
     s = sub.add_parser("meta", help="metadata-only access to a data-root alias (names, types, counts)")
@@ -515,7 +519,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--milestone")
     s.set_defaults(func=cmd_report)
 
-    s = sub.add_parser("gitcheck", help="fail if data or secret files are staged")
+    s = sub.add_parser("gitcheck", help="fail if data or secret files are tracked, staged, or untracked-in-git-reach")
     s.add_argument("workdir", nargs="?")
     s.add_argument("--milestone")
     s.set_defaults(func=cmd_gitcheck)

@@ -16,8 +16,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from . import chain, ledger, lockstate
-from .layout import Workdir
+from . import chain, ledger, lockhash, lockstate
+from .layout import Workdir, read_text_lf
 
 FULL_FIELDS = (
     "question", "tier", "spec version", "lock hash", "lock timestamp", "lock label", "amendments", "variants",
@@ -121,6 +121,18 @@ def check(wd: Workdir, text: str, short: bool = False) -> list[str]:
     return problems
 
 
+def _skeleton_question(wd: Workdir) -> str:
+    """Question default for a fresh skeleton: the locked spec's Question section."""
+    try:
+        sections = lockhash.parse_sections(read_text_lf(wd.spec_path))
+        q = " ".join(sections.get("Question", "").split())
+        if q:
+            return q if len(q) <= 300 else q[:297] + "..."
+    except Exception:
+        pass
+    return "see report body"
+
+
 def skeleton(wd: Workdir, short: bool = False) -> str:
     exp = expected(wd)
     if exp is None:
@@ -136,6 +148,16 @@ def skeleton(wd: Workdir, short: bool = False) -> str:
                    f"approver fingerprints: {', '.join(exp['fingerprints']) or 'none configured'}"),
         "approvals": (f"config {(exp['config_hash'] or '')[:12]}: {exp['config_approval'] or 'unknown'}; "
                       "other kinds verified or unverified per approvals.index.jsonl"),
+        # Author-filled fields: fillable non-empty defaults so a fresh skeleton
+        # verifies; the author replaces them with the report's real content.
+        "question": _skeleton_question(wd),
+        "data": "aggregates only; no row values quoted",
+        "kernel": "see report body",
+        "reproduce": "see report body",
+        "correction evals": "none",
+        "hook faults": "none recorded",
+        "caveats": "see report body",
+        "generated": exp["locked_at"] or "unknown",
     }
     fields = SHORT_FIELDS if short else FULL_FIELDS
     return "## Provenance\n\n" + "\n".join(f"- **{f.capitalize()}:** {known.get(f, '')}" for f in fields) + "\n"

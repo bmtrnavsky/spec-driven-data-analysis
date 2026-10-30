@@ -320,6 +320,156 @@ def git_commit(root: Path, paths: list[Path], message: str) -> str:
     return _git(root, "rev-parse", "HEAD").stdout.strip()
 
 
+# ---------- git safety scan (shared by `dda gitcheck` and gate G9) ----------
+
+import re as _re
+
+GIT_SAFETY_EXTS = frozenset({
+    ".csv", ".tsv", ".tab",
+    ".parquet", ".pq", ".feather", ".arrow", ".ipc",
+    ".xlsx", ".xls", ".xlsm", ".xlsb", ".ods",
+    ".json", ".jsonl", ".ndjson", ".geojson",
+    ".db", ".sqlite", ".sqlite3", ".db3", ".duckdb",
+    ".pkl", ".pickle", ".pck", ".npy", ".npz",
+    ".h5", ".hdf5", ".h5ad",
+    ".sav", ".dta", ".sas7bdat", ".xpt", ".rdata", ".rds",
+    ".key", ".pem", ".p12", ".pfx", ".jks", ".kdbx", ".env",
+})
+
+_GIT_SAFETY_NAME_RES = tuple(_re.compile(rx) for rx in (
+    r"^id_(rsa|ed25519|ecdsa|dsa)(\.pub)?$",
+    r"secret|passwd|password|credential|private[_-]?key|seed[_-]?phrase|\.key$|\.pem$",
+))
+
+_GIT_SAFETY_SECRET_RES = (
+    (_re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----"), "private key material"),
+    (_re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "possible AWS access key"),
+    (_re.compile(r"\b(ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]{16,}\b"), "possible GitHub token"),
+    (_re.compile(r"\bsk-(live|test)-[A-Za-z0-9]{16,}\b"), "possible Stripe secret key"),
+    (_re.compile(r"\bxox[bap]-[A-Za-z0-9-]{10,}\b"), "possible Slack token"),
+    (_re.compile(r"(?i)\b(api[_-]?key|client[_-]?secret|secret|passwd|password)\b\s*[:=]\s*\S+"),
+     "possible embedded credential"),
+)
+
+_GIT_SAFETY_MAX_CONTENT = 1_000_000
+
+
+def _git_safety_evidence(wd: Workdir, lock: dict | None) -> tuple[set[str], tuple[str, ...]]:
+    """Lock/governance evidence paths exempt from the safety scan (SPEC §11:
+    these are dda's own committed records, not analysis data)."""
+    exact: set[str] = set()
+
+    def add(p: Path) -> None:
+        try:
+            exact.add(p.relative_to(wd.root).as_posix())
+        except ValueError:
+            pass
+
+    add(wd.spec_path)
+    add(wd.lock_path)
+    add(ledger_path(wd))
+    add(wd.config_path)
+    add(wd.wayfinder_path)
+    add(wd.root / ".gitignore")
+    add(runs_log(wd))
+    add(audit_log(wd))
+    add(specs_tried(wd))
+    add(approvals_index(wd))
+    for pin in (lock.get("pins") if lock else []) or []:
+        add(wd.definitions / f"{pin.split('@', 1)[0]}.md")
+    prefixes = tuple(
+        (wd.specs_dir.relative_to(wd.root).as_posix() + "/",
+         blobs_dir(wd).relative_to(wd.root).as_posix() + "/",
+         (wd.analysis / "runs").relative_to(wd.root).as_posix() + "/",
+         (wd.analysis / "approvals").relative_to(wd.root).as_posix() + "/")
+    )
+    return exact, prefixes
+
+
+def _git_safety_blob(wd: Workdir, rel: str) -> bytes | None:
+    """Best-effort content for a git-listed path: workdir file, else index blob."""
+    p = wd.root / rel
+    try:
+        if p.is_file() and p.stat().st_size <= _GIT_SAFETY_MAX_CONTENT:
+            return p.read_bytes()
+    except OSError:
+        pass
+    try:
+        r = _git(wd.root, "show", ":" + rel, check=False)
+        if r.returncode == 0:
+            return r.stdout.encode("utf-8", "ignore")[:_GIT_SAFETY_MAX_CONTENT]
+    except Exception:
+        pass
+    return None
+
+
+def git_safety_scan(wd: Workdir) -> list[str]:
+    """Paths that must not go to git: data formats, key material, secret names.
+
+    Scans everything git sees (tracked files = committed + staged, plus
+    untracked-but-not-ignored files from `git status`), minus dda's own
+    lock/governance evidence. Content-scans textish files for key material so
+    secrets in `.txt` or extensionless files are caught too.
+    """
+    wd.require_initialized()
+    lock = None
+    try:
+        lock = lockstate.read_lock(wd)
+    except DdaError:
+        lock = None
+    exact, prefixes = _git_safety_evidence(wd, lock)
+    tracked = [t for t in _git(wd.root, "ls-files", "-z").stdout.split("\0") if t]
+    st = _git(wd.root, "status", "--porcelain=v1", "--untracked-files=all", "-z").stdout
+    toks = st.split("\0")
+    i = 0
+    status_paths: list[str] = []
+    while i < len(toks):
+        tok = toks[i]
+        i += 1
+        if len(tok) < 4:
+            continue
+        xy, path = tok[:2], tok[3:]
+        if xy[0] in ("R", "C"):
+            if i < len(toks) and toks[i]:
+                i += 1  # skip the rename/copy source; scan the destination
+            if not path:
+                continue
+        if path:
+            status_paths.append(path)
+    problems: list[str] = []
+    for rel in sorted(set(tracked) | set(status_paths)):
+        norm = rel.strip()
+        if not norm or norm.startswith(".git/") or norm == ".git":
+            continue
+        if norm in exact or norm.startswith(prefixes):
+            continue
+        if "/.spill/" in norm or norm.endswith(".spill"):
+            continue
+        low = norm.lower()
+        base = low.rsplit("/", 1)[-1]
+        reason = ""
+        if base == ".env" or base.startswith(".env."):
+            reason = "secret file"
+        elif any(s in GIT_SAFETY_EXTS for s in Path(low).suffixes):
+            reason = "data/secret format"
+        elif any(rx.search(base) for rx in _GIT_SAFETY_NAME_RES):
+            reason = "suspicious secret-like name"
+        else:
+            blob = _git_safety_blob(wd, norm)
+            if blob and b"\0" not in blob[:8192]:
+                try:
+                    sample = blob.decode("utf-8", "ignore")
+                except Exception:
+                    sample = ""
+                for rx, label in _GIT_SAFETY_SECRET_RES:
+                    if rx.search(sample):
+                        reason = label
+                        break
+        if reason:
+            problems.append(f"{norm} ({reason})")
+    return problems
+
+
 # ---------- dda lock ----------
 
 def do_lock(wd: Workdir, amend: str | None = None) -> dict:
@@ -622,4 +772,5 @@ def gate_g4(wd: Workdir) -> tuple[bool, str, dict]:
 
 __all__ = ["do_lock", "gate_g4", "verify_all", "ledger_summary", "last_lock_record", "exposure", "label_for",
            "runs_log", "audit_log", "ledger_path", "specs_tried", "approvals_index", "unbound_log", "heartbeat_log",
-           "blobs_dir", "workdir_chains", "write_wayfinder", "in_git_repo", "_git"]
+           "blobs_dir", "workdir_chains", "write_wayfinder", "in_git_repo", "_git",
+           "git_safety_scan", "GIT_SAFETY_EXTS"]
