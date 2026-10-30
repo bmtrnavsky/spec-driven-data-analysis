@@ -58,6 +58,10 @@ class Harness:
         self.env = dict(os.environ)
         self.env["DDA_HOME"] = str(self.scratch / "ddahome")
         self.env["HERMES_HOME"] = str(self.scratch / "hermeshome")
+        # The harness is a test context: opt into the test-only goldfish stub.
+        # Production sessions never set DDA_TEST_MODE, so the stub stays dead
+        # there and review runs fail closed on the missing provider key.
+        self.env["DDA_TEST_MODE"] = "1"
         self.env.pop("DDA_HOOK_FAULT_INJECT", None)
         self.results: list[dict] = []
         self.known_misses = self._load_known_misses()
@@ -907,9 +911,33 @@ class Harness:
                             "prevented" if r.returncode != 0 else "missed", "prevented",
                             (r.stdout or r.stderr).strip()[:150], "tier-scaled review kinds (§5.3)")
                 # DECIDE glance: empty-tools one-shot call, fully recorded.
+                # Hermetic workdir: the shared wd carries runs.log history from
+                # dozens of prior probes, which makes binding failures
+                # undiagnosable. The DECIDE goldfish sequence gets a clean log.
+                import shutil as _shutil
+                import subprocess as _sp
+                _ospec = spec
+                _dwd = self.scratch / "wd-decide"
+                _shutil.rmtree(_dwd, ignore_errors=True)
+                _dwd.mkdir(parents=True)
+                _sp.run(["git", "init", "-q", str(_dwd)], check=True)
+                self.dda("init", str(_dwd))
+                _cfg_src = wd / ".analysis" / "config.yaml"
+                (_dwd / ".analysis" / "config.yaml").write_text(
+                    _cfg_src.read_text(encoding="utf-8"), encoding="utf-8")
+                for _d in ("definitions",):
+                    _src = wd / _d
+                    _dst = _dwd / _d
+                    if _src.is_dir():
+                        _shutil.copytree(_src, _dst, dirs_exist_ok=True)
+                wd, spec = _dwd, _dwd / ".analysis" / "spec.md"
+                selfd = wd / ".analysis" / "reviews" / "self"
+                selfd.mkdir(parents=True, exist_ok=True)
                 decide = valid.replace("This is an EXPLORE analysis.", "This is a DECIDE analysis.")
                 decide = decide.replace("quick-cut", "glance")
                 spec.write_text(decide, encoding="utf-8", newline="")
+                _lr = self.dda("lock", str(wd), check=False)
+                assert _lr.returncode == 0, "decide-wd lock failed: " + (_lr.stdout + _lr.stderr)[-200:]
                 r = self.dda("packet", "teardown", str(wd), check=False)
                 r = self.dda("review", "run", "teardown", str(wd), check=False)
                 recs = sorted((wd / ".analysis" / "reviews" / "goldfish").glob("teardown-*.json"))
@@ -994,11 +1022,23 @@ class Harness:
             finally:
                 self.env.pop("DDA_GOLDFISH_STUB", None)
         finally:
-            spec.write_bytes(good)
             try:
-                (wd / "definitions" / "rtmetric.md").unlink()
-            except OSError:
-                pass
+                _ospec.write_bytes(good)
+            except NameError:
+                try:
+                    spec.write_bytes(good)
+                except Exception:
+                    pass
+            try:
+                _dwd_this = _dwd
+            except NameError:
+                _dwd_this = None
+            for _dd in (wd, _dwd_this, self.wd):
+                try:
+                    if _dd is not None:
+                        (_dd / "definitions" / "rtmetric.md").unlink()
+                except OSError:
+                    pass
 
     def pending_phases(self):
         pend = []
