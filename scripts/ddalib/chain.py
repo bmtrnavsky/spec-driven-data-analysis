@@ -81,6 +81,14 @@ class FileLock:
                 fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
         finally:
             fh.close()
+        # The sidecar is an empty lock marker, not evidence: remove it so
+        # dda's own files never trip `gitcheck` (a `<name>.jsonl.lock`
+        # sidecar would otherwise match the `.jsonl` data format). Best
+        # effort — another waiter holding its own fd is unaffected.
+        try:
+            os.unlink(self.path)
+        except OSError:
+            pass
         return False
 
 

@@ -27,6 +27,19 @@ FULL_FIELDS = (
 SHORT_FIELDS = ("lock hash", "lock label", "sources", "definitions", "variants", "review")
 _PLACEHOLDER = re.compile(r"^(?:|-|—|\?|tbd|todo|n/?a\??|xxx|<[^>]*>)$", re.IGNORECASE)
 _FIELD_RE = re.compile(r"^\s*(?:[-*]\s+)?(?:\*\*)?([A-Za-z][A-Za-z /]+?)(?::\*\*|\*\*:|:)\s*(.*)$")
+_PROVENANCE_HEADING_RE = re.compile(r"^#{2,3}\s+.*provenance", re.IGNORECASE)
+
+
+def remove_footer(text: str) -> str:
+    """Cut a previously stamped Provenance section (full or short) so `dda
+    report` can rebuild it idempotently: a short footer already in answer.md
+    fails the full report check, so strip it and append a fresh full
+    skeleton. The footer always trails the body."""
+    lines = text.replace("\r\n", "\n").split("\n")
+    for i, line in enumerate(lines):
+        if _PROVENANCE_HEADING_RE.match(line):
+            return "\n".join(lines[:i])
+    return text
 
 
 def extract(text: str) -> dict[str, str] | None:
@@ -167,4 +180,4 @@ def is_short_target(path: Path | str) -> bool:
     return str(path).replace("\\", "/").lower().endswith("/.analysis/answer.md")
 
 
-__all__ = ["check", "extract", "skeleton", "expected", "is_short_target", "FULL_FIELDS", "SHORT_FIELDS"]
+__all__ = ["check", "extract", "remove_footer", "skeleton", "expected", "is_short_target", "FULL_FIELDS", "SHORT_FIELDS"]

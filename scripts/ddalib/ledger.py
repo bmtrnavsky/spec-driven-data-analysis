@@ -12,6 +12,7 @@ import json
 import shutil
 import subprocess
 import time
+import unicodedata
 from pathlib import Path
 
 from . import chain, lockhash, lockstate
@@ -365,6 +366,16 @@ _GIT_SAFETY_SECRET_RES = (
                  r"(?:[\"']?\s*[:=]\s*[\"']?\S{2,}|[\"']?\s+\bis\b\s+[\"']?\S{2,}|[\"']?\s+[\"']?\S{4,})",
                  _re.IGNORECASE),
      "possible embedded credential"),
+    # Keyword glued to word chars (camelCase/shorthand: secretKey, password2,
+    # clientsecret) hides behind the boundary above but is still a credential
+    # assignment when a separator follows — require [: =] so prose like
+    # "tokens expire soon" does not match.
+    (_re.compile(r"(?<![A-Za-z0-9_])(?:api[_-]?key|client[_-]?secret|secret|passwd|password|token|auth)[A-Za-z0-9_]+"
+                 r"[\"']?\s*[:=]\s*[\"']?\S{2,}",
+                 _re.IGNORECASE),
+     "possible embedded credential"),
+    (_re.compile(r"(?<![A-Za-z0-9_/+])eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?![A-Za-z0-9_-])"),
+     "possible JWT"),
 )
 
 _GIT_SAFETY_SAMPLE_HEAD = 65_536
@@ -549,7 +560,10 @@ def git_safety_scan(wd: Workdir) -> list[str]:
             # able to hide key material behind an exempt filename).
             pass
         known = any(rx.match(norm) for rx in known_res)
-        low = norm.lower()
+        # NFKC before the suffix/name checks: Unicode homoglyphs (fullwidth
+        # stops, letter-like punctuation) fold to their ASCII counterparts,
+        # so "backup．csv" (U+FF0E) cannot dodge the format list.
+        low = unicodedata.normalize("NFKC", norm).lower()
         base = low.rsplit("/", 1)[-1]
         reason = ""
         if not known and not in_exact:
@@ -561,15 +575,22 @@ def git_safety_scan(wd: Workdir) -> list[str]:
                 reason = "suspicious secret-like name"
         if not reason:
             blob = _git_safety_blob(wd, norm)
-            if blob and b"\0" not in blob[:8192]:
-                try:
-                    sample = blob.decode("utf-8", "ignore")
-                except Exception:
-                    sample = ""
-                for rx, label in _GIT_SAFETY_SECRET_RES:
-                    if rx.search(sample):
-                        reason = label
-                        break
+            if blob:
+                if b"\0" in blob:
+                    # NUL bytes mean binary: a data/key file hiding behind a
+                    # missing or text-looking extension. Exempt governance
+                    # files are dda-written text and never trip this.
+                    if not known and not in_exact:
+                        reason = "binary content (possible data file without a text extension)"
+                else:
+                    try:
+                        sample = blob.decode("utf-8", "ignore")
+                    except Exception:
+                        sample = ""
+                    for rx, label in _GIT_SAFETY_SECRET_RES:
+                        if rx.search(sample):
+                            reason = label
+                            break
         if reason:
             problems.append(f"{norm} ({reason})")
     return problems

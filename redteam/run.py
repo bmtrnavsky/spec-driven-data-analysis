@@ -688,6 +688,141 @@ class Harness:
                     ("record keeps parent-owned baseline" if ok else out.strip()[-200:]),
                     "parent-owned kernel record: preflight baseline, run-id-bound status")
 
+    # ---------- phase 5 round 4 + phase 6: report confinement, nested scope,
+    # credential continuations/JWT, extension evasion, G0 unicode set,
+    # report idempotency, G1 ----------
+    def phase5_6(self):
+        wd = self.wd
+        (wd / ".analysis" / "answer.md").write_text(
+            "# Answer\n\nConversion rose.\n", encoding="utf-8")
+        r = self.dda("report", "--slug", "rt1", str(wd), check=False)
+        self.record("report.first-build", "gates",
+                    "documented lock -> answer -> report workflow builds",
+                    "allowed" if r.returncode == 0 else "missed", "allowed",
+                    (r.stdout or r.stderr).strip()[:150])
+        for slug, cid in (("../evil", "report.slug-traversal-refused"),
+                          ("sub/dir", "report.slug-nested-refused"),
+                          (str(self.scratch / "abs.md"), "report.slug-absolute-refused")):
+            r = self.dda("report", "--slug", slug, str(wd), check=False)
+            escaped = (wd / "reports" / (slug + ".md")).exists() or (self.scratch / "evil.md").exists() \
+                or (self.scratch / "abs.md").exists()
+            ok = r.returncode != 0 and not escaped
+            self.record(cid, "gates", f"report --slug {slug!r} stays inside reports/",
+                        "prevented" if ok else "missed", "prevented",
+                        (r.stdout or r.stderr).strip()[-150:],
+                        "bare-filename slug validation (mirrors the G8 --report fix)")
+        r = self.dda("report", "--slug", "rt1", str(wd), check=False)
+        self.record("report.re-run-idempotent", "gates",
+                    "second report --slug passes after the short footer stamp",
+                    "allowed" if r.returncode == 0 else "missed", "allowed",
+                    (r.stdout or r.stderr).strip()[:150],
+                    "short-footer strip + full-skeleton rebuild (§8)")
+        nested = wd / "reports" / "nested"
+        nested.mkdir(parents=True, exist_ok=True)
+        (nested / "deep.md").write_text("# Deep\n\nNo footer here at all.\n", encoding="utf-8")
+        g = self.dda("gate", "G8", str(wd), check=False)
+        self.record("g8.nested-report-checked", "gates",
+                    "footerless reports/nested/deep.md fails the default G8 scope",
+                    "prevented" if g.returncode != 0 else "missed", "prevented",
+                    g.stdout.strip()[:150], "recursive reports/**/*.md default scope")
+        shutil.rmtree(nested, ignore_errors=True)
+        cases = [
+            ("gitcheck.secretkey-continuation", "k-rt.txt", 'secretKey = "hunter2-secret-value"\n'),
+            ("gitcheck.jwt-shape", "k-rt.txt",
+             "token: eyJhbGciOiJIUzI1NiJ9.eyJzdWIifQ."
+             "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c\n"),
+            ("gitcheck.homoglyph-extension", "backup．csv", "a,b\n1,2\n"),
+            ("gitcheck.extensionless-binary", "rt-snapshot", b"PAR1\x15\x00binary\x00\x01"),
+        ]
+        for cid, rel, data in cases:
+            p = wd / rel
+            if isinstance(data, bytes):
+                p.write_bytes(data)
+            else:
+                p.write_text(data, encoding="utf-8")
+            subprocess.run(["git", "add", "-f", rel], cwd=str(wd), check=True)
+            r = self.dda("gitcheck", str(wd), check=False)
+            hit = r.returncode != 0 and rel in (r.stdout + r.stderr)
+            self.record(cid, "git safety", f"gitcheck flags {rel}",
+                        "prevented" if hit else "missed", "prevented",
+                        (r.stdout or r.stderr).strip()[-150:],
+                        "continuation/JWT regexes, NFKC suffix check, binary sniff (§11)")
+            subprocess.run(["git", "rm", "--cached", "-q", rel], cwd=str(wd), check=False)
+            try:
+                p.unlink()
+            except OSError:
+                pass
+        spec = wd / ".analysis" / "spec.md"
+        good = spec.read_bytes()
+        import re as _re
+        # NOTE: on Windows the harness setup rewrites spec.md via write_text,
+        # leaving CRLF endings — match either when injecting probe content.
+        injected = _re.sub("## Question" + chr(13) + "?" + chr(10), "## Question" + chr(10) + chr(10) + "Did it rise" + chr(0x203C) + "Should we ship it?" + chr(10),
+                           good.decode("utf-8"), count=1)
+        injected = _re.sub("## Decision it informs" + chr(13) + "?" + chr(10),
+                           "## Decision it informs" + chr(10) + chr(10) + "Ship v2 or roll it back." + chr(10),
+                           injected, count=1)
+        spec.write_text(injected, encoding="utf-8", newline="")
+        g = self.dda("gate", "G0", str(wd), check=False)
+        self.record("g0.unicode-terminator-splits", "gates",
+                    "U+203C double-exclamation split fails G0 without a code patch",
+                    "prevented" if (g.returncode != 0 and "one sentence" in g.stdout) else "missed", "prevented",
+                    g.stdout.strip()[:150],
+                    "Unicode-derived Po/Pd terminator set (§3 row 0)")
+        spec.write_bytes(good)
+        (wd / "definitions" / "rtmetric.md").write_text(
+            "---\nname: rtmetric\nversion: 1\n---\nOrders / sessions, daily grain, UTC.\n",
+            encoding="utf-8")
+        from ddalib import lockhash as _lh
+        from ddalib.layout import Workdir as _W
+        pin = _lh.load_definition(_W.at(wd), "rtmetric").pin
+        h = pin.split("#", 1)[1]
+        full = good.decode("utf-8")
+
+        def _fill(text, header, body):
+            new, n = _re.subn("^" + _re.escape(header) + chr(13) + "?$" , header + chr(10) + chr(10) + body,
+                              text, count=1, flags=_re.MULTILINE)
+            assert n == 1, "probe setup missed section %r (CRLF?)" % header
+            return new
+
+        full = _fill(full, "## Metrics", "- rtmetric@1#%s\n" % h)
+        full = _fill(full, "## Hypotheses", "v2 raises conversion.\n")
+        full = _fill(full, "## Thresholds that would change the decision", "a 1pt drop kills v2.\n")
+        full = _fill(full, "## Exclusion and outlier rules", "exclude staff orders.\n")
+        spec.write_text(full, encoding="utf-8", newline="")
+        g = self.dda("gate", "G1", str(wd), check=False)
+        self.record("g1.valid-passes", "gates",
+                    "G1 passes a fully defined spec with a recomputing pin",
+                    "allowed" if g.returncode == 0 else "missed", "allowed",
+                    g.stdout.strip()[:150], "pin resolve + aliases + declarations (§3 row 1, §7)")
+        with open(wd / "definitions" / "rtmetric.md", "a", encoding="utf-8") as fh:
+            fh.write("Silently redefined.\n")
+        g = self.dda("gate", "G1", str(wd), check=False)
+        self.record("g1.stale-pin-refused", "gates",
+                    "G1 fails a definition edited without a version bump",
+                    "prevented" if g.returncode != 0 else "missed", "prevented",
+                    g.stdout.strip()[:150], "content-hash recompute at G1 (§7)")
+        (wd / "definitions" / "rtmetric.md").write_text(
+            "---\nname: rtmetric\nversion: 1\n---\nOrders / sessions, daily grain, UTC.\n",
+            encoding="utf-8")
+        spec.write_text(full.replace("- rtmetric@1#%s\n" % h,
+                                     "- rtmetric@1#%s (orders / sessions)\n" % h, 1), encoding="utf-8")
+        g = self.dda("gate", "G1", str(wd), check=False)
+        self.record("g1.inline-formula-refused", "gates",
+                    "G1 fails an inline formula next to a pin",
+                    "prevented" if g.returncode != 0 else "missed", "prevented",
+                    g.stdout.strip()[:150], "pins only, no inline formulas (§7)")
+        spec.write_bytes(good)
+        try:
+            (wd / "definitions" / "rtmetric.md").unlink()
+        except OSError:
+            pass
+        try:
+            (wd / ".analysis" / "answer.md").unlink()
+        except OSError:
+            pass
+        shutil.rmtree(wd / "reports", ignore_errors=True)
+
     def pending_phases(self):
         pend = [
             ("goldfish.empty-tools", 7),
@@ -957,6 +1092,7 @@ class Harness:
             self.phase3()
             self.phase4()
             self.key_borrowing()
+            self.phase5_6()
             self.dda("release", str(self.wd))
             ul = Path(self.env["DDA_HOME"]) / "unbound-access.log"
             self.lines_at_release = len(ul.read_text(encoding="utf-8").splitlines()) if ul.is_file() else 0

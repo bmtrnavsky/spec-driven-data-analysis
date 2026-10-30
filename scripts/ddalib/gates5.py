@@ -2,12 +2,45 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 
 from .layout import Workdir, read_text_lf
 from . import lockhash, lockstate
 
-# Invisible characters stripped before G0 sentence segmentation so they
-# cannot hide a boundary (e.g. "?<U+200B>Should" or "?<U+2060>should").
+# Intra-sentence punctuation that must NOT split: it occurs inside a single
+# sentence (contractions, possessives, hyphenated words, numbers, percents,
+# issue/PR references, quoted speech, item separators) and is excluded from
+# the derived terminator set below.
+_TERMINATOR_KEEP = frozenset([
+    ",", "'", '"', "-", "#", "$", "%", "&", "*", "@", "\\",
+    "、",  # IDEOGRAPHIC COMMA — comma-like item separator
+])
+
+_TERMINATOR_CLASS: str | None = None
+
+
+def _terminator_class() -> str:
+    """Regex character class of sentence terminators, derived from the Unicode
+    character database instead of a hand-maintained list: every codepoint
+    whose General_Category is Po (Other_Punctuation) or Pd
+    (Dash_Punctuation) — the categories that carry sentence-terminal
+    punctuation in every script (ASCII . ! ? ; :, CJK 。 ？ ！ ；, the
+    DEVANAGARI DANDA ।, ARABIC ؟, FULLWIDTH ．, ‼ ⁇ ⁈ ⁉, …) — plus U+002F
+    SOLIDUS, minus the intra-sentence punctuation in _TERMINATOR_KEEP. New
+    Unicode sentence punctuation lands in Po/Pd by definition, so no
+    per-codepoint patch is ever needed here. Built lazily and cached: the
+    full-range category walk runs once per process."""
+    global _TERMINATOR_CLASS
+    if _TERMINATOR_CLASS is None:
+        keep = _TERMINATOR_KEEP
+        chars = sorted(
+            chr(code)
+            for code in range(0x110000)
+            if (chr(code) == "/" or unicodedata.category(chr(code)) in ("Po", "Pd"))
+            and chr(code) not in keep
+        )
+        _TERMINATOR_CLASS = "[" + "".join(re.escape(c) for c in chars) + "]+"
+    return _TERMINATOR_CLASS
 _INVISIBLE_RE = re.compile(
     "[\u00ad\u034f\u180e\u200b\u200c\u200d\u200e\u200f"
     "\u2060\u2061\u2062\u2063\u2064\u2066\u2067\u2068\u2069\u206a\u206b\u206c\u206d\u206e\u206f"
@@ -24,22 +57,23 @@ _ABBREV_RE = re.compile(
 
 
 def _sentence_fragments(question: str) -> list[str]:
-    """Split on sentence boundaries: . ! ? ; : / — – … ？ ！ ； 。 and line breaks.
+    """Split on sentence boundaries (Unicode-derived terminator set).
 
     Every terminator run splits, even with no following space and even
     before a lowercase letter (``Rise?Ship it``, ``Rise?ship it`` are two
-    sentences). Decimal points, clock times, and letter/letter slashes
-    (``v2.5``, ``12:30``, ``A/B``) are masked first so they do not count
-    as new sentences, as are common abbreviations (``Mr.``, ``Mrs.``,
-    ``Dr.``, ``e.g.``, ...). Zero-width and other invisible characters
-    are stripped first so they cannot hide a boundary.
+    sentences). The question is NFKC-normalized first (fullwidth stops and
+    punctuation fold to ASCII), then decimal points, clock times, and
+    letter/letter slashes (``v2.5``, ``12:30``, ``A/B``) are masked so they
+    do not count as new sentences, as are common abbreviations (``Mr.``,
+    ``Mrs.``, ``Dr.``, ``e.g.``, ...). Zero-width and other invisible
+    characters are stripped first so they cannot hide a boundary.
     """
-    flat = " ".join(question.split())
+    flat = unicodedata.normalize("NFKC", " ".join(question.split()))
     flat = _INVISIBLE_RE.sub("", flat)
     flat = _ABBREV_RE.sub(lambda m: m.group(0).replace(".", "\x00"), flat)
     masked = re.sub(r"(?<=\d)[.:/](?=\d)", "\x00", flat)
     masked = re.sub(r"(?<=[A-Za-z0-9])/(?=[A-Za-z0-9])", "\x01", masked)
-    parts = re.split(r"[.!?;:/—–…？！；。]+", masked)
+    parts = re.split(_terminator_class(), masked)
     out = []
     for p in parts:
         p = p.replace("\x00", ".").replace("\x01", "/")
@@ -95,7 +129,7 @@ def gate_g8(wd: Workdir, report: str | None = None) -> tuple[bool, str, dict]:
                 tres = target.resolve()
             except OSError:
                 tres = target
-            others = sum(1 for q in repdir.glob("*.md") if q.resolve() != tres)
+            others = sum(1 for q in repdir.rglob("*.md") if q.resolve() != tres)
         scope_note = " (scope: --report %s%s)" % (
             report, "; %d other report(s) not checked" % others if others else "")
     else:
@@ -109,7 +143,9 @@ def gate_g8(wd: Workdir, report: str | None = None) -> tuple[bool, str, dict]:
             targets.append(answer)
         repdir = wd.root / "reports"
         if repdir.exists():
-            targets.extend(sorted(repdir.glob("*.md")))
+            # Recursive: a nested reports/**/*.md never checked is a report
+            # that never verifies (§11 smuggling surface).
+            targets.extend(sorted(repdir.rglob("*.md")))
         if not targets:
             return False, "G8 fail: no report (write .analysis/answer.md or reports/<slug>.md)", {}
     bad: list[str] = []

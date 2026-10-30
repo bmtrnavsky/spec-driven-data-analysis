@@ -406,9 +406,10 @@ def _carries_workdir_report(ctx: Ctx) -> bool:
 # ---------- runlog (§6.6) ----------
 
 _SECRET_RES = [
-    (re.compile(r"(?i)((?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|auth)\s*[=:]\s*)(['\"]?)[^\s'\";&]+"),
+    (re.compile(r"(?i)((?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|auth)[a-z0-9_]*\s*[=:]\s*)(['\"]?)[^\s'\";&]+"),
      r"\1\2<redacted>"),
     (re.compile(r"(?i)(bearer\s+)[a-z0-9._\-~+/]+=*"), r"\1<redacted>"),
+    (re.compile(r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"), "<redacted-jwt>"),
     (re.compile(r"([a-z][a-z0-9+.\-]*://[^:/\s@]+:)[^@\s]+@", re.IGNORECASE), r"\1<redacted>@"),
     (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "<redacted-aws-key>"),
     (re.compile(r"\b(?:ghp|gho|ghs|github_pat|sk|xox[abp])[-_][A-Za-z0-9_\-]{16,}\b"), "<redacted-token>"),
