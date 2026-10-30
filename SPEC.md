@@ -1,6 +1,6 @@
 ---
 name: disciplined-data-analysis
-status: spec draft, second reshape after blind re-review; build phases 0–4 implemented (see README)
+status: spec draft, second reshape after blind re-review; build phases 0–5 implemented (see README)
 version: 0.3.0-spec
 date: 2026-10-27
 sibling: C:\Users\bmtrn\disciplined-vibe-coding (v0.2.0)

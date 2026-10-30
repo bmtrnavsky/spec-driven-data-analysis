@@ -4,15 +4,15 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Hermes Plugin](https://img.shields.io/badge/Hermes-Plugin-teal.svg)](https://hermes-agent.nousresearch.com/docs)
-[![Version](https://img.shields.io/badge/version-0.4.0--phase4-orange.svg)](SPEC.md)
+[![Version](https://img.shields.io/badge/version-0.5.0--phase5-orange.svg)](SPEC.md)
 
 Part of the Disciplined series with
 [disciplined-vibe-coding](https://github.com/bmtrnavsky/disciplined-vibe-coding) same house rules: lock the plan before the work, verify before claiming done.
 
 Spec-first data analysis for Hermes: lock the plan before the data, block
 the shortcuts with hooks, re-check every hook rule at a gate. The design is
-in [SPEC.md](SPEC.md). This tree contains build phases 0–4 (SPEC §14).
-Current build: `0.4.0-phase4` (`python scripts/dda.py version`).
+in [SPEC.md](SPEC.md). This tree contains build phases 0–5 (SPEC §14).
+Current build: `0.5.0-phase5` (`python scripts/dda.py version`).
 
 ## Status
 
@@ -66,7 +66,7 @@ rejects anything it doesn't understand.
 ## Tests
 
 ```
-python -m unittest discover -s tests      # phase-1 to phase-4 unit tests
+python -m unittest discover -s tests      # phase-1 to phase-5 unit tests
 python redteam/run.py [--json out.json]   # phase-0 red-team; exit 0 = GREEN
 ```
 

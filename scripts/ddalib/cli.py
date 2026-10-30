@@ -18,13 +18,13 @@ import sys
 from pathlib import Path
 
 from . import __version__, approvals, binding, chain, doctor, footer, kernel, ledger, lockhash, lockstate
-from .layout import LAYOUT_DIRS, LAYOUT_FILES, REPO_ROOT, TEMPLATES_DIR, DdaError, Workdir, dda_home
+from .layout import LAYOUT_DIRS, LAYOUT_FILES, REPO_ROOT, TEMPLATES_DIR, DdaError, Workdir, dda_home, read_text_lf
 
 EXIT_NOT_IMPLEMENTED = 3
 
 # Spec commands not yet built, with the build phase that delivers them (§14).
 PENDING = {
-    "gitcheck": 5, "evals": 9, "packet": 7,
+    "evals": 9, "packet": 7,
     "review": 7, "profile": 8, "verify": 8,
 }
 # Gates and the phase that builds each one's checks (§3, §14). G4 and G6 are built.
@@ -203,6 +203,13 @@ def cmd_gate(args) -> int:
         ledger.write_wayfinder(wd, g, passed, reason)
         print(f"{g}: {'pass' if passed else 'fail'} — {reason}")
         return 0 if passed else 1
+    if g in ("G0", "G8", "G9"):
+        from . import gates5
+        fn = {"G0": gates5.gate_g0, "G8": gates5.gate_g8, "G9": gates5.gate_g9}[g]
+        passed, reason, _ = fn(wd)
+        ledger.write_wayfinder(wd, g, passed, reason)
+        print(f"{g}: {'pass' if passed else 'fail'} — {reason}")
+        return 0 if passed else 1
     if g in GATE_PHASE:
         print(f"dda gate {g}: not implemented in this build (arrives in build phase {GATE_PHASE[g]}, SPEC §14). "
               "Failing closed.", file=sys.stderr)
@@ -226,6 +233,49 @@ def cmd_footer(args) -> int:
     if not sk:
         raise DdaError("no lock yet; run `dda lock` first")
     sys.stdout.write(sk)
+    return 0
+
+
+def cmd_report(args) -> int:
+    wd = _wd(args)
+    wd.require_initialized()
+    lock = lockstate.read_lock(wd)
+    if not lock:
+        raise DdaError("no spec.lock (run `dda lock` first)")
+    repdir = wd.root / "reports"
+    repdir.mkdir(exist_ok=True)
+    slug = args.slug
+    body = wd.analysis / "answer.md"
+    if not body.is_file():
+        raise DdaError("no .analysis/answer.md to assemble the report from")
+    text = read_text_lf(body)
+    sk = footer.skeleton(wd)
+    if not sk:
+        raise DdaError("no lock footer available")
+    if "<!-- dda:footer" not in text:
+        text = text.rstrip() + "\n\n" + sk
+    out = repdir / (slug + ".md")
+    out.write_text(text, encoding="utf-8")
+    print(f"report: wrote {out}")
+    return 0
+
+
+def cmd_gitcheck(args) -> int:
+    wd = _wd(args)
+    wd.require_initialized()
+    from .ledger import _git
+    staged = _git(wd.root, "diff", "--cached", "--name-only").stdout
+    bad_exts = (".csv", ".parquet", ".db", ".sqlite", ".key", ".pem", ".env")
+    problems = []
+    for line in staged.splitlines():
+        name = line.strip().lower()
+        if name.endswith(bad_exts) or "secret" in name or "password" in name:
+            problems.append("staged data/secret file: %s" % line.strip())
+    if problems:
+        for p in problems:
+            print("FAIL " + p)
+        return 1
+    print("gitcheck: ok")
     return 0
 
 
@@ -458,6 +508,17 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--milestone")
     s.add_argument("--reason", required=True)
     s.set_defaults(func=cmd_abandon)
+
+    s = sub.add_parser("report", help="assemble reports/<slug>.md from answer.md + footer")
+    s.add_argument("--slug", required=True)
+    s.add_argument("workdir", nargs="?")
+    s.add_argument("--milestone")
+    s.set_defaults(func=cmd_report)
+
+    s = sub.add_parser("gitcheck", help="fail if data or secret files are staged")
+    s.add_argument("workdir", nargs="?")
+    s.add_argument("--milestone")
+    s.set_defaults(func=cmd_gitcheck)
 
     s = sub.add_parser("approve", help="commit a human approval file (signed; run in your own terminal)")
     s.add_argument("kind", help=f"approval kind: {', '.join(approvals.KINDS)}")
