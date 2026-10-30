@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -27,8 +28,9 @@ PENDING = {
     "evals": 9, "packet": 7,
     "review": 7, "profile": 8, "verify": 8,
 }
-# Gates and the phase that builds each one's checks (§3, §14). G4 and G6 are built.
-GATE_PHASE = {"G0": 5, "G1": 6, "G2": 4, "G3": 7, "G5": 8, "G6": 3, "G7": 8, "G8": 5, "G9": 5}
+# Gates and the phase that builds each one's checks (§3, §14). G0/G8/G9 (5),
+# G1 (6), G4, G3/G7 (7), G5/G7 (8), G6 (3) are built; the rest fail closed.
+GATE_PHASE = {"G2": 4, "G3": 7, "G5": 8, "G6": 3, "G7": 8}
 
 BLOCKING_HOOKS = ("lockguard", "evidenceguard", "rawguard", "defguard", "footercheck")
 
@@ -203,9 +205,10 @@ def cmd_gate(args) -> int:
         ledger.write_wayfinder(wd, g, passed, reason)
         print(f"{g}: {'pass' if passed else 'fail'} — {reason}")
         return 0 if passed else 1
-    if g in ("G0", "G8", "G9"):
-        from . import gates5
-        fn = {"G0": gates5.gate_g0, "G8": gates5.gate_g8, "G9": gates5.gate_g9}[g]
+    if g in ("G0", "G1", "G8", "G9"):
+        from . import gates5, gates6
+        fn = {"G0": gates5.gate_g0, "G1": gates6.gate_g1,
+              "G8": gates5.gate_g8, "G9": gates5.gate_g9}[g]
         if g == "G8" and getattr(args, "report", None):
             passed, reason, _ = fn(wd, report=args.report)
         else:
@@ -248,21 +251,49 @@ def cmd_report(args) -> int:
     state, detail, _ = lockstate.quick_status(wd)
     if state != "valid":
         raise DdaError(f"report: lock is not valid ({state}: {detail}); re-lock before reporting")
+    # The slug is a bare filename confined to reports/: separators, absolute
+    # paths, and '..' would write outside the reports directory (the same
+    # confinement G8 applies to --report). Nested reports are rejected at
+    # write time, and the G8 default scope is recursive, so no report can
+    # hide in a subdirectory.
+    slug = args.slug or ""
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", slug):
+        raise DdaError("report: --slug must be a bare filename (letters, digits, '-', '_'; "
+                       "no directories, separators, or '..')")
     repdir = wd.root / "reports"
     repdir.mkdir(exist_ok=True)
-    slug = args.slug
     body = wd.analysis / "answer.md"
     if not body.is_file():
         raise DdaError("no .analysis/answer.md to assemble the report from")
     text = read_text_lf(body)
     if footer.extract(text) is None:
+        # No provenance section yet: append a fresh full skeleton.
         sk = footer.skeleton(wd)
         if not sk:
             raise DdaError("no lock footer available")
         text = text.rstrip() + "\n\n" + sk
-    problems = footer.check(wd, text)
-    if problems:
-        raise DdaError("report: footer does not verify: " + "; ".join(problems[:5]))
+        problems = footer.check(wd, text)
+        if problems:
+            raise DdaError("report: footer does not verify: " + "; ".join(problems[:5]))
+    elif not footer.check(wd, text, short=True):
+        # answer.md carries the stamped glance (short) footer — or a valid
+        # full one: strip it and rebuild from a fresh full skeleton so
+        # re-running `report` is idempotent.
+        base = footer.remove_footer(text).rstrip()
+        sk = footer.skeleton(wd)
+        if not sk:
+            raise DdaError("no lock footer available")
+        text = (base + "\n\n" + sk) if base else sk
+        problems = footer.check(wd, text)
+        if problems:
+            raise DdaError("report: footer does not verify: " + "; ".join(problems[:5]))
+    else:
+        # A provenance section exists but does not verify even as a glance
+        # footer: forged or tampered — never silently launder it into a
+        # fresh valid report.
+        problems = footer.check(wd, text)
+        raise DdaError("report: footer does not verify: "
+                       + "; ".join((problems or ["footer values do not recompute"])[:5]))
     # Stamp the glance (short) footer back into answer.md so the G8 default
     # scope — which requires a verifiable footer on answer.md whenever it
     # exists — keeps passing the documented lock → answer → report workflow.

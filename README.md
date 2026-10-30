@@ -4,15 +4,15 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Hermes Plugin](https://img.shields.io/badge/Hermes-Plugin-teal.svg)](https://hermes-agent.nousresearch.com/docs)
-[![Version](https://img.shields.io/badge/version-0.5.0--phase5-orange.svg)](SPEC.md)
+[![Version](https://img.shields.io/badge/version-0.6.0--phase6-orange.svg)](SPEC.md)
 
 Part of the Disciplined series with
 [disciplined-vibe-coding](https://github.com/bmtrnavsky/disciplined-vibe-coding) same house rules: lock the plan before the work, verify before claiming done.
 
 Spec-first data analysis for Hermes: lock the plan before the data, block
 the shortcuts with hooks, re-check every hook rule at a gate. The design is
-in [SPEC.md](SPEC.md). This tree contains build phases 0–5 (SPEC §14).
-Current build: `0.5.0-phase5` (`python scripts/dda.py version`).
+in [SPEC.md](SPEC.md). This tree contains build phases 0–6 (SPEC §14).
+Current build: `0.6.0-phase6` (`python scripts/dda.py version`).
 
 ## Status
 
@@ -23,7 +23,9 @@ Current build: `0.5.0-phase5` (`python scripts/dda.py version`).
 | 2 | `dda lock` (git commit + ledger), hash-chained append-only logs with a locked appender, spill files and a heads mirror; lock-state cache; real `lockguard`, `evidenceguard`, `rawguard`, `defguard` (path rules), `footercheck` (recomputable fields), `runlog` + heartbeat; unbound-access log; G4 | built |
 | 3 | Kernel runner with audit hook, native lockdown and reader wrappers, `dda meta`, variants with freeze-on-first-run, specs-tried ledger, and the orphan check (G6) | built |
 | 4 | `dda doctor` (interpreter, hooks, approver keys, workdir, heartbeat), signed approvals (`dda approve` / `dda approved`, approver chain, config approval at G4), footer approval fields | built |
-| 5–9 | `dda gitcheck`, full `footercheck` and `report` (5); definitions and content-hashed pins (6); goldfish review, `dda packet` / `dda review` (7); `dda verify` / `dda profile` (8); `correct` and `dda evals` (9). Gates G0–G3, G5, G7–G9 also arrive here | not built; commands fail closed (exit 3) |
+| 5 | `dda gitcheck`, full `footercheck` and `report` (5) | built |
+| 6 | `definitions`, `defguard`, and content-hashed pins; gate G1 (6) | built |
+| 7–9 | Goldfish review, `dda packet` / `dda review` (7); `dda verify` / `dda profile` (8); `correct` and `dda evals` (9). Gates G2–G3, G5, G7 also arrive here | not built; commands fail closed (exit 3) |
 
 The CLI is `dda` (pronounced "dee-dee-ay", short for disciplined data analysis).
 
