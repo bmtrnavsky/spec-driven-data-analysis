@@ -384,8 +384,10 @@ class TestVerify(P8Setup):
 class TestG7(P8Setup):
     def full_path(self):
         self.lock()
-        self.register_and_run()
+        # Lawful order (§10.3): snapshot BEFORE results exist, or G7 fails
+        # the profile-before-results backstop.
         self.assertEqual(self.cli("profile")[0], 0)
+        self.register_and_run()
         self.assertEqual(self.cli("verify")[0], 0)
 
     def self_rereads(self, rounds=("1", "2")):

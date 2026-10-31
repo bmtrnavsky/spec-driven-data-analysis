@@ -7,6 +7,7 @@ the answer", exclusions, and prior exposure stated; no inline formulas.
 from __future__ import annotations
 
 import re
+import unicodedata
 
 from .layout import Workdir, read_text_lf
 from . import lockhash
@@ -35,10 +36,16 @@ REQUIRED_SECTIONS = (
 # - function calls are generic (`name(` with no space): the old
 #   enumerated list let `stdev(`/`max(` through, and case let `MEAN(`
 #   through. A space before the paren (`abc (note)`) is prose, not a call.
+# - Unicode math operators are folded first: NFKC maps fullwidth `＝`/`／`
+#   (U+FF1D/U+FF0F, plus `＋`/`＊`/etc.) to ASCII, and the explicit arms
+#   below catch what NFKC leaves standing — U+2212 MINUS SIGN (NFKC keeps
+#   it), U+00D7 MULTIPLICATION SIGN, U+00F7 DIVISION SIGN. En/em dashes
+#   (U+2013/U+2014) are prose punctuation, deliberately NOT operators:
+#   `none — EXPLORE` must keep passing.
 _FORMULA_RE = re.compile(
-    r"=|/"
-    r"|(?<=[\w)\]])\s*[*+^]\s*(?=[\w(\[])"
-    r"|(?<=\w)\s+-\s*(?=\w)|(?<=\w)\s*-\s+(?=\w)"
+    r"=|[/÷]"
+    r"|(?<=[\w)\]])\s*[*+^×]\s*(?=[\w(\[])"
+    r"|(?<=\w)\s+[−-]\s*(?=\w)|(?<=\w)\s*[−-]\s+(?=\w)"
     r"|\b[a-z_][a-z0-9_]*\("
     r"|\b(?:sum|mean|avg|average|median|count|ratio|rate|cohort)\s*\(",
     re.IGNORECASE,
@@ -48,6 +55,16 @@ _FORMULA_RE = re.compile(
 # non-empty Metrics line must name a pin whatever its marker, so markers
 # carry no meaning here beyond whitespace.
 _MARKER_RE = re.compile(r"^(?:\s*(?:[-*+>•]|\d+[.)]|\[[ xX]\])\s*)+")
+
+
+def _has_formula(text: str) -> bool:
+    """True when `text` computes instead of citing (SPEC §7).
+
+    NFKC-fold first so fullwidth operators (U+FF1D `＝`, U+FF0F `／`,
+    U+FF0B/U+FF0A/...) cannot dodge the ASCII arms; the explicit
+    U+2212/U+00D7/U+00F7 arms catch what NFKC leaves standing.
+    """
+    return bool(_FORMULA_RE.search(unicodedata.normalize("NFKC", text)))
 
 
 def gate_g1(wd: Workdir) -> tuple[bool, str, dict]:
@@ -84,8 +101,28 @@ def gate_g1(wd: Workdir) -> tuple[bool, str, dict]:
         else:
             rest = lockhash.PIN_RE.sub("", stripped)
             body = _MARKER_RE.sub("", rest)
-            if _FORMULA_RE.search(body):
+            if _has_formula(body):
                 problems.append(f"G1 fail: inline formula in Metrics: {stripped[:60]}")
+        if len(problems) >= 6:
+            break
+    # Formulas do not become prose outside Metrics: a spec that computes in
+    # Method, Planned comparisons, or any other section fails G1 the same
+    # way (SPEC §7: "Specs cite pins only"). Metrics lines are already
+    # reported above, so they are skipped here to avoid double-counting.
+    # Residual: `and/or`, `pre/post`, `a-b` read as prose by the same arms
+    # that catch `orders / sessions` — authors must pin or reword.
+    for sec, sec_body in sections.items():
+        if sec == "Metrics":
+            continue
+        label = "preamble" if sec == lockhash.PREAMBLE else sec
+        for line in sec_body.split("\n"):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            rest = lockhash.PIN_RE.sub("", stripped)
+            if _has_formula(_MARKER_RE.sub("", rest)):
+                problems.append(f"G1 fail: inline formula in {label}: {stripped[:60]}")
+                break
         if len(problems) >= 6:
             break
     if problems:

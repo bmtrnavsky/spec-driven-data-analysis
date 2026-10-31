@@ -25,7 +25,7 @@ DECISION_NONE_RE = re.compile(r"\s*none\s*(?:\u2014|-|–)?:?\s*explore\s*$", re
 AUDIENCE_EXTERNAL_RE = re.compile(
     r"\b(external|public|client|customer|blog|publish|press|partner|regulator|stakeholder)\b",
     re.IGNORECASE)
-TOPIC_TRIGGER_RE = re.compile(r"\b(money|trad(?:e|ing)|health|medical|patient|diagnos(?:is|es))\b",
+TOPIC_TRIGGER_RE = re.compile(r"\b(money|trad(?:e|ing)|health(?:care|y)?|medical|patient(?:s)?|diagnos(?:is|es|tic)?|clinic(?:al)?|hospital(?:s)?|disease(?:s)?|drug(?:s)?|treatment(?:s)?)\b",
                               re.IGNORECASE)
 
 
@@ -331,6 +331,35 @@ def gate_g7(wd: Workdir) -> tuple[bool, str, dict]:
 f"({len(replays)} found, need 2): the specs-tried ledger is the binding record (§4.5)")
         _wayfinder(wd, "G7", False, msg)
         return False, msg, {}
+    # Profile-before-results (§10.3): the snapshot must predate analysis.
+    # Any original (non-replay) run recorded before the profile means
+    # results exist the snapshot cannot reproduce-from — `dda profile`
+    # must come before `dda run`, then re-verify. Two clocks because each
+    # alone has a blind spot: the asof stamp resolves to seconds (a run and
+    # a profile inside the same second compare equal), while the profile
+    # file mtime has sub-second resolution but is touchable — backdating
+    # it cannot clear the asof comparison, and touching it forward cannot
+    # clear either. Both must show the profile first.
+    from datetime import datetime as _dt, timezone as _tz
+    try:
+        _prof_ts = _dt.strptime(
+            str(prof.get("asof")), "%Y%m%dT%H%M%SZ").replace(tzinfo=_tz.utc).timestamp()
+    except (ValueError, TypeError):
+        _prof_ts = None
+    try:
+        _prof_mtime = (wd.analysis / "profile.json").stat().st_mtime
+    except OSError:
+        _prof_mtime = None
+    if _prof_ts is not None or _prof_mtime is not None:
+        _first_ts = [e.get("ts") for e in entries
+                     if not e.get("replay") and isinstance(e.get("ts"), (int, float))]
+        if _first_ts and any(min(_first_ts) < t for t in (_prof_ts, _prof_mtime)
+                             if isinstance(t, (int, float))):
+            msg = ("G7 fails: first analysis run predates the profile "
+                   "(results before snapshot, §10.3): run `dda profile` before "
+                   "`dda run`, then re-run `dda verify`")
+            _wayfinder(wd, "G7", False, msg)
+            return False, msg, {}
     # Overlay binding: the replay overlay must equal the profile snapshot map.
     from .matching import canon as _canon
     want_overlay: dict[str, str] = {}
