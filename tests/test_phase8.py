@@ -200,6 +200,19 @@ class P8Setup(unittest.TestCase):
         self.env["DDA_BASELINE_DIR"] = str(d)
         return d
 
+    def register_locked(self, vid="v1", script_body=None):
+        # Register + freeze the reported variant WITHOUT running it:
+        # for tests that need a locked variant but must not create
+        # results (a run needs a profile first, §10.3).
+        from ddalib import kernel
+        self.stub_baseline()
+        kernel.register_variant(self.wd, vid, why="baseline cut",
+                                header={"population": "all", "model": "diff"})
+        sp = self.wd.analysis / "variants" / f"{vid}.py"
+        sp.write_text(script_body or SCRIPT.format(root=self.raw.as_posix()), encoding="utf-8")
+        kernel.mark_locked(self.wd, vid)
+        return sp
+
     def register_and_run(self, vid="v1", script_body=None):
         from ddalib import kernel
         self.stub_baseline()
@@ -239,7 +252,7 @@ class TestFailClosed8(P8Setup):
 
     def test_verify_needs_profile(self):
         self.lock()
-        self.register_and_run()
+        self.register_locked()
         rc, out = self.cli("verify")
         self.assertNotEqual(rc, 0, out)
         self.assertIn("profile", out.lower())
@@ -310,8 +323,8 @@ class TestProfile(P8Setup):
 class TestG5(P8Setup):
     def full_path(self):
         self.lock()
-        self.register_and_run()
         self.assertEqual(self.cli("profile")[0], 0)
+        self.register_and_run()
 
     def test_g5_fails_without_profile(self):
         self.lock()
@@ -342,8 +355,8 @@ class TestG5(P8Setup):
 class TestVerify(P8Setup):
     def full_path(self, **kw):
         self.lock()
-        self.register_and_run(**kw)
         self.assertEqual(self.cli("profile")[0], 0)
+        self.register_and_run(**kw)
 
     def test_verify_replays_and_writes_evidence(self):
         self.full_path()
@@ -423,8 +436,8 @@ class TestG7(P8Setup):
 
     def test_g7_fails_without_verify(self):
         self.lock()
-        self.register_and_run()
         self.assertEqual(self.cli("profile")[0], 0)
+        self.register_and_run()
         rc, out = self.cli("gate", "G7")
         self.assertNotEqual(rc, 0, f"G7 passed with no verify.md: {out}")
 
@@ -440,8 +453,8 @@ class TestG7(P8Setup):
     def test_g7_decide_needs_goldfish_post_result(self):
         self.write_spec(tier="This is a DECIDE analysis.", decision="Ship v2 or roll back.")
         self.lock()
-        self.register_and_run()
         self.assertEqual(self.cli("profile")[0], 0)
+        self.register_and_run()
         self.assertEqual(self.cli("verify")[0], 0)
         rc, out = self.cli("gate", "G7")
         self.assertNotEqual(rc, 0, f"G7 passed DECIDE with no post-result review: {out}")
@@ -515,8 +528,8 @@ class TestEvals8(P8Setup):
 
     def test_no_cases_passes(self):
         self.lock()
-        self.register_and_run()
         self.assertEqual(self.cli("profile")[0], 0)
+        self.register_and_run()
         self.assertEqual(self.cli("verify")[0], 0)
         ev = (self.wd.analysis / "verify.md").read_text(encoding="utf-8")
         self.assertIn("0 matched", ev)
@@ -524,9 +537,9 @@ class TestEvals8(P8Setup):
     def test_matched_check_must_pass(self):
         from ddalib import stage8
         self.lock()
+        self.assertEqual(self.cli("profile")[0], 0)
         self.register_and_run()
         self.write_case(check="0" * 64)  # wrong hash: must fail
-        self.assertEqual(self.cli("profile")[0], 0)
         self.assertEqual(self.cli("verify")[0], 0)
         d = self.wd.root / "evals" / "corrections" / "001"
         matched = stage8.match_evals(self.wd)

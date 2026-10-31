@@ -90,7 +90,7 @@ POST_RESULT_ROUNDS = {
 # PUBLISH runs round 3 twice (the "second goldfish", §5.0 independence).
 SECOND_GOLDFISH_ROUND = "3b"
 
-ROUND_LINE_RE = re.compile(r"^ROUND\s+([0-9]+[a-z]?)\s*:\s*(PASS|FAIL)\b(.*)$", re.IGNORECASE)
+ROUND_LINE_RE = re.compile(r"^ROUND\s+([0-9]+[a-z]?(?:@\d+)?)\s*:\s*(PASS|FAIL)\b(.*)$", re.IGNORECASE)
 
 
 def normalize_stage(stage: str) -> str:
@@ -483,6 +483,15 @@ def do_review_run(wd: Workdir, stage: str, round_: str | None = None,
                        f"(rounds {', '.join(rounds)} go in reviews/self/ as `self`, §5.3)")
     if round_ is not None:
         rn = round_.strip().lower()
+        if rn not in rounds and stage == "teardown":
+            # Epoch round re-due after a post-data amendment at DECIDE+
+            # (lineage.due_teardown_rounds): only rounds 1/3 in the current
+            # epoch are runnable as `1@N` / `3@N`.
+            from . import lockstate as _lockstate
+            cur_v = (_lockstate.read_lock(wd) or {}).get("version")
+            m = re.fullmatch(r"([13])@(\d+)", rn)
+            if m and isinstance(cur_v, int) and int(m.group(2)) == cur_v:
+                rounds = [*rounds, rn]
         if rn not in rounds:
             raise DdaError(f"round {round_!r} is not in the {comp.tier} {stage} round list "
                            f"({', '.join(rounds)})")
@@ -494,15 +503,33 @@ def do_review_run(wd: Workdir, stage: str, round_: str | None = None,
                        f"{(manifest.get('spec_hash') or '')[:12]} but the spec is now "
                        f"{comp.spec_hash[:12]}; re-run `dda packet {stage}` before review")
     model = model or (cfg["models"][0] if cfg["models"] else DEFAULT_MODEL)
-    prior = [c for c in existing_calls(wd, stage) if c.get("spec_hash") == comp.spec_hash]
+    # Lineage-wide re-run cap (M2): at most one re-run per round across ALL
+    # spec versions in the lineage — an amendment never resets it.
+    prior = existing_calls(wd, stage)
     for r in rounds:
-        if sum(1 for c in prior if c.get("round") == r) >= 2:
-            raise DdaError(f"round {r} already ran twice for this spec — fix the spec or report, "
+        if sum(1 for c in prior if str(c.get("round")) == r) >= 2:
+            raise DdaError(f"round {r} already ran twice in this lineage — fix the spec or report, "
                            "re-run only the failed round, at most once per round. "
+                           "An amendment does not reset the re-run limit (§5.0). "
                            "A second failure is stop-and-ask (§3.2 case 4, §5.3)")
     brief = build_brief(stage, rounds)
     brief_hash = lockhash.sha256_hex(brief.encode())
     stub = _stub_verdict()
+    if stub is None and not os.environ.get(cfg["key_env"]):
+        # No provider key: below PUBLISH this degrades to self re-reads with
+        # a footer caveat; at PUBLISH the analysis parks (§5.0 Fallback).
+        # The degrade is a lineage event, and only counts when recorded
+        # before any goldfish call (lineage view: degraded).
+        if comp.tier != "PUBLISH":
+            from . import lineage as _lineage
+            from . import lockstate as _lockstate
+            _lineage.stage_event(wd, "degrade", lock_hash=comp.lock_hash,
+                                 version=(_lockstate.read_lock(wd) or {}).get("version"),
+                                 stage=stage, rounds=list(rounds),
+                                 reason=f"no provider key ({cfg['key_env']} unset)")
+        raise DdaError(f"no provider key reachable ({cfg['key_env']} is unset and no vault entry); "
+                       "goldfish rounds cannot run — below PUBLISH they degrade to self re-reads "
+                       "with a footer caveat; at PUBLISH the analysis parks (§5.0 Fallback)")
     if stub is not None:
         text, rid_base = _stub_response(rounds, stub)
         tin = estimate_tokens((brief).encode())
@@ -548,6 +575,14 @@ def do_review_run(wd: Workdir, stage: str, round_: str | None = None,
                       "spec_hash": comp.spec_hash,
                       "packet_hash": manifest["packet_hash"], "request": rec["provider_request_id"],
                       "model": model})
+        from . import lineage as _lineage
+        from . import lockstate as _lockstate
+        _lineage.stage_event(wd, "review", lock_hash=comp.lock_hash,
+                             version=(_lockstate.read_lock(wd) or {}).get("version"),
+                             kind="goldfish", stage=stage, round=r, review_seq=call_seq,
+                             verdict=rec["verdict"], spec_hash=comp.spec_hash,
+                             packet_hash=manifest["packet_hash"],
+                             request=rec["provider_request_id"], model=model)
         with open(base / f"{stage}.md", "a", encoding="utf-8", newline="\n") as fh:
             fh.write(f"- round {r} seq {call_seq}: {rec['verdict']} "
                      f"(req {rec['provider_request_id']}, model {model}, packet "

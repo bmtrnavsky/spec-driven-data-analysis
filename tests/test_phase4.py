@@ -316,7 +316,7 @@ class ReleasedExposureTests(Base):
         self.assertNotIn(self.wd.id, reg["workdirs"])
         binding.start(other, "hop")
         self.log_call(other, "hop", "b1")  # session seen in B: hop attribution applies
-        exp = ledger.exposure(other, ["sales"], None, None)
+        exp = ledger.exposure(other, ["sales"], None)
         self.assertTrue(exp["session_history"], "released reads must stay visible via session_history")
         self.assertIn("post-data", ledger.label_for(exp, "none known"))
 
@@ -330,7 +330,7 @@ class ReleasedExposureTests(Base):
         self.assertIn(self.wd.id, reg["released"])
         binding.start(other, "hop-a")
         self.log_call(other, "hop-a", "b1")
-        exp = ledger.exposure(other, ["sales"], None, None)
+        exp = ledger.exposure(other, ["sales"], None)
         self.assertTrue(exp["session_history"])
         self.assertIn("post-data", ledger.label_for(exp, "none known"))
 
@@ -350,7 +350,7 @@ class ReleasedExposureTests(Base):
         self.assertEqual(rc, 0, err)
         binding.start(b, "so")
         self.log_call(b, "so", "b1")
-        exp = ledger.exposure(b, ["sales"], None, None)
+        exp = ledger.exposure(b, ["sales"], None)
         self.assertFalse(exp["other_workdirs"])
         self.assertTrue(exp["session_history"], "rootless hop must attribute via session_history")
         self.assertIn("post-data", ledger.label_for(exp, "none known"))
@@ -365,7 +365,7 @@ class ReleasedExposureTests(Base):
         other = self.second_workdir("wd2")
         binding.start(other, "so")
         self.log_read(other, "so", "rb1")
-        exp = ledger.exposure(other, ["sales"], None, None)
+        exp = ledger.exposure(other, ["sales"], None)
         kinds = [f.get("kind") for f in exp["session_history"]]
         self.assertIn("release", kinds, "release-line attribution must name the session")
         self.assertIn("post-data", ledger.label_for(exp, "none known"))
@@ -380,7 +380,7 @@ class ReleasedExposureTests(Base):
         other = self.second_workdir("wd2")
         binding.start(other, "fresh")
         self.log_call(other, "fresh", "b1")
-        exp = ledger.exposure(other, ["sales"], None, None)
+        exp = ledger.exposure(other, ["sales"], None)
         self.assertFalse(exp["session_history"])
         self.assertTrue(exp["other_workdirs"])
         self.assertIn("post-data", ledger.label_for(exp, "none known"))
@@ -389,7 +389,7 @@ class ReleasedExposureTests(Base):
         other = self.second_workdir("wd2")
         binding.start(other, "fresh")
         self.log_call(other, "fresh", "b1")
-        exp = ledger.exposure(other, ["sales"], None, None)
+        exp = ledger.exposure(other, ["sales"], None)
         self.assertFalse(exp["session_history"])
         self.assertFalse(exp["other_workdirs"])
         self.assertEqual(ledger.label_for(exp, "none known"), "pre-data")
@@ -402,7 +402,7 @@ class ReleasedExposureTests(Base):
         other = self.second_workdir("wd2")
         binding.start(other, "del")
         self.log_call(other, "del", "b1")
-        exp = ledger.exposure(other, ["sales"], None, None)
+        exp = ledger.exposure(other, ["sales"], None)
         self.assertFalse(exp["session_history"])
         self.assertEqual(ledger.label_for(exp, "none known"), "pre-data")
 

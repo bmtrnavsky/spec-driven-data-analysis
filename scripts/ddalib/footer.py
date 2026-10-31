@@ -25,7 +25,13 @@ from .layout import Workdir, read_text_lf
 def review_summary(wd: Workdir) -> str:
     """One-line review state for the footer skeleton: recorded goldfish calls
     (request ids + models) or recorded self re-reads, else none. Imported
-    lazily by footer to avoid a cycle (review imports ledger only)."""
+    lazily by footer to avoid a cycle (review imports ledger only).
+
+    Self re-reads are files, not lineage events, so presence here is a
+    content read (non-blank body counts) — no filesystem stat, no mtimes.
+    Round names accept the ``@N`` epoch suffix re-due after a post-data
+    amendment (M2), matching the gate's own round matching.
+    """
     from . import review as _review
     try:
         summary = _review.review_summary(wd)
@@ -37,8 +43,14 @@ def review_summary(wd: Workdir) -> str:
             rounds = set()
             if selfdir.is_dir():
                 for p in selfdir.glob(f"{stage}-round*.md"):
-                    m = re.match(rf"^{stage}-round([0-9]+[a-z]?)(?:-.*)?\.md$", p.name)
-                    if m and p.stat().st_size > 0:
+                    m = re.match(rf"^{stage}-round([0-9]+[a-z]?(?:@\d+)?)(?:-.*)?\.md$", p.name)
+                    if not m:
+                        continue
+                    try:
+                        body = p.read_text(encoding="utf-8")
+                    except OSError:
+                        continue
+                    if body.strip():
                         rounds.add(m.group(1))
             if rounds:
                 tag = f"post-result self re-reads" if label else "self re-reads"

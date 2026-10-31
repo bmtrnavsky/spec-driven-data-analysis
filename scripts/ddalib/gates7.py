@@ -26,7 +26,7 @@ def _self_rounds(wd: Workdir, stage: str) -> set[str]:
         return rounds
     import re
     for p in d.glob(f"{stage}-round*.md"):
-        m = re.match(rf"^{re.escape(stage)}-round([0-9]+[a-z]?)(?:-.*)?\.md$", p.name)
+        m = re.match(rf"^{re.escape(stage)}-round([0-9]+[a-z]?(?:@\d+)?)(?:-.*)?\.md$", p.name)
         try:
             if m and p.stat().st_size > 0:
                 rounds.add(m.group(1))
@@ -35,19 +35,23 @@ def _self_rounds(wd: Workdir, stage: str) -> set[str]:
     return rounds
 
 
-def goldfish_calls_gate(wd: Workdir, stage: str, spec_hash: str,
+def goldfish_calls_gate(wd: Workdir, stage: str,
                         calls: list[dict], rounds: list[str]
                         ) -> tuple[list[str], list[str]]:
     """Shared goldfish binding checks for a review stage (§5.0 Recording).
 
-    Every call must match a runs.log entry (no forged records), name a
-    packet whose manifest binds the same stage + spec, run at most twice
-    per round, end on a pass, and have earlier-round objections answered
-    in the matching self response file. Used by G3 (teardown) and G7
-    (post-result).
+    Lineage-wide (M2): `calls` spans every spec version in the lineage, the
+    at-most-once re-run cap counts across epochs (an amendment never resets
+    it), and each packet must bind the calling record's own spec. Every
+    call must match a runs.log entry (no forged records), end on a pass,
+    and have earlier-round objections — including failures from earlier
+    epochs, which stay visible — answered in the matching self response
+    file. `rounds` may name epoch rounds (``1@N``) re-due after a post-data
+    amendment. Used by G3 (teardown) and G7 (post-result).
     """
     from . import chain as _chain
     from . import ledger as _ledger
+    from . import lineage as _lineage
     from .review import packets_dir as _packets_dir
     import json as _json
     problems: list[str] = []
@@ -57,8 +61,7 @@ def goldfish_calls_gate(wd: Workdir, stage: str, spec_hash: str,
     except Exception:
         _chain_recs = []
     _chain_revs = [e for e in _chain_recs
-                   if e.get("kind") == "goldfish" and e.get("stage") == stage
-                   and e.get("spec_hash") == spec_hash]
+                   if e.get("kind") == "goldfish" and e.get("stage") == stage]
 
     def _bound(call: dict) -> bool:
         for e in _chain_revs:
@@ -78,11 +81,13 @@ def goldfish_calls_gate(wd: Workdir, stage: str, spec_hash: str,
                 return True
         return False
 
-    _seen_packets: dict[str, bool] = {}
+    _seen_packets: dict[tuple[str, str], bool] = {}
 
-    def _packet_ok(packet_hash: str) -> bool:
-        if packet_hash in _seen_packets:
-            return _seen_packets[packet_hash]
+    def _packet_ok(call: dict) -> bool:
+        packet_hash = str(call.get("packet_hash") or "")
+        key = (packet_hash, str(call.get("spec_hash") or ""))
+        if key in _seen_packets:
+            return _seen_packets[key]
         ok = False
         if packet_hash:
             man_path = _packets_dir(wd) / packet_hash / "manifest.json"
@@ -91,8 +96,9 @@ def goldfish_calls_gate(wd: Workdir, stage: str, spec_hash: str,
             except (OSError, ValueError):
                 man = None
             ok = (isinstance(man, dict) and man.get("packet_hash") == packet_hash
-                  and man.get("stage") == stage and man.get("spec_hash") == spec_hash)
-        _seen_packets[packet_hash] = ok
+                  and man.get("stage") == stage
+                  and man.get("spec_hash") == call.get("spec_hash"))
+        _seen_packets[key] = ok
         return ok
 
     by_round: dict[str, list[dict]] = {}
@@ -102,6 +108,7 @@ def goldfish_calls_gate(wd: Workdir, stage: str, spec_hash: str,
         rs.sort(key=lambda c: int(c.get("seq") or 0))
 
     for r in rounds:
+        base = _lineage.base_round(r)
         rs = by_round.get(r, [])
         if not rs:
             problems.append(f"no goldfish call for round {r} "
@@ -113,33 +120,40 @@ def goldfish_calls_gate(wd: Workdir, stage: str, spec_hash: str,
                                 f"{c.get('provider_request_id')}) has no matching "
                                 f"runs.log entry — forged or unlogged review records "
                                 f"do not count (§5.0 Recording)")
-            elif not _packet_ok(str(c.get("packet_hash") or "")):
+            elif not _packet_ok(c):
                 problems.append(f"round {r}: packet {str(c.get('packet_hash') or '')[:12]} "
                                 f"missing or manifest mismatch — re-run "
                                 f"`dda packet {stage}` before review (§5.0)")
         if len(rs) > 2:
-            problems.append(f"round {r} ran {len(rs)} times for this spec — goldfish "
-                            "shopping: at most once re-run per round (§5.0)")
+            problems.append(f"round {r} ran {len(rs)} times in this lineage — goldfish "
+                            "shopping: at most one re-run per round, across amendments (§5.0)")
             continue
         if rs[-1].get("verdict") != "pass":
             problems.append(f"round {r}: latest call {rs[-1].get('provider_request_id')} "
                             f"is {rs[-1].get('verdict')} — fix the spec and re-run only "
                             "that round, at most once")
             continue
-        for earlier in rs[:-1]:
-            if earlier.get("verdict") in ("pass",):
-                continue
-            resp = self_response_path(wd, stage, r)
-            try:
-                body = resp.read_text(encoding="utf-8")
-            except OSError:
-                body = ""
-            rid = str(earlier.get("provider_request_id") or "")
+        # Earlier failures stay visible and must be answered: same-base-round
+        # objections from any epoch — including sibling epoch rounds — need
+        # a recorded answer in this round's self response file.
+        earlier = [c for c in rs[:-1] if c.get("verdict") != "pass"]
+        for c in calls:
+            if (c not in rs and _lineage.base_round(str(c.get("round"))) == base
+                    and c.get("verdict") != "pass"):
+                earlier.append(c)
+        resp = self_response_path(wd, stage, r)
+        try:
+            body = resp.read_text(encoding="utf-8")
+        except OSError:
+            body = ""
+        for fail in earlier:
+            rid = str(fail.get("provider_request_id") or "")
+            where = f"spec {(str(fail.get('spec_hash')) or '')[:12]}"
             if not rid or rid not in body:
-                problems.append(f"round {r}: earlier call {rid or '?'} raised objections "
+                problems.append(f"round {r}: earlier call {rid or '?'} ({where}) raised objections "
                                 f"with no recorded answer in {resp.relative_to(wd.root).as_posix()}")
             else:
-                notes.append(f"round {r}: earlier {rid} objections answered")
+                notes.append(f"round {r}: earlier {rid} ({where}) objections answered")
     return problems, notes
 
 
@@ -151,14 +165,17 @@ def gate_g3(wd: Workdir) -> tuple[bool, str, dict]:
         comp = lockhash.compute(wd)
     except DdaError as exc:
         return False, f"G3 fail: {exc}", {}
-    spec_hash = comp.spec_hash
+    from . import lineage as _lineage
     try:
-        rounds, need_goldfish = rounds_for(STAGE, comp.tier, comp.rung)
+        # Epoch rounds: a post-data amendment at DECIDE+ re-dues rounds 1
+        # and 3 as new rounds 1@N / 3@N (M2).
+        rounds, need_goldfish = _lineage.due_teardown_rounds(wd, comp)
     except DdaError as exc:
         return False, f"G3 fail: {exc}", {}
     problems: list[str] = []
     notes: list[str] = [f"tier {comp.tier}, rung {comp.rung}, rounds {','.join(rounds)}"]
-    calls = [c for c in existing_calls(wd, STAGE) if c.get("spec_hash") == spec_hash]
+    # Lineage-wide (M2): every epoch counts toward the cap and the pass.
+    calls = existing_calls(wd, STAGE)
     has_history = bool(calls)
     by_round: dict[str, list[dict]] = {}
     for c in calls:
@@ -185,14 +202,15 @@ def gate_g3(wd: Workdir) -> tuple[bool, str, dict]:
             else:
                 notes.append("no provider key: degraded to self re-reads with footer caveat (§5.0)")
     else:
-        probs, nts = goldfish_calls_gate(wd, STAGE, spec_hash, calls, rounds)
+        probs, nts = goldfish_calls_gate(wd, STAGE, calls, rounds)
         problems.extend(probs)
         notes.extend(nts)
-        by_round: dict[str, list[dict]] = {}
+        by_round = {}
         for c in calls:
             by_round.setdefault(str(c.get("round")), []).append(c)
         if comp.tier == "PUBLISH":
-            r3 = (by_round.get("3") or [{}])[-1]
+            due3 = next((r for r in rounds if _lineage.base_round(r) == "3" and r != "3b"), "3")
+            r3 = (by_round.get(due3) or [{}])[-1]
             r3b = (by_round.get("3b") or [{}])[-1]
             if r3.get("verdict") == "pass" and r3b.get("verdict") == "pass":
                 if r3.get("model") != r3b.get("model"):

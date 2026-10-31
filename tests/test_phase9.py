@@ -120,6 +120,7 @@ class TestEvalsMatchRun(P9Setup):
     def test_run_passes_on_correct_hash(self):
         import hashlib
         self.lock()
+        self.assertEqual(self.cli("profile")[0], 0)
         self.register_and_run()
         blob = (self.wd.root / "outputs" / "summary.csv").read_bytes()
         self.write_bound_case(check=hashlib.sha256(blob).hexdigest())

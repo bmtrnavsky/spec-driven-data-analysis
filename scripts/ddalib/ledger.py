@@ -56,7 +56,9 @@ def heartbeat_log(session_id: str) -> Path:
 
 
 def workdir_chains(wd: Workdir) -> list[Path]:
-    out = [runs_log(wd), audit_log(wd), wd.analysis / "ledger.md", specs_tried(wd), approvals_index(wd)]
+    from .lineage import lineage_log
+    out = [runs_log(wd), audit_log(wd), wd.analysis / "ledger.md", specs_tried(wd), approvals_index(wd),
+           lineage_log(wd)]
     ms = wd.analysis / "milestones"
     if ms.is_dir():
         out += sorted(p / "ledger.md" for p in ms.iterdir() if p.is_dir())
@@ -166,14 +168,15 @@ def _scan_workdirs() -> dict:
     return workdirs
 
 
-def exposure(wd: Workdir, aliases: list[str], watermarks: dict | None, locked_ts: float | None) -> dict:
+def exposure(wd: Workdir, aliases: list[str], watermarks: dict | None) -> dict:
     """Reads of `aliases` attributable to this workdir, plus hopping signals.
 
     watermarks None = scan everything (a lock being made now). With the lock's
     watermarks (G4): runs/audit scan only lines up to the lock; the unbound
     log skips lines the lock already judged (only newer lines count); the
-    session-history and rebind scans have no upper bound, because a hop after
-    the lock is the laundering case."""
+    other-workdirs, session-history and rebind scans have no upper bound,
+    because a hop after the lock is the laundering case. Ordering is chain
+    seq only — never timestamps (M2)."""
     al = set(aliases)
     wm = watermarks or {}
     found = {"runs": [], "audit": [], "unbound": [], "other_workdirs": [],
@@ -221,8 +224,6 @@ def exposure(wd: Workdir, aliases: list[str], watermarks: dict | None, locked_ts
         if not overlap:
             continue
         for rec in chain.read_records(Path(w["path"]) / ".analysis" / "runs.log"):
-            if locked_ts is not None and rec.get("ts", 0) > locked_ts:
-                break
             if rec.get("type") == "done" and rec.get("kind") == "data" and overlap & set(rec.get("aliases") or []):
                 found["other_workdirs"].append({"workdir": w["path"], "seq": rec.get("seq"),
                                                 "session": rec.get("session"), "aliases": rec.get("aliases")})
@@ -464,6 +465,10 @@ def _git_safety_evidence(wd: Workdir, lock: dict | None) -> set[str]:
     # Stage 5/7 evidence: dda's own committed records (like runs.log and
     # specs-tried.jsonl above), so G9 stays satisfiable once a profile or
     # verify run exists. Still content-scanned for secrets like the rest.
+    # The lineage chain (M2) is the same kind of record: its .jsonl suffix
+    # would otherwise trip the data-format check.
+    from .lineage import lineage_log
+    add(lineage_log(wd))
     add(wd.analysis / "profile.json")
     add(wd.analysis / "verify.json")
     for chained in workdir_chains(wd):
@@ -743,7 +748,7 @@ def do_lock(wd: Workdir, amend: str | None = None) -> dict:
         raise DdaError("nothing to amend: no lock yet; run `dda lock`")
 
     version = (last.get("version", 0) if last else 0) + 1
-    found = exposure(wd, comp.aliases, None, None)
+    found = exposure(wd, comp.aliases, None)
     label = label_for(found, prior)
     locked_ts = time.time()
     watermarks = {"runs": _last_seq(runs_log(wd)), "audit": _last_seq(audit_log(wd)), "unbound": _last_seq(unbound_log())}
@@ -780,6 +785,10 @@ def do_lock(wd: Workdir, amend: str | None = None) -> dict:
         "label": label, "post_data": label.startswith("post-data"), "reason": amend, "watermarks": watermarks,
         "exposure": summary, "spec_file": f"specs/v{version}.md", "tier": comp.tier, "rung": comp.rung,
     })
+    from . import lineage as _lineage
+    _lineage.stage_event(wd, "amendment" if existing else "lock",
+                         lock_hash=comp.lock_hash, version=version, label=label,
+                         reason=amend, tier=comp.tier, rung=comp.rung)
     with open(wd.lock_path, "w", encoding="utf-8", newline="\n") as fh:
         json.dump(lock, fh, indent=2, sort_keys=True)
         fh.write("\n")
@@ -955,7 +964,7 @@ def gate_g4(wd: Workdir) -> tuple[bool, str, dict]:
     problems, merged = verify_all(wd)
     if problems:
         return False, "evidence chain: " + "; ".join(problems), {}
-    found = exposure(wd, lock["aliases"], lock.get("watermarks"), lock.get("locked_ts"))
+    found = exposure(wd, lock["aliases"], lock.get("watermarks"))
     prior = lockhash.parse_sections(read_text_lf(wd.spec_path)).get("Prior exposure", "")
     recomputed = label_for(found, prior)
     eff = lockstate.worst_label(ledger_summary(wd)["effective_label"], recomputed)

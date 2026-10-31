@@ -264,8 +264,16 @@ class TestF4ProfileBeforeResults(Base):
                 encoding="utf-8")
 
     def test_g7_fails_when_first_run_predates_profile(self):
+        # The kernel refuses a run before any profile exists (§10.3), so
+        # the only way results can predate the profile the verify replays
+        # against is across an amendment: v1 results, then amend and
+        # re-profile. G7 must fail, and a second amendment must not clear it.
         self.cli("lock", str(self.wd.root))
-        self._run_first_variant()  # results BEFORE any snapshot
+        self.assertEqual(self.cli("profile")[0], 0)
+        self._run_first_variant()  # results under v1
+        spec = self.wd.spec_path
+        spec.write_text(spec.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+        self.assertEqual(self.cli("lock", str(self.wd.root), "--amend", "whitespace")[0], 0)
         self.assertEqual(self.cli("profile")[0], 0)
         self.assertEqual(self.cli("verify")[0], 0)
         self._self_rereads()

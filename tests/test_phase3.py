@@ -169,7 +169,7 @@ class HoppingTests(Base):
         rc, _, err = self.cli("start", str(other.root), "--session", "dummy")
         self.assertEqual(rc, 0, err)
         self._log_read(other, "hopper", self.raw / "orders.csv")
-        found = ledger.exposure(self.wd, ["sales"], None, None)
+        found = ledger.exposure(self.wd, ["sales"], None)
         self.assertTrue(found["session_history"], found)
         self.assertEqual(ledger.label_for(found, "none known"), "post-data (unbound access)")
 
@@ -180,7 +180,7 @@ class HoppingTests(Base):
                                     f"    paths: [\"{self.raw.as_posix()}\"]\n")
         from ddalib import binding as _b
         _b.start(other, "rb", rebind=True)
-        found = ledger.exposure(self.wd, ["sales"], None, None)
+        found = ledger.exposure(self.wd, ["sales"], None)
         self.assertTrue(found["rebind"], found)
         self.assertEqual(ledger.label_for(found, "none known"), "post-data (unbound access)")
 
@@ -190,7 +190,7 @@ class HoppingTests(Base):
                                     f"    paths: [\"{self.raw.as_posix()}\"]\n")
         from ddalib import binding as _b
         _b.start(other, "clean", rebind=True)
-        found = ledger.exposure(self.wd, ["sales"], None, None)
+        found = ledger.exposure(self.wd, ["sales"], None)
         self.assertFalse(found["rebind"])
         self.assertFalse(found["session_history"])
 
@@ -225,7 +225,7 @@ class BlockedKindTests(Base):
         self.assertTrue(recs)
         self.assertEqual(recs[-1]["kind"], "blocked")
         self.assertEqual(recs[-1]["aliases"], [])
-        found = ledger.exposure(self.wd, ["sales"], None, None)
+        found = ledger.exposure(self.wd, ["sales"], None)
         self.assertFalse(found["runs"], "blocked attempts must not count as exposure")
 
 
@@ -246,7 +246,7 @@ class UnboundWatermarkTests(Base):
         self.assertNotIn("unbound sessions", first[1])
         # Second G4 with no new unbound lines: watermarked lines are not re-reported.
         lock = __import__("ddalib.lockstate", fromlist=["read_lock"]).read_lock(self.wd)
-        found = ledger.exposure(self.wd, lock["aliases"], lock.get("watermarks"), lock.get("locked_ts"))
+        found = ledger.exposure(self.wd, lock["aliases"], lock.get("watermarks"))
         self.assertFalse(found["unbound"], "pre-lock unbound lines must fall under the watermark at G4")
 
 

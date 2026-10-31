@@ -342,6 +342,9 @@ def do_profile(wd: Workdir) -> dict:
     (wd.analysis / PROFILE_JSON).write_text(json.dumps(rec, indent=2, sort_keys=True) + "\n",
                                             encoding="utf-8")
     (wd.analysis / PROFILE_MD).write_text(render_profile_md(wd, rec), encoding="utf-8")
+    from . import lineage as _lineage
+    _lineage.stage_event(wd, "profile", lock_hash=comp.lock_hash,
+                         version=lock.get("version"), asof=asof)
     return rec
 
 
@@ -841,6 +844,9 @@ def do_verify(wd: Workdir) -> dict:
     (wd.analysis / VERIFY_JSON).write_text(json.dumps(rec, indent=2, sort_keys=True) + "\n",
                                           encoding="utf-8")
     (wd.analysis / VERIFY_MD).write_text(render_verify_md(wd, rec), encoding="utf-8")
+    from . import lineage as _lineage
+    _lineage.stage_event(wd, "verify", lock_hash=comp.lock_hash,
+                         version=lock.get("version"), variant=vid, status=status)
     import shutil
     shutil.rmtree(tmp, ignore_errors=True)
     return rec

@@ -230,7 +230,8 @@ def _goldfish_gate(wd: Workdir, comp, spec_hash: str) -> tuple[bool, str, dict]:
     except DdaError as exc:
         return False, f"bad tier/rung for post-result rounds: {exc}", {}
     notes = [f"tier {comp.tier}, rung {comp.rung}, rounds {','.join(rounds)}"]
-    calls = [c for c in review.existing_calls(wd, stage) if c.get("spec_hash") == spec_hash]
+    # Lineage-wide (M2): every epoch counts toward the cap and the pass.
+    calls = review.existing_calls(wd, stage)
     if not need_goldfish:
         ok, msg, _ = _self_gate(wd, stage, rounds)
         return (True, f"{'; '.join(notes)}; {msg}", {"due": rounds}) if ok else (False, msg, {"due": rounds})
@@ -243,7 +244,7 @@ def _goldfish_gate(wd: Workdir, comp, spec_hash: str) -> tuple[bool, str, dict]:
             return False, (f"no goldfish provider key reachable and {msg} "
                            "(footer must carry the caveat, §5.0)"), {"due": rounds}
         return True, f"{'; '.join(notes)}; no provider key: degraded to self re-reads with footer caveat (§5.0)", {"due": rounds}
-    probs, nts = goldfish_calls_gate(wd, stage, spec_hash, calls, rounds)
+    probs, nts = goldfish_calls_gate(wd, stage, calls, rounds)
     notes.extend(nts)
     if probs:
         return False, "; ".join(probs[:6]), {"due": rounds}
@@ -292,34 +293,20 @@ def gate_g7(wd: Workdir) -> tuple[bool, str, dict]:
         msg = ("verify evidence names replays with no matching successful run entries "
 f"({len(replays)} found, need 2): the specs-tried ledger is the binding record (§4.5)")
         return False, msg, {}
-    # Profile-before-results (§10.3): the snapshot must predate analysis.
-    # Any original (non-replay) run recorded before the profile means
-    # results exist the snapshot cannot reproduce-from — `dda profile`
-    # must come before `dda run`, then re-verify. Two clocks because each
-    # alone has a blind spot: the asof stamp resolves to seconds (a run and
-    # a profile inside the same second compare equal), while the profile
-    # file mtime has sub-second resolution but is touchable — backdating
-    # it cannot clear the asof comparison, and touching it forward cannot
-    # clear either. Both must show the profile first.
-    from datetime import datetime as _dt, timezone as _tz
-    try:
-        _prof_ts = _dt.strptime(
-            str(prof.get("asof")), "%Y%m%dT%H%M%SZ").replace(tzinfo=_tz.utc).timestamp()
-    except (ValueError, TypeError):
-        _prof_ts = None
-    try:
-        _prof_mtime = (wd.analysis / "profile.json").stat().st_mtime
-    except OSError:
-        _prof_mtime = None
-    if _prof_ts is not None or _prof_mtime is not None:
-        _first_ts = [e.get("ts") for e in entries
-                     if not e.get("replay") and isinstance(e.get("ts"), (int, float))]
-        if _first_ts and any(min(_first_ts) < t for t in (_prof_ts, _prof_mtime)
-                             if isinstance(t, (int, float))):
-            msg = ("G7 fails: first analysis run predates the profile "
-                   "(results before snapshot, §10.3): run `dda profile` before "
-                   "`dda run`, then re-run `dda verify`")
-            return False, msg, {}
+    # Profile-before-results (§10.3), lineage-ordered (M2): the snapshot must
+    # predate analysis. Sticky: once any non-replay data run precedes the
+    # profile the verify replays against, the lineage carries the
+    # profile-after-results label — a later amendment and re-profile cannot
+    # clear it (chain seq only; no timestamps, no mtimes).
+    from . import lineage as _lineage
+    lin = _lineage.lineage(wd)
+    if lin["results_seen_before_profile"]:
+        msg = (f"G7 fails: results were seen before the profile the verify replays against "
+               f"(profile-after-results lineage {str(lin['lineage_id'] or '')[:12]}: first data run "
+               f"at lineage seq {lin['first_run_seq']} precedes profile seq {lin['results_profile_seq']} "
+               f"(lock {str(lin['results_profile_lock_hash'] or '')[:12]})): run `dda profile` before "
+               "`dda run`, then re-run `dda verify` (§10.3)")
+        return False, msg, {"lineage_id": lin["lineage_id"]}
     # Overlay binding: the replay overlay must equal the profile snapshot map.
     from .matching import canon as _canon
     want_overlay: dict[str, str] = {}

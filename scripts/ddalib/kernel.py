@@ -478,6 +478,12 @@ def do_run(wd: Workdir, vid: str, script: str, script_args: list[str], *, sessio
         raise DdaError(f"variant {vid!r} is frozen with body {frozen[:12]} but the script now hashes "
                        f"{body_hash[:12]}; a changed script is a new variant id (§4.3)")
     lock_hash = lock["lock_hash"]
+    from . import stage8 as _stage8
+    prof = _stage8.load_profile(wd)
+    if prof is None or prof.get("lock_hash") != lock_hash:
+        raise DdaError(f"no profile for the current lock (lock v{lock.get('version')} "
+                       f"{lock_hash[:12]}): run `dda profile` before `dda run` — snapshots "
+                       "must predate analysis results (§10.3)")
     run_seed = int(seed) if seed is not None else _default_seed(lock_hash, vid)
     run_id = hashlib.sha256(f"{lock_hash}:{vid}:{body_hash}:{time.time_ns()}".encode()).hexdigest()[:12]
     code_hash, blob_ptr = _hooks.write_blob(wd, body_text)
@@ -657,6 +663,10 @@ def do_run(wd: Workdir, vid: str, script: str, script_args: list[str], *, sessio
                                       "call": run_id, "aliases": sorted(lock["aliases"]), "kind": "data",
                                       "variant": vid, "code_hash": code_hash, "blob": blob_ptr,
                                       "kernel": f"runs/kernels/{run_id}.json"})
+    from . import lineage as _lineage
+    _lineage.stage_event(wd, "run", lock_hash=lock_hash, version=lock.get("version"),
+                         variant=vid, run_id=run_id, body_hash=body_hash,
+                         replay=bool(overlay), returncode=proc.returncode)
     # Import the child's IPC events into the audit log through the locked
     # appender — the only path kernel audit traffic takes into evidence.
     # kernel-start/stop ride along; if the child died before logging its

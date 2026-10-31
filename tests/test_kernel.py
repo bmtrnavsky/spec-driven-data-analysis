@@ -151,6 +151,12 @@ class Base(unittest.TestCase):
         return kernel.register_variant(self.wd, vid, parent=d.get("parent"),
                                        why=d["why"], label=d.get("label"), header=d["header"])
 
+    def profile(self):
+        # Lawful order (§10.3): `dda run` refuses without a snapshot for
+        # the current lock, so every test that runs profiles first.
+        from ddalib import stage8
+        return stage8.do_profile(self.wd)
+
     def stub_baseline(self, broken: str | None = None):
         """Host-independent stub stack via DDA_BASELINE_DIR.
 
@@ -275,6 +281,7 @@ class TestKernelRun(Base):
         # the startup check must refuse even where the real stack exists.
         self.stub_baseline(broken="duckdb")
         self.lock()
+        self.profile()
         self.register("v1")
         self.write_variant_script("v1")
         with self.assertRaises(DdaError) as cm:
@@ -291,6 +298,7 @@ class TestKernelRun(Base):
         os.environ["PYTHONPATH"] = str(evil)
         self.stub_baseline()
         self.lock()
+        self.profile()
         self.register("v1")
         sp = self.write_variant_script("v1")
         os.environ["DDA_RAW"] = str(self.raw)
@@ -342,6 +350,7 @@ class TestKernelRun(Base):
     def test_run_end_to_end_with_stub_stack(self):
         self.stub_baseline()
         self.lock()
+        self.profile()
         self.register("v1")
         sp = self.write_variant_script("v1")
         env_raw = {"DDA_RAW": str(self.raw)}
@@ -417,6 +426,7 @@ class TestKernelRun(Base):
         # stub dir that does not exist is an error, never a silent pass.
         self.stub_baseline()
         self.lock()
+        self.profile()
         self.register("v1")
         self.write_variant_script("v1")
         os.environ["DDA_BASELINE_DIR"] = str(self.tmp / "no-such-dir")
@@ -429,6 +439,7 @@ class TestKernelRun(Base):
         # it at a hostile stub dir); stubs arrive via the frozen policy.
         self.stub_baseline()
         self.lock()
+        self.profile()
         self.register("v1")
         sp = self.write_variant_script(
             "v1", "import os\n"
@@ -447,6 +458,7 @@ class TestKernelRun(Base):
         # refuse them on raw roots (either side of a rename).
         self.stub_baseline()
         self.lock()
+        self.profile()
         self.register("v1")
         sp = self.write_variant_script(
             "v1", "import os\n"
@@ -463,6 +475,7 @@ class TestKernelRun(Base):
         # the wrappers, or the policy, so spawns are refused, not logged.
         self.stub_baseline()
         self.lock()
+        self.profile()
         self.register("v1")
         sp = self.write_variant_script(
             "v1", "import subprocess, sys\n"
@@ -479,6 +492,7 @@ class TestKernelRun(Base):
         # parent-owned (preflight + parent interpreter).
         self.stub_baseline()
         self.lock()
+        self.profile()
         self.register("v1")
         sp = self.write_variant_script(
             "v1", "import csv, json, os\n"
@@ -507,6 +521,7 @@ class TestKernelRun(Base):
         # the record downgrades to untrusted, never upgrades.
         self.stub_baseline()
         self.lock()
+        self.profile()
         self.register("v1")
         sp = self.write_variant_script(
             "v1", "import csv, json, os\n"
@@ -583,6 +598,7 @@ class TestG6(Base):
             encoding="utf-8", newline="\n")
         self.stub_baseline()
         self.lock()
+        self.profile()
         self.paired_session()
         self.register("v1")
         sp = self.write_variant_script("v1")
@@ -597,6 +613,7 @@ class TestG6(Base):
     def test_g6_kernel_start_and_hash_bound(self):
         self.stub_baseline()
         self.lock()
+        self.profile()
         self.paired_session()
         self.register("v1")
         sp = self.write_variant_script("v1")
