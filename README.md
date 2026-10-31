@@ -79,6 +79,43 @@ home (`heads/` mirror, `state/` lock-state cache, `heartbeat/<session>.log`,
 Python ≥ 3.11; `config.yaml` is read by a strict YAML subset parser that
 rejects anything it doesn't understand.
 
+## Ways to use this
+
+The plugin is bot-agnostic: same tools, different oath. Pick the seat
+that matches what you are allowed to do.
+
+1. **Builder mode** — run the pipe. Init, lock, run variants, pass the
+   gates, publish the report:
+
+   ```
+   python scripts/dda.py init <workdir>
+   python scripts/dda.py lock <workdir>
+   python scripts/dda.py run --variant <id> [--workdir WD] variants/<id>.py
+   python scripts/dda.py gate G4|G5|G2|G7 <workdir>
+   ```
+
+2. **QA-judge mode** — verify, don't build. Use a separate QA profile:
+   read-only, no build tools, verdicts only, pinned model. Point it at
+   a phase or a delta and let it re-check the evidence:
+
+   ```
+   python scripts/dda.py status
+   python scripts/dda.py verify-chain <workdir>   # hash chains intact?
+   python scripts/dda.py verify <workdir>          # replay locked script vs snapshot
+   python scripts/dda.py gate G<n> <workdir>       # re-run the gate, read the verdict
+   python scripts/dda.py doctor [workdir]          # environment + workdir health
+   python redteam/run.py                           # GREEN = preventions hold
+   ```
+
+   The judge never amends the spec, runs variants, or approves its own
+   work — `lock --amend`, `run`, and `approve` belong to the builder seat.
+
+3. **Combined pipeline** — builder builds, judge verifies. Builder ships
+   a phase (or the whole build) plus its `.analysis/` evidence; the QA
+   seat replays `verify-chain` / `verify` / the relevant gate on the
+   same commit and returns a verdict (GREEN / findings). A finding goes
+   back to the builder as a new task; the judge does not fix it inline.
+
 ## Tests
 
 ```
