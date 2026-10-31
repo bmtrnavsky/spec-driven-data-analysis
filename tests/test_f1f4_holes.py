@@ -181,21 +181,24 @@ class TestF1UnicodeFormulas(Base):
 
 
 class TestF2WholeSpecFormulas(Base):
-    def test_formula_in_method_fails(self):
+    def test_formula_in_method_warns(self):
         self.write_spec(method="Compare conversion as orders / sessions across arms.")
         rc, out = self.cli("gate", "G1")
-        self.assertNotEqual(rc, 0, f"G1 passed a Method formula: {out}")
+        self.assertEqual(rc, 0, f"G1 failed a warned Method formula: {out}")
         self.assertIn("Method", out)
+        self.assertIn("warning", out.lower())
 
-    def test_formula_in_planned_comparisons_fails(self):
+    def test_formula_in_planned_comparisons_warns(self):
         self.write_spec(planned="Compare lift = v2 minus v1, by device.")
         rc, out = self.cli("gate", "G1")
-        self.assertNotEqual(rc, 0, f"G1 passed a Planned-comparisons formula: {out}")
+        self.assertEqual(rc, 0, f"G1 failed a warned Planned-comparisons formula: {out}")
+        self.assertIn("warning", out.lower())
 
-    def test_unicode_formula_in_method_fails(self):
-        self.write_spec(method="Compare conversion as orders \u00f7 sessions.")
+    def test_unicode_formula_in_method_warns(self):
+        self.write_spec(method="Compare conversion as orders ÷ sessions.")
         rc, out = self.cli("gate", "G1")
-        self.assertNotEqual(rc, 0, f"G1 passed a Unicode Method formula: {out}")
+        self.assertEqual(rc, 0, f"G1 failed a warned Unicode Method formula: {out}")
+        self.assertIn("warning", out.lower())
 
 
 class TestF3HealthWordForms(Base):

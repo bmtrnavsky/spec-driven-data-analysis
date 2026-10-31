@@ -22,9 +22,6 @@ STAGE_POST_RESULT = "post-result"
 TIER_RANK = {"EXPLORE": 0, "DECIDE": 1, "PUBLISH": 2}
 
 DECISION_NONE_RE = re.compile(r"\s*none\s*(?:\u2014|-|–)?:?\s*explore\s*$", re.IGNORECASE)
-AUDIENCE_EXTERNAL_RE = re.compile(
-    r"\b(external|public|client|customer|blog|publish|press|partner|regulator|stakeholder)\b",
-    re.IGNORECASE)
 TOPIC_TRIGGER_RE = re.compile(r"\b(money|trad(?:e|ing)|health(?:care|y)?|medical|patient(?:s)?|diagnos(?:is|es|tic)?|clinic(?:al)?|hospital(?:s)?|disease(?:s)?|drug(?:s)?|treatment(?:s)?)\b",
                               re.IGNORECASE)
 
@@ -59,15 +56,44 @@ def _sections(wd: Workdir) -> dict:
 
 
 def tier_triggers(wd: Workdir, comp) -> tuple[str, list[str]]:
-    """Minimum tier from §2.2 triggers. Returns (min_tier, [reasons])."""
+    """Minimum tier from §2.2 triggers. Returns (min_tier, [reasons]).
+
+    M4: the floor is the max over (a) structured declarations
+    (audience/destination/topics — fixed choices), (b) per-source floors
+    from the human-owned config (min_tier, pii-implied DECIDE), and
+    (c) the legacy free-text keyword scan, which may only RAISE the tier:
+    no absence of keywords, and nothing the agent writes in the spec,
+    can lower the floor.
+    """
     sections = _sections(wd)
     mins = []
     decision = (sections.get("Decision it informs", "") or sections.get("Decision", ""))
     if decision and not DECISION_NONE_RE.match(decision.strip()):
         mins.append(("DECIDE", "G0 names a decision (§2.2: a decision at stake is at least DECIDE)"))
-    audience = sections.get("Audience", "")
-    if audience and AUDIENCE_EXTERNAL_RE.search(audience):
-        mins.append(("PUBLISH", "audience is external (§2.2: PUBLISH is forced)"))
+    # Structured declarations (M4, fixed choices from the locked spec).
+    audience = getattr(comp, "audience", None)
+    destination = getattr(comp, "destination", None)
+    topics = getattr(comp, "topics", None)
+    if audience in ("external", "regulator", "public"):
+        mins.append(("PUBLISH", f"audience is {audience} (§2.2: PUBLISH is forced)"))
+    if destination in ("external", "wordpress", "email", "vault"):
+        mins.append(("PUBLISH", f"destination is {destination} (§2.2: a publish channel is the destination)"))
+    if topics in ("money", "health", "trading", "pii"):
+        mins.append(("DECIDE", f"topic is {topics} (§2.2)"))
+    # Per-source floors from the human-owned config (M4): the agent cannot
+    # lower these — they do not depend on spec text at all.
+    try:
+        floors = lockhash.source_floors(load_config(wd))
+    except DdaError:
+        floors = {}
+    for alias in comp.aliases:
+        floor = floors.get(alias, "EXPLORE")
+        if floor != "EXPLORE":
+            mins.append((floor, f"source {alias} floor is {floor} (config min_tier)"))
+    try:
+        locs = (load_config(wd).get("data_roots") or {})
+    except DdaError:
+        locs = {}
     text = " ".join([sections.get(k, "") for k in ("Question", "Audience")]
                    + [sections.get("Decision it informs", "") or sections.get("Decision", "")])
     if TOPIC_TRIGGER_RE.search(text):

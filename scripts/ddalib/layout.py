@@ -157,9 +157,20 @@ def load_config(wd: Workdir) -> dict:
         if not isinstance(spec, dict):
             errors.append(f"data_roots.{alias}: must be a mapping")
             continue
-        unknown = set(spec) - {"paths", "hosts", "url_prefixes", "tool_patterns", "pii", "pii_columns", "conn"}
+        unknown = set(spec) - {"paths", "hosts", "url_prefixes", "tool_patterns", "pii", "pii_columns", "conn",
+                               "domain", "min_tier"}
         if unknown:
             errors.append(f"data_roots.{alias}: unknown keys {sorted(unknown)}")
+        # M4: human-owned per-source floor. `domain` documents the data
+        # domain; `min_tier` is the tier floor the agent cannot go under
+        # (G2 takes the max over floors and triggers; nothing in the spec
+        # text can lower it). Changing a floor re-locks (config hash).
+        domain = spec.get("domain")
+        if domain is not None and (not isinstance(domain, str) or not domain.strip()):
+            errors.append(f"data_roots.{alias}.domain: must be a non-empty string")
+        floor = spec.get("min_tier")
+        if floor is not None and (not isinstance(floor, str) or floor.upper() not in TIERS):
+            errors.append(f"data_roots.{alias}.min_tier: must be one of {', '.join(TIERS)}")
         locators = 0
         for key in ("paths", "hosts", "url_prefixes", "tool_patterns", "pii_columns"):
             val = spec.get(key, [])

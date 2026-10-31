@@ -437,27 +437,64 @@ def _eval_check(case_md: str) -> dict | None:
     return None
 
 
+def _typed_hits(triggers: list[str], aliases: set[str], defs: set[str],
+                yes_tags: set[str]) -> list[str]:
+    """Match typed trigger keys by set intersection (M4).
+
+    Each key is normalized to a typed triple: `alias:`/`def:`/`tag:`
+    prefixes stay; a legacy untyped key normalizes to alias when it names
+    a locked alias, else def when it names a definition, else tag when it
+    is a closed-vocabulary pattern tag. A key matches when its typed
+    value intersects the spec side (aliases, definition names, tags the
+    spec answers yes). Unknown keys never match. Order-preserving, deduped.
+    """
+    from . import evals as _evals
+    hits: list[str] = []
+    for raw in triggers:
+        key = (raw or "").strip().lower()
+        if not key:
+            continue
+        split = _evals.split_trigger(key)
+        if split is not None:
+            kind, name = split
+        elif key in aliases:
+            kind, name = "alias", key
+        elif key in defs:
+            kind, name = "def", key
+        elif key in _evals.PATTERN_TAGS:
+            kind, name = "tag", key
+        else:
+            continue
+        ok = ((kind == "alias" and name in aliases)
+              or (kind == "def" and name in defs)
+              or (kind == "tag" and name in yes_tags))
+        if ok and key not in hits:
+            hits.append(key)
+    return hits
+
+
 def match_evals(wd: Workdir) -> list[dict]:
     """Mechanically match correction cases to the locked spec (§9).
 
-    A case matches when a trigger key names a locked alias, a metric pin,
-    or a definition name. Binding needs a `correction` approval for the
-    case directory (verified, or unverified below PUBLISH — the G3 rule).
-    Full `correct`/`evals` UX arrives in build phase 9.
+    A case matches when a typed trigger key (`alias:`, `def:`, `tag:`)
+    intersects the spec side: locked aliases, definition names from the
+    metric pins, and pattern tags the spec answers yes. Binding needs a
+    `correction` approval for the case directory (verified, or unverified
+    below PUBLISH — the G3 rule). Full `correct`/`evals` UX arrives in
+    build phase 9.
     """
     try:
         lock, comp = _require_lock(wd)
     except DdaError:
         return []
     from . import approvals as _approvals
-    spec_text = ""
+    from . import evals as _evals
+    aliases = {a.lower() for a in comp.aliases}
+    defs = {p.split("@", 1)[0].lower() for p in getattr(comp, "pins", [])}
     try:
-        spec_text = wd.spec_path.read_text(encoding="utf-8")
-    except OSError:
-        pass
-    hay = " ".join([spec_text.lower()] + [a.lower() for a in comp.aliases]
-                   + [p.lower() for p in getattr(comp, "pins", [])]
-                   + [str(getattr(comp, "metrics", "")).lower()])
+        yes_tags = set(_evals.declared_tags(wd))
+    except DdaError:
+        yes_tags = set()
     base = wd.root / "evals" / "corrections"
     if not base.is_dir():
         return []
@@ -476,7 +513,7 @@ def match_evals(wd: Workdir) -> list[dict]:
         triggers = _case_triggers(payload)
         if not triggers:
             continue
-        hit = [t for t in triggers if t and t in hay]
+        hit = _typed_hits(triggers, aliases, defs, yes_tags)
         if not hit:
             continue
         digest = rec.get("digest") or rec.get("artifact")
@@ -509,7 +546,7 @@ def match_evals(wd: Workdir) -> list[dict]:
         triggers = _case_triggers(body)
         if not triggers:
             continue
-        hit = [t for t in triggers if t and t in hay]
+        hit = _typed_hits(triggers, aliases, defs, yes_tags)
         if not hit:
             continue
         verdict = _approvals.verify_approval(wd, "correction", d.name)

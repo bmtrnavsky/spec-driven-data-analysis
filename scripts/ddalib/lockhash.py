@@ -31,6 +31,8 @@ SECTION_ORDER = (
     "Tier",
     "Rung",
     "Audience",
+    "Destination",
+    "Topics",
     "Population and time window",
     "Data sources",
     "Metrics",
@@ -172,7 +174,145 @@ def resolve_pin(wd: Workdir, pin_text: str) -> Definition:
     return d
 
 
-# ---- source aliases ----
+# ---- structured declarations (M4): fixed-choice audience/destination/topics ----
+#
+# Free-text audience/destination/topics let the agent phrase its way under
+# the tier floor ("internal-ish memo"). These sections are fixed choices:
+# anything present must name exactly one vocabulary value (case-insensitive);
+# a missing/empty section is unconstrained. Domains and per-source floors
+# live in config.yaml data_roots (human-owned); the agent cannot lower them.
+
+AUDIENCES = (
+    "internal team",
+    "data team",
+    "company",
+    "external",
+    "regulator",
+    "public",
+)
+DESTINATIONS = (
+    "none",
+    "internal",
+    "vault",
+    "wordpress",
+    "email",
+    "external",
+)
+TOPICS = (
+    "none",
+    "money",
+    "health",
+    "trading",
+    "pii",
+    "safety",
+)
+
+_TIER_FLOOR_BY_SOURCE_MIN = {"EXPLORE": 0, "DECIDE": 1, "PUBLISH": 2}
+
+
+# Closed pattern-tag vocabulary (§9). Trigger keys that name a locked
+# alias, pin, or definition name are always allowed; anything else must
+# come from this list. (Lives here so both compute() and the matcher use
+# one copy; evals.py re-exports it.)
+PATTERN_TAGS = frozenset({
+    "join", "grain", "denominator", "timezone", "window", "filter",
+    "definition", "metric", "label", "cohort", "population",
+    "time-window", "threshold", "exclusion", "outlier", "nulls",
+    "duplicates", "rounding", "currency", "sampling", "attribution",
+    "seasonality", "survivorship", "confounder", "simpson",
+    "base-rate", "selection-bias", "leakage", "bias",
+    "multiple-comparisons", "hypothesis",
+})
+
+
+def _choice(section_text: str, choices: tuple[str, ...], label: str) -> str | None:
+    """Exactly one vocabulary value in `section_text` (case-insensitive), else None.
+
+    Raises DdaError when the section is non-empty but names zero or more
+    than one value — an unconstrained section must be empty, not vague.
+    """
+    hay = section_text.strip().lower()
+    if not hay:
+        return None
+    found = [c for c in choices
+             if re.search(r"(?<![\w-])" + re.escape(c) + r"(?![\w-])", hay)]
+    if len(found) > 1:
+        raise DdaError(f"spec {label} names more than one fixed choice: {', '.join(found)} "
+                       f"(choices: {', '.join(choices)})")
+    if not found:
+        raise DdaError(f"spec {label} must name one fixed choice ({', '.join(choices)}); "
+                       f"got: {section_text.strip()[:80]!r}")
+    return found[0]
+
+
+def declared_audience(sections: dict[str, str]) -> str | None:
+    """Fixed-choice audience from `## Audience` (None when unstated)."""
+    return _choice(sections.get("Audience", ""), AUDIENCES, "audience")
+
+
+def declared_destination(sections: dict[str, str]) -> str | None:
+    """Fixed-choice destination from `## Destination` (None when unstated)."""
+    return _choice(sections.get("Destination", ""), DESTINATIONS, "destination")
+
+
+def declared_topics(sections: dict[str, str]) -> str | None:
+    """Fixed-choice topic from `## Topics` (None when unstated)."""
+    return _choice(sections.get("Topics", ""), TOPICS, "topics")
+
+
+def source_floors(cfg: dict) -> dict[str, str]:
+    """Per-source tier floor from config.yaml data_roots (human-owned).
+
+    `min_tier` names the floor; `pii: true` (or non-empty `pii_columns`)
+    implies at least DECIDE. The agent's spec text can never lower these:
+    floors come only from the human-owned config.
+    """
+    floors: dict[str, str] = {}
+    for alias, loc in (cfg.get("data_roots") or {}).items():
+        if not isinstance(loc, dict):
+            continue
+        floor = str(loc.get("min_tier") or "EXPLORE").upper()
+        if floor not in _TIER_FLOOR_BY_SOURCE_MIN:
+            raise DdaError(f"data_roots.{alias}.min_tier must be one of EXPLORE, DECIDE, PUBLISH")
+        if loc.get("pii") or loc.get("pii_columns"):
+            if _TIER_FLOOR_BY_SOURCE_MIN[floor] < _TIER_FLOOR_BY_SOURCE_MIN["DECIDE"]:
+                floor = "DECIDE"
+        floors[str(alias)] = floor
+    return floors
+
+def parse_tag_answers(section_text: str, vocabulary: frozenset[str]) -> dict[str, bool]:
+    """`## Pattern tags` answers: `{tag: True/False}`.
+
+    Canonical form is one `tag: yes|no` line per tag; a bare tag line
+    means yes (legacy). Anything else — unknown tags, `maybe`, prose —
+    raises DdaError. The spec answers every tag it mentions yes/no, and
+    matching only fires on yes.
+    """
+    answers: dict[str, bool] = {}
+    for raw in (section_text or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        m = re.match(r"^[-*+>•]?\s*([a-z0-9][a-z0-9_\-]*)\s*:\s*(yes|no)\s*$", line, re.IGNORECASE)
+        if m:
+            tag, val = m.group(1).lower(), m.group(2).lower()
+            if tag not in vocabulary:
+                raise DdaError(f"Pattern tags: {tag!r} is not a closed-vocabulary pattern tag")
+            if tag in answers:
+                raise DdaError(f"Pattern tags: {tag!r} answered twice")
+            answers[tag] = val == "yes"
+            continue
+        m2 = re.match(r"^[-*+>•]?\s*([a-z0-9][a-z0-9_\-]*)\s*$", line)
+        if m2 and m2.group(1).lower() in vocabulary:
+            tag = m2.group(1).lower()
+            if tag in answers:
+                raise DdaError(f"Pattern tags: {tag!r} answered twice")
+            answers[tag] = True  # bare legacy line means yes
+            continue
+        raise DdaError(f"Pattern tags: answer every tag yes/no (e.g. `- join: yes`); "
+                       f"cannot parse: {raw.strip()[:60]!r}")
+    return answers
+
 
 def extract_aliases(sections: dict[str, str]) -> list[str]:
     body = sections.get("Data sources", "")
@@ -207,6 +347,10 @@ class LockComponents:
     rung: str | None
     lock_hash: str
     canonical: str = field(repr=False, default="")
+    audience: str | None = None
+    destination: str | None = None
+    topics: str | None = None
+    source_floors: dict = field(default_factory=dict)
 
     def as_dict(self) -> dict:
         return {
@@ -217,6 +361,10 @@ class LockComponents:
             "aliases": self.aliases,
             "tier": self.tier,
             "rung": self.rung,
+            "audience": self.audience,
+            "destination": self.destination,
+            "topics": self.topics,
+            "source_floors": self.source_floors,
         }
 
 
@@ -246,6 +394,15 @@ def compute(wd: Workdir, spec_text: str | None = None) -> LockComponents:
     tier = _single(sections.get("Tier", ""), TIERS, "tier", case_insensitive=False)
     rung = _single(sections.get("Rung", ""), RUNGS, "rung", case_insensitive=True)
 
+    # M4: structured declarations are fixed choices; a non-empty section
+    # that names no valid choice fails here (before any gate), as do bad
+    # pattern-tag answers. Floors come from the human-owned config only.
+    audience = declared_audience(sections)
+    destination = declared_destination(sections)
+    topics = declared_topics(sections)
+    parse_tag_answers(sections.get("Pattern tags", ""), PATTERN_TAGS)
+    floors = source_floors(cfg)
+
     s_hash = sha256_hex(norm)
     c_hash = config_hash(wd)
     canonical = "\n".join([
@@ -256,4 +413,5 @@ def compute(wd: Workdir, spec_text: str | None = None) -> LockComponents:
         "[aliases]", *aliases,
         "",
     ])
-    return LockComponents(s_hash, c_hash, pins, aliases, tier, rung, sha256_hex(canonical), canonical)
+    return LockComponents(s_hash, c_hash, pins, aliases, tier, rung, sha256_hex(canonical), canonical,
+                          audience=audience, destination=destination, topics=topics, source_floors=floors)

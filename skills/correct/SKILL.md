@@ -15,8 +15,11 @@ chat history.
 
 1. **Draft the case.** Run `dda evals new` with the correction:
    - `--title`: one sentence naming the analysis and the mistake.
-   - `--triggers`: source aliases, definition names, and pattern tags
-     from the closed vocabulary below (comma-separated, at least one).
+   - `--triggers`: typed trigger keys (comma-separated, at least one):
+     `alias:<name>` for a locked source alias, `def:<name>` for a
+     definition name, `tag:<tag>` for a closed-vocabulary pattern tag
+     (list below). Untyped keys are refused — type every key so a
+     typo cannot silently unbind the case.
    - `--what-wrong` / `--correct-behavior`: what failed and the right
      behavior. `--what-happened` for the step-by-step if it matters.
    - A deterministic check (`--check-file` under `outputs/` or
@@ -25,8 +28,9 @@ chat history.
      with neither stays a draft.
    - `--source`: date (UTC) and who reported the correction.
 2. **Check the match.** Run `dda evals match`. Every binding case whose
-   trigger keys intersect the spec's aliases, pins, and declared
-   pattern tags is listed. If this correction does not match the spec
+   typed trigger keys intersect the spec's aliases (`alias:`), pins'
+   definition names (`def:`), and pattern tags the spec answers **yes**
+   (`tag:`) is listed. If this correction does not match the spec
    it was written for, fix the trigger keys — never hand-filter the
    match list.
 3. **Bind it.** Commit a signed `correction` approval for the case
@@ -52,10 +56,11 @@ chat history.
 `base-rate`, `selection-bias`, `leakage`, `bias`,
 `multiple-comparisons`, `hypothesis`.
 
-Trigger keys that name a locked alias, pin, or definition do not need
-to be in this list. A tag outside both the vocabulary and the
-spec is refused by `dda evals new` — declare the spec's own tags under
-`## Pattern tags` first.
+Trigger keys that name a locked alias (`alias:`) or definition
+(`def:`) need no vocabulary lookup. A `tag:` name outside both the
+vocabulary and the spec is refused by `dda evals new` — declare the
+spec's own tags under `## Pattern tags` first, answering each one
+`yes` or `no` (`- <tag>: yes`); only tags answered yes can match.
 
 ## Key rule
 

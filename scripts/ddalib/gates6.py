@@ -50,10 +50,18 @@ _FORMULA_RE = re.compile(
     r"|\b(?:sum|mean|avg|average|median|count|ratio|rate|cohort)\s*\(",
     re.IGNORECASE,
 )
-# Leading line markers stripped before the formula check: bullets (`-`,
-# `*`, `+`, `>`), ordered numbers (`1.`, `2)`), outline brackets. Every
-# non-empty Metrics line must name a pin whatever its marker, so markers
-# carry no meaning here beyond whitespace.
+# A Metrics line is pins-only (M4): an optional list marker, an optional
+# `` `alias` `` reference with an optional separator, exactly one pin, and
+# an optional trailing separator plus formula-free prose. Anything else —
+# a leading computation, two pins glued by an operator, prose before the
+# pin — fails the grammar (not just the formula check).
+_METRIC_LINE_RE = re.compile(
+    r"^(?:`(?P<alias>[^`]+)`\s*(?:[-—:–]\s*)?)?"
+    r"(?P<pin>[a-z][a-z0-9_\-]*@[0-9][0-9A-Za-z.\-]*#[0-9a-f]+)"
+    r"(?:\s*(?:[-—:–]\s*)?(?P<prose>.*))?$"
+)
+# Leading line markers stripped before the grammar check: bullets (`-`,
+# `*`, `+`, `>`), ordered numbers (`1.`, `2)`), outline brackets.
 _MARKER_RE = re.compile(r"^(?:\s*(?:[-*+>•]|\d+[.)]|\[[ xX]\])\s*)+")
 
 
@@ -96,21 +104,23 @@ def gate_g1(wd: Workdir) -> tuple[bool, str, dict]:
         stripped = line.strip()
         if not stripped:
             continue
-        if not lockhash.PIN_RE.search(stripped):
-            problems.append(f"G1 fail: metric line names no pin: {stripped[:60]}")
+        m = _METRIC_LINE_RE.match(_MARKER_RE.sub("", stripped))
+        if not m:
+            problems.append(f"G1 fail: Metrics line is not pins-only grammar: {stripped[:60]}")
         else:
-            rest = lockhash.PIN_RE.sub("", stripped)
-            body = _MARKER_RE.sub("", rest)
-            if _has_formula(body):
+            rest = (m.group("alias") or "") + " " + (m.group("prose") or "")
+            if lockhash.PIN_RE.search(m.group("prose") or ""):
+                problems.append(f"G1 fail: Metrics line names more than one pin: {stripped[:60]}")
+            elif _has_formula(rest):
                 problems.append(f"G1 fail: inline formula in Metrics: {stripped[:60]}")
         if len(problems) >= 6:
             break
-    # Formulas do not become prose outside Metrics: a spec that computes in
-    # Method, Planned comparisons, or any other section fails G1 the same
-    # way (SPEC §7: "Specs cite pins only"). Metrics lines are already
-    # reported above, so they are skipped here to avoid double-counting.
-    # Residual: `and/or`, `pre/post`, `a-b` read as prose by the same arms
-    # that catch `orders / sessions` — authors must pin or reword.
+    # Prose formulas outside Metrics are a WARNING, not a failure (M4):
+    # the Metrics grammar above is the enforced pins-only rule; prose that
+    # computes is flagged for the author but does not fail G1. SPEC §7
+    # ("Specs cite pins only; inline formulas in a spec fail G1") is
+    # downgraded accordingly — see SPEC.md.
+    warnings: list[str] = []
     for sec, sec_body in sections.items():
         if sec == "Metrics":
             continue
@@ -121,12 +131,16 @@ def gate_g1(wd: Workdir) -> tuple[bool, str, dict]:
                 continue
             rest = lockhash.PIN_RE.sub("", stripped)
             if _has_formula(_MARKER_RE.sub("", rest)):
-                problems.append(f"G1 fail: inline formula in {label}: {stripped[:60]}")
+                warnings.append(f"prose formula in {label}: {stripped[:60]}")
                 break
-        if len(problems) >= 6:
+        if len(warnings) >= 6:
             break
     if problems:
         return False, "; ".join(problems[:6]), {}
-    return True, f"G1 pass: {len(pins)} pin(s) resolve, aliases known, define-time declarations stated", {
+    msg = f"G1 pass: {len(pins)} pin(s) resolve, aliases known, define-time declarations stated"
+    if warnings:
+        msg += f" (warnings: {'; '.join(warnings[:6])})"
+    return True, msg, {
         "pins": pins,
+        "warnings": warnings,
     }

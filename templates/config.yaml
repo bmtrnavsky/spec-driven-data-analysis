@@ -17,6 +17,11 @@ data_roots: {}
 #     tool_patterns: []
 #     pii: false
 #     pii_columns: []
+#     # Tier floor for sources read under this alias (SPEC §2.2, §4.5).
+#     # EXPLORE, DECIDE, or PUBLISH; pii: true (or non-empty
+#     # pii_columns) implies at least DECIDE. Human-owned: the spec
+#     # text can never lower this.
+#     min_tier: EXPLORE
 
 # Publish channels (SPEC §6.5): tool-name regexes and paths that publish.
 # In a bound session, a call through one of these that carries this

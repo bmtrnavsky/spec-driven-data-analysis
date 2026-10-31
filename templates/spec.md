@@ -1,8 +1,8 @@
 # Analysis spec
 
 Fill every section. Metrics cite registry pins only (name@version#hash),
-never formulas. Data sources cite config aliases only, one per bullet,
-for example "- `alias` — why it is needed".
+one pin per line, never formulas. Data sources cite config aliases only,
+one per bullet, for example "- `alias` — why it is needed".
 
 ## Question
 
@@ -17,6 +17,19 @@ State the risk tier in one sentence (SPEC §2.2).
 State the economy rung in one sentence (SPEC §2.1).
 
 ## Audience
+
+Fixed choice (one): internal team, data team, company, external,
+regulator, public. Leave blank when unconstrained.
+
+## Destination
+
+Fixed choice (one): none, internal, vault, wordpress, email,
+external. Leave blank when unconstrained.
+
+## Topics
+
+Fixed choice (one): none, money, health, trading, pii,
+safety. Leave blank when unconstrained.
 
 ## Population and time window
 
@@ -46,7 +59,7 @@ State the economy rung in one sentence (SPEC §2.1).
 
 ## Pattern tags
 
-Optional: closed-vocabulary pattern tags this analysis may hit
-(e.g. `join`, `timezone`, `denominator`, one per line or
-comma-separated). Correction evals match against these tags (§9).
+Answer every tag you mention `yes` or `no`, one per line
+(e.g. `- join: yes`). Correction evals match only against tags
+answered yes (§9). Closed vocabulary — see skills/correct/SKILL.md.
 Leave empty when none apply.

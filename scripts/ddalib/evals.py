@@ -22,25 +22,21 @@ from . import lockstate
 CORRECTIONS_DIR = Path("evals") / "corrections"
 CASE_FILE = "case.md"
 
-# Closed pattern-tag vocabulary (§9). Trigger keys that name a locked
-# alias, pin, or definition name are always allowed; anything else must
-# come from this list.
-PATTERN_TAGS = frozenset({
-    "join", "grain", "denominator", "timezone", "window", "filter",
-    "definition", "metric", "label", "cohort", "population",
-    "time-window", "threshold", "exclusion", "outlier", "nulls",
-    "duplicates", "rounding", "currency", "sampling", "attribution",
-    "seasonality", "survivorship", "confounder", "simpson",
-    "base-rate", "selection-bias", "leakage", "bias",
-    "multiple-comparisons", "hypothesis",
-})
+# Closed pattern-tag vocabulary (§9). Re-exported from lockhash (one copy).
+PATTERN_TAGS = lockhash.PATTERN_TAGS
 
-_TAG_RE = re.compile(r"^[a-z0-9][a-z0-9_\-]*$")
 _SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def parse_triggers(raw: str) -> list[str]:
-    """Split comma/semicolon-separated trigger keys, lowercased, deduped."""
+    """Split comma/semicolon-separated trigger keys, lowercased, deduped.
+
+    M4: trigger keys are typed — `alias:<name>`, `def:<name>`, or
+    `tag:<tag>`. Untyped keys are rejected at the CLI so a typo cannot
+    silently unbind a case; the matcher still normalizes legacy untyped
+    keys found in old approved payloads (alias, then definition, then
+    pattern tag) and intersects the resulting typed sets.
+    """
     seen: list[str] = []
     for tok in re.split(r"[,;]", raw or ""):
         tok = tok.strip().lower()
@@ -49,22 +45,33 @@ def parse_triggers(raw: str) -> list[str]:
     return seen
 
 
-def validate_triggers(triggers: list[str]) -> list[str]:
-    """Reject empty or malformed keys; return warnings for unknown tags.
+def split_trigger(key: str) -> tuple[str, str] | None:
+    """Split a typed trigger key into (kind, name); None when untyped."""
+    m = re.match(r"^(alias|def|tag):([a-z0-9][a-z0-9_\-]*)$", key.strip().lower())
+    return (m.group(1), m.group(2)) if m else None
 
-    A key outside the closed vocabulary is still allowed when it names
-    something in the spec (alias, pin, definition) — the mechanical
-    match decides that. Anything else is refused so typos cannot
-    silently unbind a case.
+
+def validate_triggers(triggers: list[str]) -> list[str]:
+    """Reject empty, untyped, or malformed keys.
+
+    `tag:` names must come from the closed vocabulary; `alias:`/`def:`
+    names only need well-formed spellings here — the mechanical match
+    decides whether they name a locked alias or definition. Anything
+    else is refused so typos cannot silently unbind a case.
     """
     if not triggers:
         raise DdaError("at least one trigger key is required "
-                       "(aliases, definition names, or pattern tags from skills/correct/SKILL.md)")
-    bad = [t for t in triggers if not _TAG_RE.match(t)]
+                       "(typed: alias:<name>, def:<name>, or tag:<tag> from skills/correct/SKILL.md)")
+    bad = [t for t in triggers if not split_trigger(t)]
     if bad:
         raise DdaError(f"bad trigger key(s) {', '.join(bad)} "
-                       "(lowercase letters, digits, '-', '_' only)")
-    return [t for t in triggers if t not in PATTERN_TAGS]
+                       "(typed keys only: alias:<name>, def:<name>, tag:<tag>)")
+    unknown = [t for t in triggers
+               if t.startswith("tag:") and t.split(":", 1)[1] not in PATTERN_TAGS]
+    if unknown:
+        raise DdaError(f"unknown pattern tag(s) {', '.join(unknown)} "
+                       f"(closed vocabulary: {len(PATTERN_TAGS)} tags in skills/correct/SKILL.md)")
+    return []
 
 
 def check_path_rel(check_file: str) -> str:
@@ -129,7 +136,7 @@ def do_new(wd: Workdir, title: str, triggers_raw: str, what_happened: str = "",
     """Draft evals/corrections/NNN/case.md; returns {case, path, warnings}."""
     wd.require_initialized()
     triggers = parse_triggers(triggers_raw)
-    unknown = validate_triggers(triggers)
+    validate_triggers(triggers)
     body = render_case(title, triggers, what_happened, what_wrong,
                        correct_behavior, check_file, check_sha256,
                        review_question, source)
@@ -139,9 +146,7 @@ def do_new(wd: Workdir, title: str, triggers_raw: str, what_happened: str = "",
     if dest.exists():
         raise DdaError(f"case {nnn} already exists (re-run to allocate the next id)")
     dest.write_text(body, encoding="utf-8")
-    warnings = [f"trigger key {t!r} is not a closed-vocabulary pattern tag "
-                "(it must name a locked alias, pin, or definition to match)"
-                for t in unknown]
+    warnings: list[str] = []
     return {"case": nnn, "path": str(dest), "triggers": triggers,
             "warnings": warnings,
             "case_hash": hashlib.sha256(body.encode("utf-8")).hexdigest()}
@@ -184,15 +189,24 @@ def do_run(wd: Workdir) -> dict:
             "ok": not failed_bound}
 
 
-def declared_tags(wd: Workdir) -> list[str]:
-    """Pattern tags declared under `## Pattern tags` (phase 9 spec section)."""
+def declared_tag_answers(wd: Workdir) -> dict[str, bool]:
+    """Pattern-tag answers from `## Pattern tags` (M4: every tag yes/no).
+
+    Returns {tag: answered-yes}. A missing section answers nothing; a
+    malformed section raises DdaError from the parser.
+    """
     try:
         sections = lockhash.parse_sections(wd.spec_path.read_text(encoding="utf-8"))
     except (OSError, DdaError):
-        return []
-    return parse_triggers(sections.get("Pattern tags", ""))
+        return {}
+    return lockhash.parse_tag_answers(sections.get("Pattern tags", ""), PATTERN_TAGS)
 
 
-__all__ = ["PATTERN_TAGS", "parse_triggers", "validate_triggers", "do_new",
-           "do_match", "do_run", "declared_tags", "next_case_id",
-           "CORRECTIONS_DIR", "CASE_FILE"]
+def declared_tags(wd: Workdir) -> list[str]:
+    """Pattern tags the spec answers yes (matching fires only on yes)."""
+    return sorted(t for t, yes in declared_tag_answers(wd).items() if yes)
+
+
+__all__ = ["PATTERN_TAGS", "parse_triggers", "split_trigger", "validate_triggers", "do_new",
+           "do_match", "do_run", "declared_tags", "declared_tag_answers",
+           "next_case_id", "CORRECTIONS_DIR", "CASE_FILE"]

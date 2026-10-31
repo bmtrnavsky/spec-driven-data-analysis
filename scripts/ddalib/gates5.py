@@ -1,10 +1,11 @@
 """Phase 5 gates: G0 intake, G8 report, G9 archive (SPEC §3 rows 0/8/9, §14 item 5)."""
 from __future__ import annotations
 
+import json
 import re
 import unicodedata
 
-from .layout import Workdir, read_text_lf
+from .layout import DdaError, Workdir, read_text_lf
 from . import lockhash, lockstate
 
 # Intra-sentence punctuation that must NOT split: it occurs inside a single
@@ -181,9 +182,114 @@ def gate_g8(wd: Workdir, report: str | None = None) -> tuple[bool, str, dict]:
     return True, "G8 pass: report(s) %s footer verifies%s" % (names, scope_note), {}
 
 
+# ---------- committed-file allowlist (M5) ----------
+#
+# G9 checks every committed file against an allowlist: work-product paths
+# must be agent-writable (the same default-deny table `evidenceguard`
+# enforces), and dda's own files match by exact path with their sha256
+# recorded in a manifest carried on the G9 verdict (plus targeted checks:
+# spec.lock against the ledger head, approvals through verify_approval).
+# Anything else committed — a stray script, an extra data file the safety
+# scan cannot classify — fails G9 with the path named.
+
+def _g9_governance_patterns(wd) -> tuple[set[str], list]:
+    """(exact governance relpaths, regex patterns) for dda's own files."""
+    from . import lineage as _lineage
+    exact: set[str] = set()
+
+    def add(p) -> None:
+        try:
+            exact.add(p.relative_to(wd.root).as_posix())
+        except ValueError:
+            pass
+
+    from .ledger import audit_log, approvals_index, runs_log, specs_tried, workdir_chains
+    add(wd.config_path)
+    add(wd.lock_path)
+    add(wd.root / ".gitignore")
+    add(wd.analysis / "profile.json")
+    add(wd.analysis / "verify.json")
+    add(wd.analysis / "profile.md")
+    add(wd.analysis / "verify.md")
+    add(audit_log(wd))
+    add(approvals_index(wd))
+    add(runs_log(wd))
+    add(specs_tried(wd))
+    add(_lineage.lineage_log(wd))
+    for chained in workdir_chains(wd):
+        add(chained)
+    patterns = [
+        re.compile(r"^\.analysis/specs/v\d+\.md$"),
+        re.compile(r"^\.analysis/(milestones/[a-z0-9_\-]+/)?ledger\.md$"),
+        re.compile(r"^\.analysis/reviews/goldfish/[^/]+$"),
+        re.compile(r"^\.analysis/packets/[^/]+/manifest\.json$"),
+        re.compile(r"^\.analysis/packets/[^/]+/.+$"),
+        re.compile(r"^\.analysis/runs/(kernels/[^/]+\.json|blobs/[0-9a-f]{64})$"),
+        re.compile(r"^\.analysis/approvals/[^/]+\.json$"),
+        re.compile(r"^definitions/(?!proposals/)[^/]+\.md$"),
+    ]
+    return exact, patterns
+
+
+def _g9_allowlist_check(wd) -> tuple[list[str], dict]:
+    """Check every committed file against the M5 allowlist.
+
+    Returns (problems, manifest) where manifest maps each committed
+    control relpath to its sha256 (recorded on the G9 verdict).
+    """
+    from .ledger import _git, last_lock_record
+    from . import approvals as _approvals
+    from .matching import workdir_writable
+    import hashlib as _hashlib
+    tracked = [t for t in _git(wd.root, "ls-files", "-z").stdout.split("\0") if t]
+    exact, patterns = _g9_governance_patterns(wd)
+    try:
+        last = last_lock_record(wd) or {}
+    except DdaError:
+        last = {}
+    problems: list[str] = []
+    manifest: dict[str, str] = {}
+    for rel in sorted(tracked):
+        norm = rel.strip()
+        if not norm or norm.startswith(".git/") or norm == ".git":
+            continue
+        if norm.rsplit("/", 1)[-1] == ".gitkeep":
+            continue  # git scaffolding placeholders, committed by `git add -A`
+        if workdir_writable(norm):
+            continue  # agent-writable work product (§6.2 allowlist)
+        if norm in exact or any(p.match(norm) for p in patterns):
+            try:
+                digest = _hashlib.sha256((wd.root / norm).read_bytes()).hexdigest()
+            except OSError as exc:
+                problems.append(f"{norm} (tracked but unreadable: {exc})")
+                continue
+            manifest[norm] = digest
+            if norm == wd.lock_path.relative_to(wd.root).as_posix():
+                want = str(last.get("lock_hash") or "")
+                try:
+                    got = json.loads((wd.root / norm).read_text(encoding="utf-8")).get("lock_hash")
+                except (OSError, ValueError):
+                    got = None
+                if not want or got != want:
+                    problems.append(f"{norm} (lock_hash does not match the ledger head)")
+            m_appr = re.fullmatch(r"\.analysis/approvals/([^/]+)\.json", norm)
+            if m_appr:
+                stem = m_appr.group(1)
+                kind, _, artifact = stem.partition("-")
+                verdict = _approvals.verify_approval(wd, kind, artifact or None)
+                state = str(verdict.get("state", "missing"))
+                if state in ("missing", "uncommitted", "bad_sig", "unknown_signer"):
+                    problems.append(f"{norm} (approval {state}: {verdict.get('reason', '')[:80]})")
+            continue
+        problems.append(f"{norm} (not on the committed-file allowlist, §11)")
+    return problems, manifest
+
+
 def gate_g9(wd: Workdir) -> tuple[bool, str, dict]:
-    """Archive gate: everything committed, chains verify, no data/secrets in git."""
+    """Archive gate: everything committed, chains verify, no data/secrets in git,
+    every committed file on the allowlist (M5)."""
     from .ledger import git_safety_scan, verify_all, _git
+    import hashlib as _hashlib
     wd.require_initialized()
     lock = lockstate.read_lock(wd)
     if not lock:
@@ -194,7 +300,14 @@ def gate_g9(wd: Workdir) -> tuple[bool, str, dict]:
     unsafe = git_safety_scan(wd)
     if unsafe:
         return False, "G9 fail: data/secret files in git: " + "; ".join(unsafe[:3]), {}
+    allow_problems, manifest = _g9_allowlist_check(wd)
+    if allow_problems:
+        return False, "G9 fail: committed file not allowlisted: " + "; ".join(allow_problems[:3]), {}
     dirty = _git(wd.root, "status", "--porcelain").stdout
     if dirty.strip():
         return False, "G9 fail: uncommitted changes present", {}
-    return True, "G9 pass: tree committed, chains verify", {}
+    digest = _hashlib.sha256(json.dumps(manifest, sort_keys=True).encode("utf-8")).hexdigest()
+    return True, f"G9 pass: tree committed, chains verify, {len(manifest)} control file(s) manifest {digest[:12]}", {
+        "allowlist_manifest": manifest,
+        "manifest_digest": digest,
+    }

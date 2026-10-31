@@ -36,7 +36,7 @@ class TestEvalsNew(P9Setup):
     def test_new_creates_numbered_case(self):
         self.lock()
         rc, out = self.cli("evals", "new", "--title", "Join grain",
-                           "--triggers", "join, sales",
+                           "--triggers", "tag:join, alias:sales",
                            "--what-wrong", "fanned out",
                            str(self.wd.root))
         self.assertEqual(rc, 0, out)
@@ -51,7 +51,7 @@ class TestEvalsNew(P9Setup):
         self.lock()
         for title in ("First", "Second"):
             rc, out = self.cli("evals", "new", "--title", title,
-                               "--triggers", "join", str(self.wd.root))
+                               "--triggers", "tag:join", str(self.wd.root))
             self.assertEqual(rc, 0, out)
         self.assertTrue((self.wd.root / "evals" / "corrections" / "002" / "case.md").is_file())
 
@@ -64,7 +64,7 @@ class TestEvalsNew(P9Setup):
     def test_new_rejects_escaping_check_file(self):
         self.lock()
         rc, out = self.cli("evals", "new", "--title", "Escape",
-                           "--triggers", "join",
+                           "--triggers", "tag:join",
                            "--check-file", "../secrets.env",
                            "--check-sha256", "0" * 64,
                            str(self.wd.root))
@@ -73,14 +73,14 @@ class TestEvalsNew(P9Setup):
     def test_new_rejects_hash_without_file(self):
         self.lock()
         rc, out = self.cli("evals", "new", "--title", "Hash only",
-                           "--triggers", "join",
+                           "--triggers", "tag:join",
                            "--check-sha256", "0" * 64,
                            str(self.wd.root))
         self.assertNotEqual(rc, 0, out)
 
 
 class TestEvalsMatchRun(P9Setup):
-    def write_bound_case(self, nnn="001", triggers="sales, conversion, join",
+    def write_bound_case(self, nnn="001", triggers="alias:sales, def:conversion, tag:join",
                          check=None, question=None):
         d = self.wd.root / "evals" / "corrections" / nnn
         d.mkdir(parents=True, exist_ok=True)
@@ -104,15 +104,15 @@ class TestEvalsMatchRun(P9Setup):
 
     def test_match_ignores_unrelated_case(self):
         self.lock()
-        self.write_bound_case(triggers="unrelated-thing-xyz")
+        self.write_bound_case(triggers="alias:unrelated-thing-xyz")
         rc, out = self.cli("evals", "match", str(self.wd.root))
         self.assertEqual(rc, 0, out)
         self.assertNotIn("001", out)
 
     def test_match_pattern_tags_section(self):
-        self.write_spec(tags="timezone")
+        self.write_spec(tags="- timezone: yes")
         self.lock()
-        self.write_bound_case(triggers="timezone")
+        self.write_bound_case(triggers="tag:timezone")
         rc, out = self.cli("evals", "match", str(self.wd.root))
         self.assertEqual(rc, 0, out)
         self.assertIn("001", out)
@@ -140,7 +140,7 @@ class TestEvalsMatchRun(P9Setup):
         d = self.wd.root / "evals" / "corrections" / "009"
         d.mkdir(parents=True, exist_ok=True)
         (d / "case.md").write_text(
-            "# Draft\n\nTrigger keys: sales\n\n"
+            "# Draft\n\nTrigger keys: alias:sales\n\n"
             "## Deterministic check\n\nfile: outputs/summary.csv\nsha256: " + "0" * 64 + "\n",
             encoding="utf-8")
         rc, out = self.cli("evals", "run", str(self.wd.root))
@@ -154,13 +154,13 @@ class TestPacketMatchedOnly(P9Setup):
         base = self.wd.root / "evals" / "corrections"
         (base / "001").mkdir(parents=True, exist_ok=True)
         (base / "001" / "case.md").write_text(
-            "# Matched\n\nTrigger keys: sales\n\nReview question: Did the grain fan out?\n",
+            "# Matched\n\nTrigger keys: alias:sales\n\nReview question: Did the grain fan out?\n",
             encoding="utf-8")
         self.assertEqual(self.cli("approve", "correction", "001", "--no-sign")[0], 0)
         self.assertEqual(self.cli("approved", "correction", "001")[0], 0)
         (base / "002").mkdir(parents=True, exist_ok=True)
         (base / "002" / "case.md").write_text(
-            "# Unmatched\n\nTrigger keys: unrelated-thing-xyz\n\n"
+            "# Unmatched\n\nTrigger keys: alias:unrelated-thing-xyz\n\n"
             "Review question: This must never reach the goldfish.\n",
             encoding="utf-8")
         rc, out = self.cli("packet", "teardown", str(self.wd.root))

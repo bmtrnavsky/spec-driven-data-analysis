@@ -124,11 +124,16 @@ and tier are independent: a glance can be DECIDE; a study can be EXPLORE.
 **Tier confirmation (G2).** The agent proposes; rules decide who confirms.
 
 - `dda gate G2` forces at least DECIDE if any trigger fires: G0 names a
-  decision; the audience is external; a source is flagged PII/regulated in
-  config; or the topic tags include money, health, or trading. The agent
-  cannot declare EXPLORE when a trigger fires.
-- PUBLISH is forced when the audience is external or a publish channel
-  (§6.5) is the destination.
+  decision; the structured audience is external/regulator/public; a source
+  carries a config floor of DECIDE+ (`min_tier`, or PII/regulated in
+  config); or the structured topic is money, health, trading, or pii. The
+  agent cannot declare EXPLORE when a trigger fires.
+- PUBLISH is forced when the structured audience is external/regulator/public
+  or the structured destination is a publish channel (§6.5).
+- The free-text keyword scan over the spec is a raise-only backstop: it can
+  add a trigger, never remove one. Nothing the agent writes in the spec —
+  and no absence of keywords — can lower the floor, which comes from the
+  fixed-choice declarations and the human-owned config.
 - EXPLORE with no trigger: agent-confirmed, and the footer says so.
 - DECIDE or PUBLISH: the human confirms the tier together with the spec
   approval (§4.5).
@@ -153,7 +158,7 @@ judgment), G (goldfish), H (human artifact, §4.5), K (hook).
 | # | Stage | Skill | Artifact | Gate (pass condition) | Who |
 |---|---|---|---|---|---|
 | 0 | Intake | `intake` | intake block | G0: question stated as one sentence; decision it informs named (or "none — EXPLORE") | A |
-| 1 | Define | `define`, `definitions` | `.analysis/spec.md` | G1: every metric resolves to a registry pin `name@version#hash` and the hash recomputes; sources named by config alias; hypotheses, "what would change the answer", exclusions, and prior exposure stated; no inline formulas | S, K |
+| 1 | Define | `define`, `definitions` | `.analysis/spec.md` | G1: every Metrics line matches the pins-only grammar (one registry pin `name@version#hash`, hash recomputes, optional alias reference and formula-free prose); sources named by config alias; hypotheses, "what would change the answer", exclusions, and prior exposure stated; prose formulas elsewhere warn, never fail | S, K |
 | 2 | Economy+Tier | `define` | two sentences in spec | G2: rung and tier declared; overrides and tier triggers applied (§2.2); human tier confirmation present when required | S, H |
 | 3 | Teardown (pre-data) | `goldfish-review` | `.analysis/reviews/goldfish/teardown.md` | G3: tier-scaled rounds recorded from `dda review run` calls (§5.0); at DECIDE, a human spec approval for this spec hash (verified, or unverified and disclosed); at PUBLISH, verified only (§4.5) | S, G, H |
 | 4 | Lock | `lock` | `specs/vN.md`, `spec.lock`, ledger entry, git commit | G4: lock hash recomputes (spec + definition pins + config hash + source aliases); a `config` approval exists for this config hash, signed through the approver chain (§4.5; verified required at DECIDE+, unapproved config disclosed at EXPLORE); evidence chains verify; `runs.log`, the audit log, and the unbound-access log (§6.0) show no non-metadata reads of these aliases before this lock, otherwise the lock is labelled post-data | S, K, H |
@@ -161,7 +166,7 @@ judgment), G (goldfish), H (human artifact, §4.5), K (hook).
 | 6 | Analyze | `analyze` | variant scripts, outputs, `runs.log`, `specs-tried.jsonl` | G6: every data-touching run maps to a variant id (no orphan runs); every kernel record is IPC-imported with a policy hash bound to the run's lock hash and pairs with a parent-appended `kernel-start`; every variant beyond the locked one has a ledger entry with a reason; hook heartbeat complete (§6.8) | S, K |
 | 7 | Verify | `verify`, `goldfish-review`, `correct` | `.analysis/verify.md` | G7: locked variant reproduces from its saved script in a fresh kernel within declared tolerance against the snapshot; source drift recorded separately (§10.3); matched correction evals pass; post-result goldfish rounds recorded (§5.2) | S, G |
 | 8 | Report | `report` | `reports/<slug>.md` or `.analysis/answer.md` | G8: footer values recompute from lock, ledgers, runs, profile, reviews, approvals (§8); `exploratory` and `post-data-locked` labels present at point of claim; at PUBLISH, verified human sign-off for this report hash | S, K, H |
-| 9 | Archive | `report` | ledger closed, commit, push | G9: spec, lock, ledger, verify, report committed together; `dda gitcheck` finds no data or secrets staged (§11); evidence chains verify; Wayfinder closed; `dda release` unbinds every session and deregisters the workdir's roots (§6.0) | S |
+| 9 | Archive | `report` | ledger closed, commit, push | G9: spec, lock, ledger, verify, report committed together; `dda gitcheck` finds no data or secrets staged (§11); every committed file is on the allowlist (agent-writable work paths, or a dda control file matched by exact path with its hash in the G9 manifest); evidence chains verify; Wayfinder closed; `dda release` unbinds every session and deregisters the workdir's roots (§6.0) | S |
 
 ### 3.1 Amendments (the honest loop back)
 
@@ -264,14 +269,19 @@ evals/corrections/     C  correction eval cases (§9)
 
 ### 4.1 Spec template sections
 
-Question; decision it informs; tier; rung; audience; population and time
+Question; decision it informs; tier; rung; audience (fixed choice:
+internal team, data team, company, external, regulator, public);
+destination (fixed choice: none, internal, vault, wordpress, email,
+external); topics (fixed choice: none, money, health, trading, pii,
+safety); population and time
 window; data sources (config alias only, not contents or paths); metrics
-(`name@version#hash` only — no inline formulas); hypotheses with
+(`name@version#hash` in pins-only lines — one pin per line, optional
+alias reference and formula-free prose); hypotheses with
 direction; planned comparisons and cuts (closed list); method; exclusion
 and outlier rules; reproduction tolerance (exact, or a numeric tolerance
 per output); thresholds that would change the decision; known risks
 (confounders, selection, leakage); **prior exposure**; assumptions; out of
-scope.
+scope; pattern tags (every tag answered yes/no).
 
 **Prior exposure** (required, one line minimum). Has the analyst, the
 agent, or Brad already seen results from these sources — earlier reports,
@@ -666,10 +676,11 @@ plugin must not block any of that.
 
 ### 6.2 `evidenceguard` — pre_tool_call, BLOCKS
 
-- Blocks agent writes, moves, deletes, and in-place edits (through
-  `write_file`, `patch`, `terminal`, or `execute_code`) under
-  `.analysis/**` and `~/.hermes-home/dda/**`, except the paths marked
-  `agent` below. Every other file has exactly one named writer.
+- Default-deny in bound sessions: the agent may write only the explicit
+  allowlist below (through `write_file`, `patch`, `terminal`, or
+  `execute_code`). Every other path under the workdir root is refused —
+  reads are unaffected. `dda` subcommands pass through; they enforce
+  their own rules.
 
 | Path | Writer | Check |
 |---|---|---|
@@ -679,6 +690,10 @@ plugin must not block any of that.
 | `answer.md` | agent | `footercheck` (§6.5) |
 | `reviews/self/` | agent | labelled `self` in the footer |
 | `notes/` | agent | not evidence; never cited by a gate |
+| `derived/`, `outputs/`, `reports/` | agent | work products; G6/G8 verify |
+| `definitions/proposals/` | agent | proposals only; a human merges |
+| `evals/` | agent | drafts; binding needs a `correction` approval (§9) |
+| `kernel.yaml` | agent or human | env hash in footer; outside the lock hash |
 | `profile.md` | `dda profile` | G5 |
 | `verify.md` | `dda verify` | G7 |
 | `reviews/goldfish/`, `packets/` | `dda review run`, `dda packet` | packet and brief hashes (§5.0) |
@@ -689,15 +704,16 @@ plugin must not block any of that.
 | `approvals/` | human, via `dda approve` in their own terminal | signature (§4.5) |
 | `approvals.index.jsonl` | `dda approved` | chain |
 | `config.yaml` | human | config approval chain (§4.5) |
-| `kernel.yaml` | agent or human | env hash in footer; outside the lock hash |
 | `~/.hermes-home/dda/**` | `dda`, hooks | heads mirror, session bindings |
 
 - `dda` subcommands pass through; they enforce their own rules.
 - Applies to bound sessions only (§6.0); an unbound session writing into
   an active workdir's `.analysis/` is logged to the unbound-access log
   and fails the next chain or gate check.
-- Detection backstop: chain verification (§4.4), lock commits (§4.2), and
-  the config approval chain (§4.5).
+- Detection backstop: chain verification (§4.4), lock commits (§4.2),
+  the config approval chain (§4.5), and the G9 committed-file allowlist
+  (every committed file is agent-writable work or an exact-path dda
+  control file with its hash in the G9 manifest, §11).
 
 ### 6.3 `rawguard` — pre_tool_call, BLOCKS
 
@@ -825,7 +841,10 @@ live.
 - The agent may read and cite, and may only **propose** new or changed
   definitions in `definitions/proposals/`. A human merges, bumps the
   version, and records a signed `definition` approval (§4.5).
-- Specs cite pins only; inline formulas in a spec fail G1.
+- Specs cite pins only, one pin per Metrics line (pins-only grammar — an
+  optional alias reference, then the pin, then optional formula-free
+  prose). A Metrics line that computes fails G1; a formula in prose
+  elsewhere in the spec is a G1 warning, not a failure.
 - Unknown metric at DECIDE+: stop and ask (§3.2). At EXPLORE the agent
   may proceed on its proposal, labelled **provisional definition** in the
   footer.
@@ -861,8 +880,9 @@ When a human corrects an analysis (wrong join grain, misread definition,
 timezone error, wrong denominator), the `correct` skill drafts a case in
 `evals/corrections/NNN`:
 
-- **trigger keys**: source aliases, definition names, and pattern tags
-  from a closed vocabulary (e.g. `join`, `timezone`, `denominator`)
+- **trigger keys**: typed — `alias:<source>`, `def:<definition>`, or
+  `tag:<tag>` where the tag comes from the closed vocabulary below
+  (e.g. `tag:join`, `tag:timezone`, `tag:denominator`)
 - what the agent did, what was wrong, the correct behavior
 - a **deterministic check** (expected value or invariant over outputs)
   and/or a **review question** for the goldfish
@@ -871,9 +891,13 @@ timezone error, wrong denominator), the `correct` skill drafts a case in
 Rules:
 
 - A case becomes binding only with a signed `correction` approval (§4.5).
-- **Matching is mechanical.** `dda evals match` selects every binding
-  case whose trigger keys intersect the spec's aliases, pins, and declared
-  pattern tags. The agent cannot drop a matched case.
+- **Matching is mechanical and typed.** `dda evals match` selects every
+  binding case whose trigger keys intersect the spec side by set
+  intersection: `alias:` keys against the locked source aliases, `def:`
+  keys against the definition names behind the metric pins, and `tag:`
+  keys against the pattern tags the spec answers **yes** in its
+  `## Pattern tags` section (every tag the spec mentions is answered
+  yes/no, one per line). The agent cannot drop a matched case.
 - Deterministic checks run at Verify (G7). DECIDE+ requires all to pass
   (a failure is stop-and-ask); EXPLORE reports failures and proceeds.
 - Review questions are added to the goldfish rounds (§5.1) and are not

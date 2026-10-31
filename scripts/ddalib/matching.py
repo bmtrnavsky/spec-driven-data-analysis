@@ -291,6 +291,22 @@ _PY_WRITE = re.compile(
 _REDIRECT = re.compile(r"(?<![<>&0-9])[0-9]?>>?(?!&)\s*(\"[^\"]+\"|'[^']+'|[^\s;&|)]+)")
 
 
+def _quoted_spans(text: str) -> list[tuple[int, int]]:
+    """(start, end) spans of single/double-quoted regions in `text`."""
+    spans: list[tuple[int, int]] = []
+    quote: str | None = None
+    start = 0
+    for i, c in enumerate(text):
+        if quote:
+            if c == quote:
+                spans.append((start, i + 1))
+                quote = None
+        elif c in ("'", '"'):
+            quote = c
+            start = i
+    return spans
+
+
 def write_targets(view: ToolView) -> tuple[bool, set[str] | None]:
     """(has_write_intent, explicit_targets).
 
@@ -310,7 +326,10 @@ def write_targets(view: ToolView) -> tuple[bool, set[str] | None]:
     if _SHELL_WRITE.search(code) or _PY_WRITE.search(code):
         return True, None
     targets = set()
+    spans = _quoted_spans(code)
     for m in _REDIRECT.finditer(code):
+        if any(s <= m.start() < e for s, e in spans):
+            continue  # `>` inside quotes is text, not a redirect (`echo "a>b"`)
         tgt = m.group(1).strip("'\"")
         if tgt.lower() in ("/dev/null", "nul", "$null"):
             continue
@@ -699,6 +718,53 @@ def human_only_violation(view: ToolView) -> str | None:
     return None
 
 
+# ---------- agent-writable workdir allowlist (M5 default-deny) ----------
+#
+# In a bound session only these workdir-relative paths are agent-writable.
+# Everything else under the workdir root is refused by `evidenceguard`
+# (default-deny); reads are unaffected. `dda` subcommands pass through —
+# they enforce their own rules. Anchored at the workdir root; `..` and
+# `*` never match.
+
+_WORKDIR_AGENT_WRITABLE = (
+    # Agent-owned spec inputs (lock hash covers spec.md; notes are not evidence).
+    r"\.analysis/spec\.md",
+    r"\.analysis/milestones/[a-z0-9_\-]+/spec\.md",
+    r"\.analysis/wayfinder\.md",
+    r"\.analysis/answer\.md",
+    r"\.analysis/kernel\.yaml",
+    r"\.analysis/variants/[^/]+\.(?:py|sql)",
+    r"\.analysis/reviews/self(?:/.*)?",
+    r"\.analysis/notes(?:/.*)?",
+    # Work products: derived data, outputs, reports, proposals, eval drafts.
+    r"derived(?:/.*)?",
+    r"outputs(?:/.*)?",
+    r"reports(?:/.*)?",
+    r"definitions/proposals(?:/.*)?",
+    r"evals(?:/.*)?",
+)
+_WORKDIR_AGENT_RE = re.compile(r"^(?:" + r"|".join(_WORKDIR_AGENT_WRITABLE) + r")$")
+
+
+def workdir_rel(wd_root: str, path: str) -> str | None:
+    """Workdir-relative path for `path`, or None when outside the workdir."""
+    root = wd_root.rstrip("/")
+    if path == root:
+        return ""
+    if path.startswith(root + "/"):
+        return path[len(root) + 1:]
+    return None
+
+
+def workdir_writable(rel: str) -> bool:
+    """True when a workdir-relative path is on the agent-writable allowlist."""
+    if not rel or rel.startswith("/") or ".." in rel.split("/") or "*" in rel:
+        return False
+    if rel.startswith(".") and not rel.startswith(".analysis/"):
+        return False  # dotfiles (`.git/`, `.env`, …) are never agent-writable
+    return bool(_WORKDIR_AGENT_RE.match(rel))
+
+
 # ---------- evidence path table (§6.2) ----------
 
 _AGENT_ANALYSIS = re.compile(
@@ -743,5 +809,6 @@ def analysis_refs(view: ToolView) -> set[str]:
 __all__ = [
     "ToolView", "referenced_aliases", "connector_aliases", "write_targets", "written_paths_under",
     "signing_violation", "human_only_violation", "analysis_refs", "analysis_tail", "agent_writable", "canon", "under",
+    "workdir_rel", "workdir_writable",
     "norm_text", "parent_dir", "FILE_WRITERS", "CODE_TOOLS",
 ]

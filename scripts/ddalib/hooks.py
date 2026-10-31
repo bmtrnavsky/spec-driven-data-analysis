@@ -243,12 +243,46 @@ def evidenceguard(ctx: Ctx) -> tuple[dict, int]:
                      "`dda release`/`dda abandon` itself — those are human-only); ask Brad.")
     if plugin_hits:
         return block("dda evidenceguard: the dda plugin's hooks and scripts are read-only in a bound session.")
+    if targets is not None:
+        # M5 default-deny: in a bound session only the explicit workdir
+        # allowlist is agent-writable. Reads never arrive with write
+        # intent; `dda` subcommands pass through above.
+        from .matching import workdir_rel, workdir_writable
+        wroot = canonical_path(str(ctx.wd.root))
+        bad_wd = sorted({t for t in targets
+                         if (lambda r: r is not None and not workdir_writable(r))(workdir_rel(wroot, t))})
+        if bad_wd:
+            try:
+                shown = os.path.relpath(bad_wd[0], wroot)
+            except ValueError:
+                shown = bad_wd[0]
+            return block(f"dda evidenceguard: {shown} is not on the agent-writable allowlist "
+                         "(default-deny, §6.2). Agent-writable: .analysis/spec.md, .analysis/notes/, "
+                         "derived/, outputs/, reports/, definitions/proposals/, evals/ — everything else "
+                         "is written by its named writer or via `dda`.")
     bad = sorted(t for t in tails if not agent_writable(t))
     if bad:
         shown = ", ".join(".analysis/" + t if t else ".analysis/" for t in bad[:4])
         return block(f"dda evidenceguard: {shown} is evidence written only by its named writer (§6.2 table: "
                      "dda lock, runlog, the kernel, a human). The agent may write spec.md, wayfinder.md, "
                      "variants/<id> (until first run), answer.md, reviews/self/, notes/, kernel.yaml.")
+    if targets is None:
+        # M5 default-deny, unparseable-target backstop: a write-intent call
+        # whose exact targets cannot be parsed may write anything it
+        # mentions, so every mentioned under-workdir path must allowlist.
+        from .matching import workdir_rel as _wrel, workdir_writable as _ww
+        wroot = canonical_path(str(ctx.wd.root))
+        bad_mention = sorted({p for p in view.paths
+                              if (lambda r: r is not None and r != "" and not _ww(r))(_wrel(wroot, p))})
+        if bad_mention:
+            try:
+                shown = os.path.relpath(bad_mention[0], wroot)
+            except ValueError:
+                shown = bad_mention[0]
+            return block(f"dda evidenceguard: {shown} is not on the agent-writable allowlist "
+                         "(default-deny, §6.2). Agent-writable: .analysis/spec.md, .analysis/notes/, "
+                         "derived/, outputs/, reports/, definitions/proposals/, evals/ — everything else "
+                         "is written by its named writer or via `dda`.")
     frozen = sorted(t for t in tails if _frozen_variant(ctx, t))
     if frozen:
         return block(f"dda evidenceguard: {frozen[0]} is frozen after its first run (§4.3). "

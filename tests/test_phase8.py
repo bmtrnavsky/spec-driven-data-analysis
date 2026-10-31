@@ -481,7 +481,7 @@ class TestG2(P8Setup):
         self.assertIn("decide", out.lower())
 
     def test_g2_external_audience_forces_publish(self):
-        self.write_spec(decision="Ship v2 or roll back.", audience="external blog readers")
+        self.write_spec(decision="Ship v2 or roll back.", audience="external")
         self.lock()
         rc, out = self.cli("gate", "G2")
         self.assertNotEqual(rc, 0, out)
@@ -513,7 +513,7 @@ class TestG2(P8Setup):
 
 
 class TestEvals8(P8Setup):
-    def write_case(self, nnn="001", triggers="sales, conversion, join",
+    def write_case(self, nnn="001", triggers="alias:sales, def:conversion, tag:join",
                    check=None, signed=True):
         d = self.wd.root / "evals" / "corrections" / nnn
         d.mkdir(parents=True, exist_ok=True)
