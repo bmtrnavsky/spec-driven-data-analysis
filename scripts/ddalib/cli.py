@@ -3,7 +3,7 @@
 Implemented: init, status, start, release, hash, install, version (phase 1);
 lock, verify-chain, gate (G4), footer, abandon (phase 2); meta, variant, run,
 gate G6 (phase 3); approve, approved, doctor (phase 4); packet, review run,
-gate G3 (phase 7).
+gate G3 (phase 7); profile, verify, gates G2/G5/G7 (phase 8).
 Everything else in the spec's command set is registered but fails closed
 (exit 3, "not implemented in this build") so a script or gate that calls
 it can never mistake a missing feature for a pass.
@@ -26,11 +26,11 @@ EXIT_NOT_IMPLEMENTED = 3
 
 # Spec commands not yet built, with the build phase that delivers them (§14).
 PENDING = {
-    "evals": 9, "profile": 8, "verify": 8,
+    "evals": 9,
 }
 # Gates and the phase that builds each one's checks (§3, §14). G0/G8/G9 (5),
-# G1 (6), G4, G6 (3), G3 (7) are built; G2, G5, G7 fail closed.
-GATE_PHASE = {"G2": 4, "G5": 8, "G7": 8}
+# G1 (6), G4, G6 (3), G3 (7), G2/G5/G7 (8) are built; unmapped gates fail closed.
+GATE_PHASE = {}
 
 BLOCKING_HOOKS = ("lockguard", "evidenceguard", "rawguard", "defguard", "footercheck")
 
@@ -205,9 +205,10 @@ def cmd_gate(args) -> int:
         ledger.write_wayfinder(wd, g, passed, reason)
         print(f"{g}: {'pass' if passed else 'fail'} — {reason}")
         return 0 if passed else 1
-    if g in ("G0", "G1", "G3", "G8", "G9"):
-        from . import gates5, gates6, gates7
-        fn = {"G0": gates5.gate_g0, "G1": gates6.gate_g1, "G3": gates7.gate_g3,
+    if g in ("G0", "G1", "G2", "G3", "G5", "G7", "G8", "G9"):
+        from . import gates5, gates6, gates7, gates8
+        fn = {"G0": gates5.gate_g0, "G1": gates6.gate_g1, "G2": gates8.gate_g2,
+              "G3": gates7.gate_g3, "G5": gates8.gate_g5, "G7": gates8.gate_g7,
               "G8": gates5.gate_g8, "G9": gates5.gate_g9}[g]
         if g == "G8" and getattr(args, "report", None):
             passed, reason, _ = fn(wd, report=args.report)
@@ -504,6 +505,33 @@ def cmd_review(args) -> int:
     return 0
 
 
+def cmd_profile(args) -> int:
+    from . import stage8 as _stage8
+    wd = _wd(args)
+    try:
+        rec = _stage8.do_profile(wd)
+    except DdaError as exc:
+        print(f"dda profile: {exc}", file=sys.stderr)
+        return exc.code
+    n_snap = sum(1 for r in rec["aliases"].values() if r.get("kind") == "snapshot")
+    n_live = sum(1 for r in rec["aliases"].values() if r.get("kind") == "live-only")
+    print(f"profile: {len(rec['aliases'])} source(s) at {rec['asof']} "
+          f"({n_snap} snapshot(s), {n_live} live-only fingerprint(s))")
+    return 0
+
+
+def cmd_verify(args) -> int:
+    from . import stage8 as _stage8
+    wd = _wd(args)
+    try:
+        rec = _stage8.do_verify(wd)
+    except DdaError as exc:
+        print(f"dda verify: {exc}", file=sys.stderr)
+        return exc.code
+    print(f"verify: locked variant {rec['variant']!r}: {rec['status']}")
+    return 0
+
+
 def cmd_pending(args) -> int:
     phase = PENDING[args.command]
     print(f"dda {args.command}: not implemented in this build (arrives in build phase {phase}, SPEC §14). "
@@ -559,12 +587,22 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_verify_chain)
 
-    s = sub.add_parser("gate", help="run a gate check and write its Wayfinder line (G4, G6 built)")
+    s = sub.add_parser("gate", help="run a gate check and write its Wayfinder line (G0-G9)")
     s.add_argument("gate")
     s.add_argument("workdir", nargs="?")
     s.add_argument("--milestone")
     s.add_argument("--report", default=None, help="G8 only: check just this report file")
     s.set_defaults(func=cmd_gate)
+
+    s = sub.add_parser("profile", help="snapshot/fingerprint every locked source (SPEC §10.3)")
+    s.add_argument("workdir", nargs="?")
+    s.add_argument("--milestone")
+    s.set_defaults(func=cmd_profile)
+
+    s = sub.add_parser("verify", help="replay the locked variant against the snapshot (SPEC §10.3)")
+    s.add_argument("workdir", nargs="?")
+    s.add_argument("--milestone")
+    s.set_defaults(func=cmd_verify)
 
     s = sub.add_parser("meta", help="metadata-only access to a data-root alias (names, types, counts)")
     s.add_argument("alias")
@@ -622,7 +660,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("approve", help="commit a human approval file (signed; run in your own terminal)")
     s.add_argument("kind", help=f"approval kind: {', '.join(approvals.KINDS)}")
-    s.add_argument("artifact", nargs="?", help="artifact hash (defaults from the workdir for config/spec/amendment)")
+    s.add_argument("artifact", nargs="?", help="artifact hash (defaults from the workdir for config/spec/amendment/tier)")
     s.add_argument("workdir", nargs="?")
     s.add_argument("--milestone")
     s.add_argument("--key", help="signing key id passed to git (default: the key's own default)")

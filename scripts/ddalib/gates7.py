@@ -35,6 +35,109 @@ def _self_rounds(wd: Workdir, stage: str) -> set[str]:
     return rounds
 
 
+def goldfish_calls_gate(wd: Workdir, stage: str, spec_hash: str,
+                        calls: list[dict], rounds: list[str]
+                        ) -> tuple[list[str], list[str]]:
+    """Shared goldfish binding checks for a review stage (§5.0 Recording).
+
+    Every call must match a runs.log entry (no forged records), name a
+    packet whose manifest binds the same stage + spec, run at most twice
+    per round, end on a pass, and have earlier-round objections answered
+    in the matching self response file. Used by G3 (teardown) and G7
+    (post-result).
+    """
+    from . import chain as _chain
+    from . import ledger as _ledger
+    from .review import packets_dir as _packets_dir
+    import json as _json
+    problems: list[str] = []
+    notes: list[str] = []
+    try:
+        _chain_recs = _chain.read_records(_ledger.runs_log(wd))
+    except Exception:
+        _chain_recs = []
+    _chain_revs = [e for e in _chain_recs
+                   if e.get("kind") == "goldfish" and e.get("stage") == stage
+                   and e.get("spec_hash") == spec_hash]
+
+    def _bound(call: dict) -> bool:
+        for e in _chain_revs:
+            try:
+                same_seq = int(e.get("seq") or -1) == int(call.get("seq") or -2)
+            except (TypeError, ValueError):
+                same_seq = False
+            if (str(e.get("round") or "") == str(call.get("round") or "")
+                    and same_seq
+                    and str(e.get("packet_hash") or "") == str(call.get("packet_hash") or "")
+                    and str(e.get("request") or "") == str(call.get("provider_request_id") or "")):
+                return True
+        return False
+
+    _seen_packets: dict[str, bool] = {}
+
+    def _packet_ok(packet_hash: str) -> bool:
+        if packet_hash in _seen_packets:
+            return _seen_packets[packet_hash]
+        ok = False
+        if packet_hash:
+            man_path = _packets_dir(wd) / packet_hash / "manifest.json"
+            try:
+                man = _json.loads(man_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                man = None
+            ok = (isinstance(man, dict) and man.get("packet_hash") == packet_hash
+                  and man.get("stage") == stage and man.get("spec_hash") == spec_hash)
+        _seen_packets[packet_hash] = ok
+        return ok
+
+    by_round: dict[str, list[dict]] = {}
+    for c in calls:
+        by_round.setdefault(str(c.get("round")), []).append(c)
+    for rs in by_round.values():
+        rs.sort(key=lambda c: int(c.get("seq") or 0))
+
+    for r in rounds:
+        rs = by_round.get(r, [])
+        if not rs:
+            problems.append(f"no goldfish call for round {r} "
+                            f"(`dda review run {stage} --round {r}`, §5.0)")
+            continue
+        for c in rs:
+            if not _bound(c):
+                problems.append(f"round {r}: call seq {c.get('seq')} (req "
+                                f"{c.get('provider_request_id')}) has no matching "
+                                f"runs.log entry — forged or unlogged review records "
+                                f"do not count (§5.0 Recording)")
+            elif not _packet_ok(str(c.get("packet_hash") or "")):
+                problems.append(f"round {r}: packet {str(c.get('packet_hash') or '')[:12]} "
+                                f"missing or manifest mismatch — re-run "
+                                f"`dda packet {stage}` before review (§5.0)")
+        if len(rs) > 2:
+            problems.append(f"round {r} ran {len(rs)} times for this spec — goldfish "
+                            "shopping: at most once re-run per round (§5.0)")
+            continue
+        if rs[-1].get("verdict") != "pass":
+            problems.append(f"round {r}: latest call {rs[-1].get('provider_request_id')} "
+                            f"is {rs[-1].get('verdict')} — fix the spec and re-run only "
+                            "that round, at most once")
+            continue
+        for earlier in rs[:-1]:
+            if earlier.get("verdict") in ("pass",):
+                continue
+            resp = self_response_path(wd, stage, r)
+            try:
+                body = resp.read_text(encoding="utf-8")
+            except OSError:
+                body = ""
+            rid = str(earlier.get("provider_request_id") or "")
+            if not rid or rid not in body:
+                problems.append(f"round {r}: earlier call {rid or '?'} raised objections "
+                                f"with no recorded answer in {resp.relative_to(wd.root).as_posix()}")
+            else:
+                notes.append(f"round {r}: earlier {rid} objections answered")
+    return problems, notes
+
+
 def gate_g3(wd: Workdir) -> tuple[bool, str, dict]:
     """Teardown gate: required rounds recorded, objections answered, and the
     human spec approval present at DECIDE+ (verified only at PUBLISH)."""
@@ -77,87 +180,12 @@ def gate_g3(wd: Workdir) -> tuple[bool, str, dict]:
             else:
                 notes.append("no provider key: degraded to self re-reads with footer caveat (§5.0)")
     else:
-        from . import chain as _chain
-        from . import ledger as _ledger
-        from .review import packets_dir as _packets_dir
-        import json as _json
-        try:
-            _chain_recs = _chain.read_records(_ledger.runs_log(wd))
-        except Exception:
-            _chain_recs = []
-        _chain_revs = [e for e in _chain_recs
-                       if e.get("kind") == "goldfish" and e.get("stage") == STAGE
-                       and e.get("spec_hash") == spec_hash]
-
-        def _bound(call: dict) -> bool:
-            for e in _chain_revs:
-                try:
-                    same_seq = int(e.get("seq") or -1) == int(call.get("seq") or -2)
-                except (TypeError, ValueError):
-                    same_seq = False
-                if (str(e.get("round") or "") == str(call.get("round") or "")
-                        and same_seq
-                        and str(e.get("packet_hash") or "") == str(call.get("packet_hash") or "")
-                        and str(e.get("request") or "") == str(call.get("provider_request_id") or "")):
-                    return True
-            return False
-
-        _seen_packets: dict[str, bool] = {}
-
-        def _packet_ok(packet_hash: str) -> bool:
-            if packet_hash in _seen_packets:
-                return _seen_packets[packet_hash]
-            ok = False
-            if packet_hash:
-                man_path = _packets_dir(wd) / packet_hash / "manifest.json"
-                try:
-                    man = _json.loads(man_path.read_text(encoding="utf-8"))
-                except (OSError, ValueError):
-                    man = None
-                ok = (isinstance(man, dict) and man.get("packet_hash") == packet_hash
-                      and man.get("stage") == STAGE and man.get("spec_hash") == spec_hash)
-            _seen_packets[packet_hash] = ok
-            return ok
-
-        for r in rounds:
-            rs = by_round.get(r, [])
-            if not rs:
-                problems.append(f"no goldfish call for round {r} "
-                                f"(`dda review run {STAGE} --round {r}`, §5.0)")
-                continue
-            for c in rs:
-                if not _bound(c):
-                    problems.append(f"round {r}: call seq {c.get('seq')} (req "
-                                    f"{c.get('provider_request_id')}) has no matching "
-                                    f"runs.log entry — forged or unlogged review records "
-                                    f"do not count (§5.0 Recording)")
-                elif not _packet_ok(str(c.get("packet_hash") or "")):
-                    problems.append(f"round {r}: packet {str(c.get('packet_hash') or '')[:12]} "
-                                    f"missing or manifest mismatch — re-run "
-                                    f"`dda packet {STAGE}` before review (§5.0)")
-            if len(rs) > 2:
-                problems.append(f"round {r} ran {len(rs)} times for this spec — goldfish "
-                                "shopping: at most once re-run per round (§5.0)")
-                continue
-            if rs[-1].get("verdict") != "pass":
-                problems.append(f"round {r}: latest call {rs[-1].get('provider_request_id')} "
-                                f"is {rs[-1].get('verdict')} — fix the spec and re-run only "
-                                "that round, at most once")
-                continue
-            for earlier in rs[:-1]:
-                if earlier.get("verdict") in ("pass",):
-                    continue
-                resp = self_response_path(wd, STAGE, r)
-                try:
-                    body = resp.read_text(encoding="utf-8")
-                except OSError:
-                    body = ""
-                rid = str(earlier.get("provider_request_id") or "")
-                if not rid or rid not in body:
-                    problems.append(f"round {r}: earlier call {rid or '?'} raised objections "
-                                    f"with no recorded answer in {resp.relative_to(wd.root).as_posix()}")
-                else:
-                    notes.append(f"round {r}: earlier {rid} objections answered")
+        probs, nts = goldfish_calls_gate(wd, STAGE, spec_hash, calls, rounds)
+        problems.extend(probs)
+        notes.extend(nts)
+        by_round: dict[str, list[dict]] = {}
+        for c in calls:
+            by_round.setdefault(str(c.get("round")), []).append(c)
         if comp.tier == "PUBLISH":
             r3 = (by_round.get("3") or [{}])[-1]
             r3b = (by_round.get("3b") or [{}])[-1]
@@ -188,4 +216,4 @@ def gate_g3(wd: Workdir) -> tuple[bool, str, dict]:
     return True, "G3 pass: " + "; ".join(notes), {"rounds": rounds}
 
 
-__all__ = ["gate_g3", "STAGE"]
+__all__ = ["gate_g3", "goldfish_calls_gate", "STAGE"]

@@ -287,7 +287,8 @@ class TestFailClosed(P7Setup):
     TIER = "This is a DECIDE analysis."
     RUNG = "glance"
     def test_unbuilt_still_exit_3(self):
-        for args in (("profile",), ("verify",), ("evals",), ("gate", "G7"), ("gate", "G5"), ("gate", "G2")):
+        # Phase 8 built profile/verify and gates G2/G5/G7; only evals (phase 9) still fails closed.
+        for args in (("evals",),):
             rc, _ = self.cli(*args)
             self.assertEqual(rc, 3, f"dda {' '.join(args)} must fail closed with exit 3")
 

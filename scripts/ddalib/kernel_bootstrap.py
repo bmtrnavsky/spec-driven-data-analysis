@@ -103,6 +103,12 @@ class PolicyCtx:
         self.analysis_dir = policy.get("analysis_dir") or ""
         self.script = policy.get("script") or ""
         self.allowed_dirs = sorted(policy.get("allowed_dirs") or [])
+        # Verify-replay snapshot overlay (SPEC §10.3): {live canon path:
+        # snapshot canon path}, parent-owned via the frozen policy. Empty
+        # on every normal run — redirection installs only when non-empty.
+        ov = policy.get("overlay") or {}
+        self.overlay = {str(k): str(v) for k, v in ov.items()
+                        if isinstance(k, str) and isinstance(v, str) and k and v}
         self._log_fn = log_fn or self._ipc_log
         self._events_path = os.environ.get(EVENTS_ENV) or ""
         self._local = threading.local()
@@ -201,6 +207,9 @@ class Ctx:
         allowed = [p for ps in self.roots.values() for p in ps]
         self.allowed_dirs = sorted(set(allowed + [canon(str(wd.root / "derived")),
                                                   canon(str(wd.root / "outputs"))]))
+        # Live-kernel boots never carry a snapshot overlay: redirection is
+        # a verify-replay instrument, installed only via the IPC policy.
+        self.overlay = {}
         self.script = canon(script, os.getcwd()) if script else ""
         self._log_fn = log_fn or self._chain_log
         self._local = threading.local()
@@ -304,6 +313,141 @@ def _decode_path(p) -> str | None:
         except UnicodeDecodeError:
             return None
     return p if isinstance(p, str) else None
+
+
+# ---------- snapshot overlay (verify replays, SPEC §10.3) ----------
+
+def overlay_target(ctx, target) -> str | None:
+    """Snapshot path for a live path under the verify overlay, else None.
+
+    The overlay maps live canon paths (files or directory prefixes) to
+    their snapshot copies. Matching is longest-prefix-first so a file
+    entry wins over its parent directory entry.
+    """
+    ov = getattr(ctx, "overlay", None)
+    if not ov:
+        return None
+    s = target if isinstance(target, str) else _decode_path(target)
+    if not s:
+        return None
+    c = canon(s, os.getcwd())
+    if not c:
+        return None
+    for live in sorted(ov, key=len, reverse=True):
+        if c == live or under(c, live):
+            return ov[live] + c[len(live):]
+    return None
+
+
+def _redirect_value(ctx, value):
+    """Rewrite one path-like argument through the overlay, preserving type."""
+    redir = overlay_target(ctx, value) if isinstance(value, (str, bytes, os.PathLike)) else None
+    if redir is None:
+        return value, None
+    if isinstance(value, os.PathLike):
+        return type(value)(redir), str(value)
+    if isinstance(value, bytes):
+        return redir.encode("utf-8"), value.decode("utf-8", "replace")
+    return redir, value
+
+
+def _rewrite_paths(ctx, a, k) -> tuple[tuple, dict, list]:
+    """Rewrite path-like call arguments through the overlay.
+
+    Returns (new_args, new_kwargs, redirected) where redirected is a list
+    of (original, snapshot) pairs for the audit trail.
+    """
+    redirected: list = []
+    new_a = []
+    for v in a:
+        nv, orig = _redirect_value(ctx, v)
+        if orig is not None:
+            redirected.append((orig, nv if isinstance(nv, str) else str(nv)))
+        new_a.append(nv)
+    new_k = {}
+    for key, v in k.items():
+        if isinstance(v, (list, tuple)):
+            nv_list = []
+            for item in v:
+                nv, orig = _redirect_value(ctx, item)
+                if orig is not None:
+                    redirected.append((orig, nv if isinstance(nv, str) else str(nv)))
+                nv_list.append(nv)
+            new_k[key] = type(v)(nv_list) if isinstance(v, tuple) else nv_list
+        else:
+            nv, orig = _redirect_value(ctx, v)
+            if orig is not None:
+                redirected.append((orig, nv if isinstance(nv, str) else str(nv)))
+            new_k[key] = nv
+    return tuple(new_a), new_k, redirected
+
+
+def install_open_redirect(ctx) -> str:
+    """Redirect read-mode stdlib opens/listings from live roots to the snapshot.
+
+    Installed ONLY for verify replays (non-empty parent-owned overlay).
+    Write-mode opens pass through untouched — the audit hook still refuses
+    raw-root and snapshot writes exactly as on a live run.
+    """
+    if not getattr(ctx, "overlay", None):
+        return "no overlay (live run)"
+    import builtins as _bi
+    import io as _io
+    orig_open = _bi.open
+    orig_io_open = _io.open
+    orig_os_open = os.open
+    orig_listdir = os.listdir
+    orig_scandir = os.scandir
+
+    def _resolve(path, write: bool):
+        if write:
+            return None
+        redir = overlay_target(ctx, path)
+        if redir is None:
+            return None
+        if not os.path.exists(redir):
+            raise KernelRefusal(f"dda kernel: snapshot copy is missing for {str(path)[:200]!r}; "
+                                f"re-run `dda profile` (§10.3)")
+        ctx.log("open-overlay", ctx.aliases_of(path) if hasattr(ctx, "aliases_of") else [],
+                path=str(path)[:300], redirected=redir[:300])
+        return redir
+
+    def guarded_open(path, *a, **k):
+        mode = a[0] if a else k.get("mode", "r")
+        redir = _resolve(path, _is_write_mode(mode, None))
+        return orig_open(redir if redir is not None else path, *a, **k)
+
+    def guarded_io_open(path, *a, **k):
+        mode = a[0] if a else k.get("mode", "r")
+        redir = _resolve(path, _is_write_mode(mode, None))
+        return orig_io_open(redir if redir is not None else path, *a, **k)
+
+    def guarded_os_open(path, flags, *a, **k):
+        redir = _resolve(path, _is_write_mode(None, flags))
+        return orig_os_open(redir if redir is not None else path, flags, *a, **k)
+
+    def guarded_listdir(path=".", *a, **k):
+        redir = overlay_target(ctx, path)
+        if redir is not None and os.path.isdir(redir):
+            ctx.log("os-list-overlay", ctx.aliases_of(path) if hasattr(ctx, "aliases_of") else [],
+                    path=str(path)[:300], redirected=redir[:300])
+            return orig_listdir(redir, *a, **k)
+        return orig_listdir(path, *a, **k)
+
+    def guarded_scandir(path=".", *a, **k):
+        redir = overlay_target(ctx, path)
+        if redir is not None and os.path.isdir(redir):
+            ctx.log("os-list-overlay", ctx.aliases_of(path) if hasattr(ctx, "aliases_of") else [],
+                    path=str(path)[:300], redirected=redir[:300])
+            return orig_scandir(redir, *a, **k)
+        return orig_scandir(path, *a, **k)
+
+    _bi.open = guarded_open
+    _io.open = guarded_io_open
+    os.open = guarded_os_open
+    os.listdir = guarded_listdir
+    os.scandir = guarded_scandir
+    return f"enforced ({len(ctx.overlay)} overlay entr{'y' if len(ctx.overlay) == 1 else 'ies'})"
 
 
 # `os.*` audit events that mutate the filesystem or create links: every
@@ -539,13 +683,19 @@ def wrap_duckdb(mod, ctx: Ctx) -> str:
             return res
         return GuardedCon(res)
 
-    def scan_sql(sql: str) -> None:
-        for m in re.finditer(r"'((?:[^'\\]|\\.|'')+)'", sql):
+    def scan_sql(sql: str) -> str:
+        out = sql
+        for m in reversed(list(re.finditer(r"'((?:[^'\\]|\\.|'')+)'", sql))):
             cand = m.group(1)
             if "/" in cand or "\\" in cand or cand.lower().endswith((".csv", ".parquet", ".json", ".db", ".duckdb")):
                 aliases = ctx.aliases_of(cand)
                 if aliases or ctx.is_snapshot(cand):
                     ctx.log("duckdb-read", aliases, statement=sql[:300])
+                redir = overlay_target(ctx, cand)
+                if redir is not None:
+                    ctx.log("duckdb-overlay", ctx.aliases_of(cand), statement=cand[:300],
+                            redirected=redir[:300])
+                    out = out[:m.start(1)] + redir.replace("'", "''") + out[m.end(1):]
         up = sql.upper()
         if re.search(r"\b(COPY\s+.*\s+TO|EXPORT\s+DATABASE|ATTACH)\b", up):
             for m in re.finditer(r"TO\s+'((?:[^'\\]|\\.|'')+)'", sql, re.IGNORECASE):
@@ -558,6 +708,7 @@ def wrap_duckdb(mod, ctx: Ctx) -> str:
                     tgt = m.group(1)
                     if ctx.aliases_of(tgt) or ctx.is_snapshot(tgt):
                         raise KernelRefusal("dda kernel: ATTACH of a raw-root or snapshot file is refused")
+        return out
 
     class GuardedCon:
         """A duckdb connection whose every query entry point is scanned.
@@ -572,22 +723,22 @@ def wrap_duckdb(mod, ctx: Ctx) -> str:
 
         def execute(self, sql, *a, **k):
             if isinstance(sql, str):
-                scan_sql(sql)
+                sql = scan_sql(sql)
             return _guard_result(self._inner.execute(sql, *a, **k))
 
         def executemany(self, sql, *a, **k):
             if isinstance(sql, str):
-                scan_sql(sql)
+                sql = scan_sql(sql)
             return _guard_result(self._inner.executemany(sql, *a, **k))
 
         def sql(self, sql, *a, **k):
             if isinstance(sql, str):
-                scan_sql(sql)
+                sql = scan_sql(sql)
             return self._inner.sql(sql, *a, **k)
 
         def query(self, sql, *a, **k):
             if isinstance(sql, str):
-                scan_sql(sql)
+                sql = scan_sql(sql)
             return self._inner.query(sql, *a, **k)
 
         def cursor(self, *a, **k):
@@ -621,10 +772,14 @@ def wrap_duckdb(mod, ctx: Ctx) -> str:
             orig = getattr(mod, name)
             def _mk_reader(o):
                 def reader(*a, **k):
-                    src = k.get("path") or k.get("file") or (a[0] if a else None)
+                    na, nk, redirected = _rewrite_paths(ctx, a, k)
+                    for orig, snap in redirected:
+                        ctx.log("duckdb-overlay", ctx.aliases_of(orig), statement=str(orig)[:300],
+                                redirected=str(snap)[:300])
+                    src = nk.get("path") or nk.get("file") or (na[0] if na else None)
                     if src is not None:
                         _check_local(ctx, src, write=False, what="duckdb")
-                    return o(*a, **k)
+                    return o(*na, **nk)
                 return reader
             setattr(mod, name, _mk_reader(orig))
     return "enforced"
@@ -668,9 +823,13 @@ def _wrap_first_arg(mod, names: tuple, ctx: Ctx, what: str):
 
         def _mk(o):
             def fn(*a, **k):
-                for src in _path_candidates(a, k):
+                na, nk, redirected = _rewrite_paths(ctx, a, k)
+                for orig, snap in redirected:
+                    ctx.log(f"{what}-overlay", ctx.aliases_of(orig), path=str(orig)[:300],
+                            redirected=str(snap)[:300])
+                for src in _path_candidates(na, nk):
                     _check_local(ctx, src, write=False, what=what)
-                return o(*a, **k)
+                return o(*na, **nk)
             return fn
 
         setattr(target, attr, _mk(orig))
@@ -903,6 +1062,7 @@ def boot_ipc() -> tuple[PolicyCtx, dict]:
         status["ok"] = False
         status["missing_baseline"] = missing
     status["wrappers"] = apply_wrappers(ctx)
+    status["snapshot_overlay"] = install_open_redirect(ctx)
     unenforced = [lib for lib, st in status["wrappers"].items()
                   if st.startswith(("not-installed", "wrap-failed"))]
     status["network_policy"] = ("detect-only (unenforced native path: " + ", ".join(unenforced) + ")"
@@ -949,6 +1109,7 @@ def boot() -> tuple[Ctx, dict]:
         status["ok"] = False
         status["missing_baseline"] = missing
     status["wrappers"] = apply_wrappers(ctx)
+    status["snapshot_overlay"] = install_open_redirect(ctx)
     unenforced = [lib for lib, st in status["wrappers"].items()
                   if st.startswith(("not-installed", "wrap-failed"))]
     status["network_policy"] = ("detect-only (unenforced native path: " + ", ".join(unenforced) + ")"

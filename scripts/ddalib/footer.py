@@ -8,8 +8,10 @@ field recomputable in this build matches the evidence files.
 Recomputed now: lock hash, spec version, lock label, tier, amendments,
 variants N (ledger spec versions + specs-tried variants), definition pins,
 sources, and config-approval status with approver fingerprints (phase 4).
-Data, kernel, review-round and eval fields are presence-checked only until
-their build phases land (§14 phases 7-9).
+Phase 8 also recomputes data (profile snapshot hashes), kernel (replay env
+hash), reproduce (locked variant + `dda verify`), and correction evals
+(matched/passed counts) — but only when that evidence exists, so older
+reports without a profile/verify keep verifying on presence alone.
 """
 from __future__ import annotations
 
@@ -31,14 +33,16 @@ def review_summary(wd: Workdir) -> str:
         return "none recorded"
     try:
         selfdir = wd.analysis / "reviews" / "self"
-        rounds = set()
-        if selfdir.is_dir():
-            for p in selfdir.glob("teardown-round*.md"):
-                m = re.match(r"^teardown-round([0-9]+[a-z]?)(?:-.*)?\.md$", p.name)
-                if m and p.stat().st_size > 0:
-                    rounds.add(m.group(1))
-        if rounds:
-            summary += "; self re-reads: rounds " + ",".join(sorted(rounds))
+        for stage, label in (("teardown", None), ("post-result", "post-result")):
+            rounds = set()
+            if selfdir.is_dir():
+                for p in selfdir.glob(f"{stage}-round*.md"):
+                    m = re.match(rf"^{stage}-round([0-9]+[a-z]?)(?:-.*)?\.md$", p.name)
+                    if m and p.stat().st_size > 0:
+                        rounds.add(m.group(1))
+            if rounds:
+                tag = f"post-result self re-reads" if label else "self re-reads"
+                summary += f"; {tag}: rounds " + ",".join(sorted(rounds))
     except OSError:
         pass
     return summary
@@ -94,7 +98,7 @@ def expected(wd: Workdir) -> dict | None:
              if r.get("type", "variant") == "variant" and r.get("variant")}
     from . import approvals as _approvals
     cfg_status = _approvals.config_status(wd)
-    return {
+    exp = {
         "lock_hash": lock["lock_hash"], "version": lock["version"], "label": summ["effective_label"] or lock["label"],
         "tier": lock.get("tier"), "pins": sorted(lock.get("pins") or []), "aliases": sorted(lock.get("aliases") or []),
         "amendments": summ["amendments"], "post_data_amendments": summ["post_data_amendments"],
@@ -102,6 +106,20 @@ def expected(wd: Workdir) -> dict | None:
         "config_approval": cfg_status.get("state"), "config_hash": cfg_status.get("config_hash") or "",
         "fingerprints": cfg_status.get("fingerprints") or [],
     }
+    # Phase-8 evidence, when it exists (profile before results, verify after).
+    try:
+        from . import stage8 as _stage8
+        prof = _stage8.load_profile(wd)
+        if isinstance(prof, dict) and prof.get("lock_hash") == lock["lock_hash"]:
+            exp["profile"] = prof
+        ver = _stage8.load_verify(wd)
+        if (isinstance(ver, dict) and ver.get("lock_hash") == lock["lock_hash"]
+                and ver.get("status") == "reproduced within tolerance"):
+            exp["verify"] = ver
+        exp["n_eval_cases"] = len(_stage8.match_evals(wd))
+    except Exception:
+        pass
+    return exp
 
 
 def _claimed_label(value: str) -> str | None:
@@ -178,12 +196,43 @@ def check(wd: Workdir, text: str, short: bool = False) -> list[str]:
     else:
         try:
             selfdir = wd.analysis / "reviews" / "self"
-            has_self = bool(selfdir.is_dir() and any(selfdir.glob("teardown-round*.md")))
+            has_self = bool(selfdir.is_dir() and (any(selfdir.glob("teardown-round*.md"))
+                                                  or any(selfdir.glob("post-result-round*.md"))))
         except OSError:
             has_self = False
         if has_self and "self" not in (fields.get("review", "") or "").lower():
             problems.append("footer review omits recorded self re-reads "
                             "(reviews/self/): say who reviewed (§5.0)")
+    # Phase-8 recomputes: data names every profiled alias + snapshot hash;
+    # kernel names a replay env hash; reproduce names the locked variant and
+    # `dda verify`; correction evals names the matched count.
+    prof = exp.get("profile")
+    if prof and g("data"):
+        dl = g("data").lower()
+        for alias in sorted((prof.get("aliases") or {})):
+            r = (prof["aliases"] or {})[alias]
+            if alias.lower() not in dl:
+                problems.append(f"footer data omits profiled source {alias!r}")
+            if r.get("kind") == "snapshot" and r.get("combined"):
+                if str(r["combined"])[:12].lower() not in dl:
+                    problems.append(f"footer data omits snapshot hash for {alias!r} "
+                                    f"(expected {str(r['combined'])[:12]})")
+    ver = exp.get("verify")
+    if ver and g("kernel"):
+        envs = {(rp.get("env_hash") or "")[:12].lower() for rp in ver.get("replays", []) if rp.get("env_hash")}
+        if envs and not any(e in g("kernel").lower() for e in envs):
+            problems.append(f"footer kernel omits the replay environment hash "
+                            f"(expected one of {', '.join(sorted(envs))})")
+    if ver and g("reproduce"):
+        rl = g("reproduce").lower()
+        if str(ver.get("variant", "")).lower() not in rl:
+            problems.append(f"footer reproduce omits the locked variant {ver.get('variant')!r}")
+        if "dda verify" not in rl:
+            problems.append("footer reproduce omits the `dda verify` replay command")
+    if exp.get("n_eval_cases") and g("correction evals"):
+        m = re.search(r"(\d+)\s+matched", g("correction evals"))
+        if not m or int(m.group(1)) != exp["n_eval_cases"]:
+            problems.append(f"footer correction evals wrong (expected {exp['n_eval_cases']} matched)")
     return problems
 
 
@@ -203,6 +252,33 @@ def skeleton(wd: Workdir, short: bool = False) -> str:
     exp = expected(wd)
     if exp is None:
         return ""
+    data_default = "aggregates only; no row values quoted"
+    kernel_default = "see report body"
+    reproduce_default = "see report body"
+    evals_default = "none"
+    prof = exp.get("profile")
+    if prof and not short:
+        bits = []
+        for alias in sorted((prof.get("aliases") or {})):
+            r = (prof["aliases"] or {})[alias]
+            if r.get("kind") == "live-only":
+                bits.append(f"{alias}: live-only fingerprint (no materialized snapshot)")
+            else:
+                files = ", ".join(f"{f['rel']} sha256 {str(f.get('sha256'))[:12]}"
+                                  for f in sorted((r.get("files") or {}).values(),
+                                                  key=lambda f: f.get("rel") or ""))
+                bits.append(f"{alias}@{r.get('asof')}: combined {str(r.get('combined'))[:12]} ({files})")
+        data_default = "aggregates only (no rows/samples). " + "; ".join(bits)
+    ver = exp.get("verify")
+    if ver and not short:
+        envs = sorted({(rp.get("env_hash") or "")[:12] for rp in ver.get("replays", []) if rp.get("env_hash")})
+        kernel_default = (f"fresh-kernel double replay of locked variant {ver.get('variant')!r} "
+                          f"(env {', '.join(envs)}; {ver.get('stdout_note', '')})".rstrip())
+        reproduce_default = (f"locked variant `{ver.get('variant')}` — rerun `dda verify` "
+                             "in this workdir (fresh kernel against the profile snapshot)")
+        evals_default = f"{ver.get('evals_matched', 0)} matched, {ver.get('evals_passed', 0)} passed (see verify.md)"
+    elif exp.get("n_eval_cases") and not short:
+        evals_default = f"{exp['n_eval_cases']} matched (run `dda verify` to execute checks)"
     known = {
         "tier": exp["tier"] or "", "spec version": f"v{exp['version']}", "lock hash": exp["lock_hash"][:12],
         "lock timestamp": exp["locked_at"] or "", "lock label": exp["label"],
@@ -218,10 +294,10 @@ def skeleton(wd: Workdir, short: bool = False) -> str:
         # Author-filled fields: fillable non-empty defaults so a fresh skeleton
         # verifies; the author replaces them with the report's real content.
         "question": _skeleton_question(wd),
-        "data": "aggregates only; no row values quoted",
-        "kernel": "see report body",
-        "reproduce": "see report body",
-        "correction evals": "none",
+        "data": data_default,
+        "kernel": kernel_default,
+        "reproduce": reproduce_default,
+        "correction evals": evals_default,
         "hook faults": "none recorded",
         "caveats": "see report body",
         "generated": exp["locked_at"] or "unknown",

@@ -141,7 +141,7 @@ def _check_vid(vid: str) -> None:
 
 
 def register_variant(wd: Workdir, vid: str, *, parent: str | None = None, why: str,
-                     label: str | None, header: dict) -> dict:
+                     label: str | None = None, header: dict) -> dict:
     """Register a variant (writes specs-tried + ledger). A changed header is a new id."""
     _check_vid(vid)
     if parent:
@@ -452,8 +452,15 @@ def _variant_script(wd: Workdir, vid: str, script: str) -> tuple[Path, str]:
 
 
 def do_run(wd: Workdir, vid: str, script: str, script_args: list[str], *, session: str = "",
-           seed: int | None = None) -> dict:
-    """Run a variant script in the locked-down kernel. Returns the kernel record."""
+           seed: int | None = None, overlay: dict | None = None,
+           capture_dir=None) -> dict:
+    """Run a variant script in the locked-down kernel. Returns the kernel record.
+
+    `overlay` ({live canon path: snapshot canon path}) replays against a
+    frozen snapshot (SPEC §10.3): the child redirects read-mode opens
+    through it. `capture_dir` keeps full stdout/stderr files for replay
+    diffing (the record itself still carries only tails).
+    """
     from . import hooks as _hooks  # local import: hooks never imports kernel
     _check_vid(vid)
     wd.require_initialized()
@@ -516,7 +523,8 @@ def do_run(wd: Workdir, vid: str, script: str, script_args: list[str], *, sessio
                                             canon(str(wd.root / "outputs"))])),
               "lock_hash": lock_hash, "variant": vid, "run_id": run_id,
               "session": session, "seed": run_seed, "kernel_yaml": ky_text,
-              "baseline_dir": baseline_dir}
+              "baseline_dir": baseline_dir,
+              "overlay": {str(k): str(v) for k, v in (overlay or {}).items()}}
     policy_bytes = json.dumps(policy, sort_keys=True).encode("utf-8")
     policy_hash = hashlib.sha256(policy_bytes).hexdigest()
     ipc_dir = Path(tempfile.mkdtemp(prefix="dda-kernel-"))
@@ -618,6 +626,9 @@ def do_run(wd: Workdir, vid: str, script: str, script_args: list[str], *, sessio
               "ipc": True, "policy_hash": policy_hash, "event_count": len(child_events),
               "baseline": versions, "environment_hash": env_hash, "network_policy": net,
               "status_trusted": status_trusted,
+              "replay": bool(overlay),
+              "snapshot_overlay": {str(k): str(v) for k, v in (overlay or {}).items()},
+              "overlay_status": status.get("snapshot_overlay") if status_trusted else "untrusted (status not bound)",
               "audit_hook": status.get("audit_hook") if status_trusted else "untrusted (status not bound)",
               "wrappers": status.get("wrappers") if status_trusted else "untrusted (status not bound)",
               "display": status.get("display") if status_trusted else "untrusted (status not bound)",
@@ -639,7 +650,9 @@ def do_run(wd: Workdir, vid: str, script: str, script_args: list[str], *, sessio
                                          "body_hash": body_hash, "code_hash": code_hash, "seed": run_seed,
                                          "lock_hash": lock_hash, "label": reg.get("label"),
                                          "kernel": f"runs/kernels/{run_id}.json", "kernel_hash": kernel_hash,
-                                         "policy_hash": policy_hash, "returncode": proc.returncode})
+                                         "policy_hash": policy_hash, "returncode": proc.returncode,
+                                         "replay": bool(overlay),
+                                         "snapshot_overlay": {str(k): str(v) for k, v in (overlay or {}).items()}})
     chain.append(ledger.runs_log(wd), {"type": "done", "session": session, "tool": "dda", "subcommand": "run",
                                       "call": run_id, "aliases": sorted(lock["aliases"]), "kind": "data",
                                       "variant": vid, "code_hash": code_hash, "blob": blob_ptr,
@@ -663,6 +676,14 @@ def do_run(wd: Workdir, vid: str, script: str, script_args: list[str], *, sessio
                             "synthesized": "child exited without logging kernel-stop"})
     record["kernel_file"] = str(kpath)
     record["blob"] = blob_ptr
+    if capture_dir is not None:
+        # Full stdout/stderr for replay diffing (records carry tails only).
+        cap = Path(capture_dir)
+        cap.mkdir(parents=True, exist_ok=True)
+        (cap / "stdout.txt").write_text(proc.stdout[-5_000_000:], encoding="utf-8", errors="replace")
+        (cap / "stderr.txt").write_text(proc.stderr[-5_000_000:], encoding="utf-8", errors="replace")
+        record["captured_stdout"] = str(cap / "stdout.txt")
+        record["captured_stderr"] = str(cap / "stderr.txt")
     if proc.returncode != 0:
         raise DdaError(f"kernel exited {proc.returncode} (record: runs/kernels/{run_id}.json):\n"
                        f"{(proc.stderr or proc.stdout).strip()[-1500:]}", code=proc.returncode or 1)

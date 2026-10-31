@@ -727,7 +727,7 @@ def do_lock(wd: Workdir, amend: str | None = None) -> dict:
         state, detail, _ = lockstate.quick_status(wd)
         if state == "tampered":
             raise DdaError(f"lock state tampered: {detail} — stop and ask (§3.2 case 8)", EXIT_CHAIN)
-        if existing["lock_hash"] == comp.lock_hash:
+        if existing["lock_hash"] == comp.lock_hash and not amend:
             return {"noop": True, **{k: v for k, v in existing.items() if not k.startswith("_")}}
         if not amend:
             raise DdaError(f"spec, config, or definitions changed since lock v{existing['version']}; "

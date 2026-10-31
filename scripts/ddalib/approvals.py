@@ -51,7 +51,7 @@ def current_artifact(wd: Workdir, kind: str) -> str | None:
     """The artifact hash the current workdir state requires, if computable."""
     if kind == "config":
         return lockhash.config_hash(wd)
-    if kind in ("spec", "amendment"):
+    if kind in ("spec", "amendment", "tier"):
         if not wd.spec_path.is_file():
             return None
         return lockhash.sha256_hex(lockhash.normalized_spec(read_text_lf(wd.spec_path)))
