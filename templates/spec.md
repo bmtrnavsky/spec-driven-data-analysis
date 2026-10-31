@@ -43,3 +43,10 @@ State the economy rung in one sentence (SPEC §2.1).
 ## Assumptions
 
 ## Out of scope
+
+## Pattern tags
+
+Optional: closed-vocabulary pattern tags this analysis may hit
+(e.g. `join`, `timezone`, `denominator`, one per line or
+comma-separated). Correction evals match against these tags (§9).
+Leave empty when none apply.

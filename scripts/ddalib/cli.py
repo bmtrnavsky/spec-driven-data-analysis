@@ -3,7 +3,8 @@
 Implemented: init, status, start, release, hash, install, version (phase 1);
 lock, verify-chain, gate (G4), footer, abandon (phase 2); meta, variant, run,
 gate G6 (phase 3); approve, approved, doctor (phase 4); packet, review run,
-gate G3 (phase 7); profile, verify, gates G2/G5/G7 (phase 8).
+gate G3 (phase 7); profile, verify, gates G2/G5/G7 (phase 8);
+evals new/match/run (phase 9).
 Everything else in the spec's command set is registered but fails closed
 (exit 3, "not implemented in this build") so a script or gate that calls
 it can never mistake a missing feature for a pass.
@@ -26,7 +27,6 @@ EXIT_NOT_IMPLEMENTED = 3
 
 # Spec commands not yet built, with the build phase that delivers them (§14).
 PENDING = {
-    "evals": 9,
 }
 # Gates and the phase that builds each one's checks (§3, §14). G0/G8/G9 (5),
 # G1 (6), G4, G6 (3), G3 (7), G2/G5/G7 (8) are built; unmapped gates fail closed.
@@ -532,6 +532,74 @@ def cmd_verify(args) -> int:
     return 0
 
 
+def cmd_evals(args) -> int:
+    from . import evals as _evals
+    wd = _wd(args)
+    if args.evals_cmd == "new":
+        try:
+            rec = _evals.do_new(
+                wd, args.title, args.triggers,
+                what_happened=args.what_happened or "",
+                what_wrong=args.what_wrong or "",
+                correct_behavior=args.correct_behavior or "",
+                check_file=args.check_file,
+                check_sha256=args.check_sha256,
+                review_question=args.review_question or "",
+                source=args.source or "")
+        except DdaError as exc:
+            print("dda evals new: " + str(exc), file=sys.stderr)
+            return exc.code or 1
+        print("drafted correction case " + rec["case"] + ": " + rec["path"])
+        for w in rec["warnings"]:
+            print("warning: " + w, file=sys.stderr)
+        print("next: get a signed correction approval "
+              "(dda approve correction " + rec["case"] + " + "
+              "dda approved correction " + rec["case"] + "), then dda evals run")
+        return 0
+    if args.evals_cmd == "match":
+        try:
+            matched = _evals.do_match(wd)
+        except DdaError as exc:
+            print("dda evals match: " + str(exc), file=sys.stderr)
+            return exc.code or 1
+        if args.json:
+            print(json.dumps(matched, indent=2, sort_keys=True))
+            return 0
+        if not matched:
+            print("no correction evals matched (none binding for this spec)")
+            return 0
+        for m in matched:
+            bind = "bound" if m["bound"] else "unbound (draft: needs a correction approval)"
+            print(m["case"] + ": " + bind + "; verified=" + str(m["verified"])
+                  + " triggers=" + ",".join(m["triggers"]))
+        return 0
+    if args.evals_cmd == "run":
+        try:
+            rec = _evals.do_run(wd)
+        except DdaError as exc:
+            print("dda evals run: " + str(exc), file=sys.stderr)
+            return exc.code or 1
+        if args.json:
+            print(json.dumps(rec, indent=2, sort_keys=True))
+            return 0 if rec["ok"] else 1
+        if not rec["matched"]:
+            print("no correction evals matched: nothing to run")
+            return 0
+        for r in rec["results"]:
+            bound = "bound" if r.get("bound") else "unbound"
+            note = (" -- " + r["note"]) if r.get("note") else ""
+            print(r["case"] + " [" + bound + "]: " + r["status"] + note)
+        for r in rec["failed_unbound"]:
+            print("note: " + r["case"] + " failed but is unbound (draft); "
+                  "bind it with a correction approval to enforce", file=sys.stderr)
+        if not rec["ok"]:
+            print("bound correction eval(s) failed (stop-and-ask case 5 at DECIDE+)",
+                  file=sys.stderr)
+            return 1
+        return 0
+    raise DdaError("unknown evals subcommand %r" % (args.evals_cmd,), code=3)
+
+
 def cmd_pending(args) -> int:
     phase = PENDING[args.command]
     print(f"dda {args.command}: not implemented in this build (arrives in build phase {phase}, SPEC §14). "
@@ -704,6 +772,34 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("workdir", nargs="?")
     r.add_argument("--milestone")
     r.set_defaults(func=cmd_review)
+
+    s = sub.add_parser("evals", help="correction evals: draft, match, run (SPEC §9)")
+    es = s.add_subparsers(dest="evals_cmd", required=True)
+    n = es.add_parser("new", help="draft a correction case in evals/corrections/NNN")
+    n.add_argument("--title", required=True)
+    n.add_argument("--triggers", required=True,
+                   help="comma-separated aliases, definition names, pattern tags")
+    n.add_argument("--what-happened", default="")
+    n.add_argument("--what-wrong", default="")
+    n.add_argument("--correct-behavior", default="")
+    n.add_argument("--check-file", default=None,
+                   help="deterministic check file under outputs/ or derived/")
+    n.add_argument("--check-sha256", default=None, help="64 hex digits of the expected file")
+    n.add_argument("--review-question", default="")
+    n.add_argument("--source", default="", help="date (UTC) + who reported the correction")
+    n.add_argument("workdir", nargs="?")
+    n.add_argument("--milestone")
+    n.set_defaults(func=cmd_evals)
+    m = es.add_parser("match", help="list every binding case matching this spec")
+    m.add_argument("workdir", nargs="?")
+    m.add_argument("--milestone")
+    m.add_argument("--json", action="store_true")
+    m.set_defaults(func=cmd_evals)
+    r = es.add_parser("run", help="run deterministic checks for matched cases")
+    r.add_argument("workdir", nargs="?")
+    r.add_argument("--milestone")
+    r.add_argument("--json", action="store_true")
+    r.set_defaults(func=cmd_evals)
 
     for name in PENDING:
         s = sub.add_parser(name, help=f"(build phase {PENDING[name]}; fails closed)")

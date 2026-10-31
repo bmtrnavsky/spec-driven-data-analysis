@@ -287,10 +287,10 @@ class TestFailClosed(P7Setup):
     TIER = "This is a DECIDE analysis."
     RUNG = "glance"
     def test_unbuilt_still_exit_3(self):
-        # Phase 8 built profile/verify and gates G2/G5/G7; only evals (phase 9) still fails closed.
-        for args in (("evals",),):
+        # Phase 9 built evals; no spec command still fails closed.
+        for args in (("evals", "new"), ("evals", "match"), ("evals", "run")):
             rc, _ = self.cli(*args)
-            self.assertEqual(rc, 3, f"dda {' '.join(args)} must fail closed with exit 3")
+            self.assertNotEqual(rc, 3, f"dda {' '.join(args)} was built in phase 9: {rc}")
 
     def test_review_round_cap(self):
         self.assertEqual(self.cli("packet", "teardown")[0], 0)

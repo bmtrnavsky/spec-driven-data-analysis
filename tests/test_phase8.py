@@ -199,9 +199,10 @@ class P8Setup(unittest.TestCase):
 
 
 class TestFailClosed8(P8Setup):
-    def test_evals_still_exit_3(self):
-        rc, _ = self.cli("evals")
-        self.assertEqual(rc, 3, "dda evals arrives in phase 9 and must still fail closed")
+    def test_evals_built_in_phase_9(self):
+        for args in (("evals", "new"), ("evals", "match"), ("evals", "run")):
+            rc, out = self.cli(*args)
+            self.assertNotEqual(rc, 3, f"dda {' '.join(args)} was built in phase 9: {out}")
 
     def test_profile_verify_gates_built(self):
         for args in (("profile",), ("verify",), ("gate", "G7"), ("gate", "G5"), ("gate", "G2")):

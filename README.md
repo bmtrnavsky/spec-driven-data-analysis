@@ -4,15 +4,15 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Hermes Plugin](https://img.shields.io/badge/Hermes-Plugin-teal.svg)](https://hermes-agent.nousresearch.com/docs)
-[![Version](https://img.shields.io/badge/version-0.8.0--phase8-orange.svg)](SPEC.md)
+[![Version](https://img.shields.io/badge/version-0.9.0--phase9-orange.svg)](SPEC.md)
 
 Part of the Disciplined series with
 [disciplined-vibe-coding](https://github.com/bmtrnavsky/disciplined-vibe-coding) same house rules: lock the plan before the work, verify before claiming done.
 
 Spec-first data analysis for Hermes: lock the plan before the data, block
 the shortcuts with hooks, re-check every hook rule at a gate. The design is
-in [SPEC.md](SPEC.md). This tree contains build phases 0–8 (SPEC §14).
-Current build: `0.8.0-phase8` (`python scripts/dda.py version`).
+in [SPEC.md](SPEC.md). This tree contains build phases 0–9 (SPEC §14).
+Current build: `0.9.0-phase9` (`python scripts/dda.py version`).
 
 ## Status
 
@@ -27,7 +27,7 @@ Current build: `0.8.0-phase8` (`python scripts/dda.py version`).
 | 6 | `definitions`, `defguard`, and content-hashed pins; gate G1 (6) | built |
 | 7 | Goldfish review, `dda packet` / `dda review run`, gate G3 (7) | built |
 | 8 | `dda profile` / `dda verify`, gates G2, G5, G7; footer data/kernel/reproduce/evals recompute (8) | built |
-| 9 | `correct` and `dda evals` (9). Gate G7's full eval UX also arrives here | not built; command fails closed (exit 3) |
+| 9 | `correct` and `dda evals` (9). Gate G7's full eval UX also arrives here | built |
 
 The CLI is `dda` (pronounced "dee-dee-ay", short for disciplined data analysis).
 
@@ -48,6 +48,9 @@ python scripts/dda.py gate G4 <workdir>       # lock recompute, chain verify, ex
 python scripts/dda.py gate G5 <workdir>       # profile coverage, schema, snapshot integrity
 python scripts/dda.py gate G2 <workdir>       # rung/tier, triggers, tier confirmation
 python scripts/dda.py gate G7 <workdir>       # replay agreement, drift, correction evals, post-result review
+python scripts/dda.py evals new --title T --triggers k,... [workdir]  # draft evals/corrections/NNN/case.md
+python scripts/dda.py evals match [workdir]   # mechanical match of binding cases to this spec
+python scripts/dda.py evals run [workdir]     # deterministic checks for matched cases
 python scripts/dda.py gate G6 <workdir>       # orphan runs, frozen bodies, ledger reasons, heartbeat
 python scripts/dda.py meta <alias> [workdir] [--session S]   # metadata only: names, types, counts
 python scripts/dda.py variant <id> [workdir] --why "..." [--parent P] [--label L] [--set k=v ...]

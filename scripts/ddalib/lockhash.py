@@ -44,6 +44,7 @@ SECTION_ORDER = (
     "Prior exposure",
     "Assumptions",
     "Out of scope",
+    "Pattern tags",
 )
 _SECTION_KEYS = {s.lower(): s for s in SECTION_ORDER}
 PREAMBLE = "__preamble__"

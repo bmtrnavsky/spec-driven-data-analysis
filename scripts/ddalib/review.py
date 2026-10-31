@@ -240,14 +240,28 @@ def packet_files(wd: Workdir, stage: str, comp: lockhash.LockComponents) -> list
 
 
 def _eval_questions(wd: Workdir) -> bytes:
-    """Review question of every matched correction eval (§5.1). Phase 9 not
-    built: mechanically collect `Review question:` lines from
-    evals/corrections/*/case.md when present, else an empty section."""
+    """Review question of every matched correction eval (§5.1, phase 9).
+
+    Only matched cases (per the mechanical match) contribute; unmatched
+    cases never reach the goldfish. No lock (pre-lock teardown) means no
+    match is computable, so no questions are attached.
+    """
+    from . import stage8 as _stage8
+    from . import lockstate as _lockstate
     out = ["# Matched correction-eval review questions (§5.1)", ""]
-    base = wd.root / "evals" / "corrections"
+    matched: set[str] = set()
+    try:
+        state, _, _ = _lockstate.quick_status(wd)
+        if state == "valid":
+            matched = {m["case"] for m in _stage8.match_evals(wd)}
+    except DdaError:
+        matched = set()
     found = 0
+    base = wd.root / "evals" / "corrections"
     if base.is_dir():
         for case in sorted(base.glob("*/case.md")):
+            if case.parent.name not in matched:
+                continue
             try:
                 text = case.read_text(encoding="utf-8")
             except OSError:
