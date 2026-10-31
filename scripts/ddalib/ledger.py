@@ -461,6 +461,11 @@ def _git_safety_evidence(wd: Workdir, lock: dict | None) -> set[str]:
     add(audit_log(wd))
     add(specs_tried(wd))
     add(approvals_index(wd))
+    # Stage 5/7 evidence: dda's own committed records (like runs.log and
+    # specs-tried.jsonl above), so G9 stays satisfiable once a profile or
+    # verify run exists. Still content-scanned for secrets like the rest.
+    add(wd.analysis / "profile.json")
+    add(wd.analysis / "verify.json")
     for chained in workdir_chains(wd):
         add(chained)
     for pin in (lock.get("pins") if lock else []) or []:
@@ -969,40 +974,45 @@ def gate_g4(wd: Workdir) -> tuple[bool, str, dict]:
     if found["session_history"] or found["rebind"]:
         notes.append("workdir hopping: " + ", ".join(sorted({f['session'] for f in found['session_history'] + found['rebind']
                                                              if f.get('session')})))
-    # Config approval (§4.5): a `config` approval for the exact config hash.
+    # Config approval (§4.5): a `config` approval for the exact config hash,
+    # checked through the one requirements table with typed states (M1).
     from . import approvals as _approvals
+    from . import requirements as _requirements
     comp_hash = lockhash.config_hash(wd)
+    ok, req_notes, _info = _requirements.require(wd, "G4")
     status = _approvals.config_status(wd)
     st = status.get("state")
-    if st == "verified":
+    V = _approvals.ApprovalState
+    if st == V.VERIFIED.value:
         notes.append(f"config approval verified ({status.get('detail')})")
-    elif st == "downgraded":
+    elif st == V.DOWNGRADED.value:
         notes.append(f"config approval DOWNGRADED to unverified: {status.get('detail')}")
-        st = "unverified"
-    elif st == "unverified":
+        st = V.UNVERIFIED.value
+    elif st == V.UNVERIFIED.value:
         notes.append(f"config approval unverified (agent could have produced it): {status.get('detail')}")
-    elif st == "missing":
+    elif st == V.MISSING.value:
         notes.append(f"no config approval for config {comp_hash[:12]}")
+    elif st in (V.UNCOMMITTED.value, V.STALE.value, V.BAD_SIG.value, V.UNKNOWN_SIGNER.value):
+        notes.append(f"config approval {st} (covers no current config): {status.get('detail')}")
+        st = V.MISSING.value
     else:
         notes.append(f"config approval unknown: {status.get('detail')}")
-        st = "missing"
+        st = V.MISSING.value
+    # The pass/fail itself comes from the requirements table (M1); the
+    # branches below only add the human-readable disclosure notes.
+    passed = ok
     if tier == "EXPLORE":
-        if st == "missing":
+        if st == V.MISSING.value:
             notes.append("unapproved config disclosed at EXPLORE")
-        passed = True
-    elif st == "verified":
-        passed = True
-    elif st == "unverified":
+    elif st == V.VERIFIED.value:
+        pass
+    elif st == V.UNVERIFIED.value:
         notes.append("human approval unverified (agent could have produced it)")
         if tier == "PUBLISH":
             notes.append("PUBLISH needs a verified config approval: parked (§3.2 case 9)")
-            passed = False
-        else:
-            passed = True
-    else:
+    elif st != V.MISSING.value or not ok:
         notes.append(f"data reads block at {tier or 'undeclared tier'} until a human approves the new config "
                      f"(`dda approve config` in their own terminal, then `dda approved config`)")
-        passed = False
     return passed, "; ".join(notes), {"label": eff, "exposure": found, "config_approval": st}
 
 

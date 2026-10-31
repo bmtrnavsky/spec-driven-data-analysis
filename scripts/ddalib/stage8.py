@@ -386,11 +386,29 @@ def render_profile_md(wd: Workdir, rec: dict) -> str:
 # ---------- correction-eval matching (phase-8 subset of §9) ----------
 
 def _case_triggers(case_md: str) -> list[str]:
+    """Trigger keys from a case body or an approved canonical payload.
+
+    Reads ``-`` bullets under a ``## Trigger keys`` header (the canonical
+    approved form) and legacy inline ``Trigger keys: a, b`` lines.
+    """
+    keys: list[str] = []
+    in_block = False
     for line in case_md.splitlines():
-        if line.strip().lower().startswith("trigger keys:"):
-            rest = line.split(":", 1)[1]
-            return [t.strip().lower() for t in re.split(r"[,;]", rest) if t.strip()]
-    return []
+        s = line.strip()
+        if s.startswith("##"):
+            in_block = s.lower().rstrip(":") == "## trigger keys"
+            continue
+        if in_block:
+            if s.startswith("-"):
+                s = s[1:].strip()
+            else:
+                continue
+        elif not s.lower().startswith("trigger keys:"):
+            continue
+        else:
+            s = s.split(":", 1)[1]
+        keys.extend(t.strip().lower() for t in re.split(r"[,;]", s) if t.strip())
+    return [k for k in keys if k]
 
 
 def _eval_check(case_md: str) -> dict | None:
@@ -440,8 +458,44 @@ def match_evals(wd: Workdir) -> list[dict]:
     base = wd.root / "evals" / "corrections"
     if not base.is_dir():
         return []
+    # M1: bound cases are enumerated from committed correction approvals
+    # (git history), never from the working-dir scan — an edited working
+    # copy is an unapproved draft while the approved copy still binds. The
+    # triggers, deterministic check, and case hash all come from the
+    # embedded payload read from git.
     matched = []
+    for entry in _approvals.list_approvals(wd, "correction"):
+        rec = entry["record"]
+        payload = rec.get("payload")
+        if not isinstance(payload, str) or not payload:
+            continue  # v1 record: no embedded payload, cannot bind (re-approve)
+        case_id = rec.get("selector") or entry["rel"]
+        triggers = _case_triggers(payload)
+        if not triggers:
+            continue
+        hit = [t for t in triggers if t and t in hay]
+        if not hit:
+            continue
+        digest = rec.get("digest") or rec.get("artifact")
+        verdict = _approvals.verify_approval(wd, "correction", digest)
+        state = _approvals.ApprovalState(verdict.get("state", "missing"))
+        V = _approvals.ApprovalState
+        bound = state == V.VERIFIED or (comp.tier != "PUBLISH"
+                                        and state in (V.UNVERIFIED, V.DOWNGRADED, V.STALE))
+        matched.append({"case": case_id, "triggers": hit, "bound": bound,
+                        "verified": bool(verdict.get("verified")),
+                        "approval_reason": verdict.get("reason", ""),
+                        "case_hash": digest,
+                        "check": _eval_check(payload)})
+    # Working-dir drafts with no committed approval are still matched but
+    # NEVER bound: an unapproved draft is reported (never blocking) while
+    # the approved copy — enumerated above — still binds. Skips cases the
+    # approval loop already covered so an edited working copy cannot
+    # shadow its approved payload.
+    seen = {m["case"] for m in matched}
     for d in sorted(p for p in base.iterdir() if p.is_dir()):
+        if d.name in seen:
+            continue
         case = d / "case.md"
         if not case.is_file():
             continue
@@ -457,8 +511,10 @@ def match_evals(wd: Workdir) -> list[dict]:
             continue
         verdict = _approvals.verify_approval(wd, "correction", d.name)
         reason = str(verdict.get("reason", ""))
-        bound = verdict.get("verified") or ("not found" not in reason and "not committed" not in reason
-                                            and comp.tier != "PUBLISH")
+        state = _approvals.ApprovalState(verdict.get("state", "missing"))
+        V = _approvals.ApprovalState
+        bound = state == V.VERIFIED or (comp.tier != "PUBLISH"
+                                        and state in (V.UNVERIFIED, V.DOWNGRADED, V.STALE))
         matched.append({"case": d.name, "triggers": hit, "bound": bound,
                         "verified": bool(verdict.get("verified")),
                         "approval_reason": reason,

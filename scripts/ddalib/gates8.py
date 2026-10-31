@@ -13,7 +13,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from . import chain, ledger, lockhash, lockstate, review
+from . import ledger, lockhash, lockstate, review
 from . import stage8
 from .layout import DdaError, Workdir, load_config
 
@@ -47,10 +47,6 @@ def _preamble(wd: Workdir) -> tuple[dict, object]:
         return None, DdaError("workdir changed since lock (spec, config, or definitions); "
                               "re-lock or amend before gating (§3.1)")
     return (lock, comp), None
-
-
-def _wayfinder(wd: Workdir, gate: str, passed: bool, reason: str) -> None:
-    ledger.write_wayfinder(wd, gate, passed, reason)
 
 
 # ---------- G2 ----------
@@ -92,37 +88,26 @@ def tier_triggers(wd: Workdir, comp) -> tuple[str, list[str]]:
     return top, [r for m, r in mins if m == top]
 
 
-def _tier_confirmation(wd: Workdir, spec_hash: str, tier: str):
-    """Human tier confirmation: a `tier` approval, or the joint `spec` approval (§5.3)."""
-    from . import approvals as _approvals
-    for kind in ("tier", "spec"):
-        v = _approvals.verify_approval(wd, kind, spec_hash)
-        if v.get("verified"):
-            return True, f"{kind} approval verified"
-        reason = str(v.get("reason", ""))
-        if "not found" in reason or "not committed" in reason:
-            continue
-        if tier == "PUBLISH":
-            return False, f"{kind} approval is unverified at PUBLISH — the human must sign from a trusted key (§4.5)"
-        return True, f"{kind} approval unverified at DECIDE (disclosed, not a pass — §4.5)"
-    return False, ("no human tier confirmation for this spec hash: "
-                   "`dda approve tier` (or a joint `dda approve spec`) then commit it (§2.2)")
+def _tier_confirmation(wd: Workdir, tier: str, kinds: tuple[str, ...] | None = None):
+    """Human tier confirmation via the one requirements table (M1)."""
+    from . import requirements as _requirements
+    ok, notes, _info = _requirements.require(wd, "G2", kinds=kinds)
+    if ok:
+        return True, "; ".join(notes) if notes else "tier approval holds"
+    return False, "; ".join(notes)
 
 
 def gate_g2(wd: Workdir) -> tuple[bool, str, dict]:
     pre, err = _preamble(wd)
     if err is not None:
-        _wayfinder(wd, "G2", False, str(err))
         return False, str(err), {}
     lock, comp = pre
     tier, rung = comp.tier, comp.rung
     if not tier or not rung:
         msg = "rung and tier must both be declared in the spec (§2.1)"
-        _wayfinder(wd, "G2", False, msg)
         return False, msg, {}
     if rung == "glance" and tier == "PUBLISH":
         msg = "PUBLISH is never glance (§2.1)"
-        _wayfinder(wd, "G2", False, msg)
         return False, msg, {}
     try:
         locs = (load_config(wd).get("data_roots") or {})
@@ -132,43 +117,32 @@ def gate_g2(wd: Workdir) -> tuple[bool, str, dict]:
               for a in comp.aliases)
     if pii and rung == "glance":
         msg = "PII or regulated data steps up one rung: glance is not allowed (§2.1)"
-        _wayfinder(wd, "G2", False, msg)
         return False, msg, {}
     min_tier, reasons = tier_triggers(wd, comp)
     if TIER_RANK[tier] < TIER_RANK[min_tier]:
         msg = (f"declared tier {tier} is below the triggered minimum {min_tier}: "
                + "; ".join(reasons))
-        _wayfinder(wd, "G2", False, msg)
         return False, msg, {"triggers": reasons}
     notes = []
     if tier != "EXPLORE" or reasons:
-        ok, why = _tier_confirmation(wd, comp.spec_hash, tier)
+        ok, why = _tier_confirmation(wd, tier)
         if not ok:
-            _wayfinder(wd, "G2", False, why)
             return False, why, {"min_tier": min_tier, "triggers": reasons}
         notes.append(why)
     else:
-        notes.append("EXPLORE with no triggers: tier agent-confirmed (§2.2)")
-    # Tier lowering mid-run needs a human-approved amendment.
-    recs = [r for r in chain.read_records(ledger.ledger_path(wd))
-            if r.get("type") in ("lock", "amendment")]
-    prev = [r.get("tier") for r in recs[:-1] if r.get("tier") in TIER_RANK]
-    if prev and max(TIER_RANK[t] for t in prev) > TIER_RANK[tier]:
-        from . import approvals as _approvals
-        v = _approvals.verify_approval(wd, "amendment", comp.spec_hash)
-        reason = str(v.get("reason", ""))
-        bound = v.get("verified") or ("not found" not in reason and "not committed" not in reason
-                                      and tier != "PUBLISH")
-        if not bound:
-            msg = (f"tier lowered from {max(prev, key=lambda t: TIER_RANK[t])} to {tier} mid-run "
-                   "without a human-approved amendment (§2.2)")
-            _wayfinder(wd, "G2", False, msg)
-            return False, msg, {"min_tier": min_tier}
-        notes.append("tier lowering covered by an amendment approval")
+        from . import requirements as _rq2
+        if _rq2.lowered(wd):
+            # Tier lowered mid-run with no triggers: the amendment approval
+            # is still required (§2.2).
+            ok, why = _tier_confirmation(wd, tier, kinds=("amendment",))
+            if not ok:
+                return False, why, {"min_tier": min_tier, "tier_lowered": True}
+            notes.append(why)
+        else:
+            notes.append("EXPLORE with no triggers: tier agent-confirmed (§2.2)")
     if TIER_RANK[tier] > TIER_RANK[min_tier]:
         notes.append(f"declared {tier} is above the triggered minimum {min_tier} (allowed)")
     msg = f"G2 pass: rung {rung}, tier {tier}" + (" (" + "; ".join(notes) + ")" if notes else "")
-    _wayfinder(wd, "G2", True, msg)
     return True, msg, {"tier": tier, "rung": rung, "min_tier": min_tier,
                        "triggers": reasons, "notes": notes}
 
@@ -178,18 +152,15 @@ def gate_g2(wd: Workdir) -> tuple[bool, str, dict]:
 def gate_g5(wd: Workdir) -> tuple[bool, str, dict]:
     pre, err = _preamble(wd)
     if err is not None:
-        _wayfinder(wd, "G5", False, str(err))
         return False, str(err), {}
     lock, comp = pre
     prof = stage8.load_profile(wd)
     if prof is None:
         msg = "no profile: run `dda profile` to snapshot every source before analysis (§10.3)"
-        _wayfinder(wd, "G5", False, msg)
         return False, msg, {}
     if prof.get("lock_hash") != comp.lock_hash:
         msg = ("the profile predates the current lock (spec changed or amended): "
                "re-run `dda profile` (G5)")
-        _wayfinder(wd, "G5", False, msg)
         return False, msg, {}
     problems = []
     notes = []
@@ -232,12 +203,10 @@ def gate_g5(wd: Workdir) -> tuple[bool, str, dict]:
             notes.append(f"{alias}: schema matches profile, snapshot intact")
     if problems:
         msg = "G5 fails:\n  - " + "\n  - ".join(problems)
-        _wayfinder(wd, "G5", False, msg)
         return False, msg, {"profile_asof": prof.get("asof")}
     msg = f"G5 pass: {len(comp.aliases)} source(s) snapshotted/fingerprinted at {prof.get('asof')}"
     if notes:
         msg += " (" + "; ".join(notes) + ")"
-    _wayfinder(wd, "G5", True, msg)
     return True, msg, {"profile_asof": prof.get("asof"), "notes": notes}
 
 
@@ -285,24 +254,20 @@ def gate_g7(wd: Workdir) -> tuple[bool, str, dict]:
     from . import kernel as _kernel
     pre, err = _preamble(wd)
     if err is not None:
-        _wayfinder(wd, "G7", False, str(err))
         return False, str(err), {}
     lock, comp = pre
     vid = _kernel.locked_variant_id(wd)
     if not vid:
         msg = "no locked variant: mark the reported variant first (`dda variant --locked <id>`, §4.3)"
-        _wayfinder(wd, "G7", False, msg)
         return False, msg, {}
     ok5, msg5, _ = gate_g5(wd)
     if not ok5:
         msg = f"G7 fails: profile gate fails:\n{msg5}"
-        _wayfinder(wd, "G7", False, msg)
         return False, msg, {}
     prof = stage8.load_profile(wd) or {}
     ver = stage8.load_verify(wd)
     if ver is None:
         msg = "no verify evidence: run `dda verify` (replay the locked script against the snapshot, §10.3)"
-        _wayfinder(wd, "G7", False, msg)
         return False, msg, {}
     for key in ("lock_hash", "variant", "body_hash"):
         want = {"lock_hash": comp.lock_hash, "variant": vid,
@@ -310,16 +275,13 @@ def gate_g7(wd: Workdir) -> tuple[bool, str, dict]:
         if ver.get(key) != want:
             msg = (f"verify evidence is stale ({key} mismatch): re-run `dda verify` "
                    "after re-locking, re-profiling, or re-freezing")
-            _wayfinder(wd, "G7", False, msg)
             return False, msg, {}
     if (ver.get("status") or "") != "reproduced within tolerance":
         live_note = ver.get("live_only_note")
         if live_note and comp.tier != "PUBLISH":
             note = f"G7 pass with caveat below PUBLISH: {live_note}"
-            _wayfinder(wd, "G7", True, note)
             return True, note, {"caveat": live_note}
         msg = f"G7 fails: replay did not reproduce: {ver.get('status')}"
-        _wayfinder(wd, "G7", False, msg)
         return False, msg, {}
     # Replays really happened: run entries under this lock+body, overlay-bound.
     entries = [e for e in _kernel.run_entries(wd, vid)
@@ -329,7 +291,6 @@ def gate_g7(wd: Workdir) -> tuple[bool, str, dict]:
     if len(replays) < 2:
         msg = ("verify evidence names replays with no matching successful run entries "
 f"({len(replays)} found, need 2): the specs-tried ledger is the binding record (§4.5)")
-        _wayfinder(wd, "G7", False, msg)
         return False, msg, {}
     # Profile-before-results (§10.3): the snapshot must predate analysis.
     # Any original (non-replay) run recorded before the profile means
@@ -358,7 +319,6 @@ f"({len(replays)} found, need 2): the specs-tried ledger is the binding record (
             msg = ("G7 fails: first analysis run predates the profile "
                    "(results before snapshot, §10.3): run `dda profile` before "
                    "`dda run`, then re-run `dda verify`")
-            _wayfinder(wd, "G7", False, msg)
             return False, msg, {}
     # Overlay binding: the replay overlay must equal the profile snapshot map.
     from .matching import canon as _canon
@@ -375,14 +335,12 @@ f"({len(replays)} found, need 2): the specs-tried ledger is the binding record (
         if (e.get("snapshot_overlay") or {}) != want_overlay:
             msg = ("a replay ran against a different snapshot map than the profile records "
                    "(overlay mismatch): re-run `dda verify` against the current profile")
-            _wayfinder(wd, "G7", False, msg)
             return False, msg, {}
     # Matched correction evals: bound cases with failing checks stop DECIDE+.
     matched = stage8.match_evals(wd)
     if len(matched) != ver.get("evals_matched"):
         msg = (f"correction-eval match changed since verify ({ver.get('evals_matched')} then, "
                f"{len(matched)} now): re-run `dda verify` (§9)")
-        _wayfinder(wd, "G7", False, msg)
         return False, msg, {}
     for m in matched:
         if not m.get("bound"):
@@ -390,22 +348,18 @@ f"({len(replays)} found, need 2): the specs-tried ledger is the binding record (
         if m.get("case_hash") != next((e.get("case_hash") for e in ver.get("evals", [])
                                        if e.get("case") == m["case"]), None):
             msg = f"correction case {m['case']!r} changed since verify: re-run `dda verify` (§9)"
-            _wayfinder(wd, "G7", False, msg)
             return False, msg, {}
         status = next((e.get("status") for e in ver.get("evals", []) if e.get("case") == m["case"]), "?")
         if status == "fail":
             msg = (f"G7 fails: matched correction eval {m['case']!r} fails "
                    "(stop and ask, §3.2 case 5)")
-            _wayfinder(wd, "G7", False, msg)
             return False, msg, {}
     ok, rmsg, info = _goldfish_gate(wd, comp, comp.spec_hash)
     if not ok:
         msg = f"G7 fails: {rmsg}"
-        _wayfinder(wd, "G7", False, msg)
         return False, msg, info
     msg = (f"G7 pass: locked variant {vid!r} reproduces within `{ver.get('tolerance_text')}`; "
            + rmsg)
-    _wayfinder(wd, "G7", True, msg)
     return True, msg, {"tolerance": ver.get("tolerance_text")}
 
 

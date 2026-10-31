@@ -24,6 +24,9 @@ SPEC = """# Analysis spec
 ## Question
 Did checkout v2 raise conversion?
 
+## Decision it informs
+{decision}
+
 ## Tier
 This is a {tier} analysis.
 
@@ -35,6 +38,15 @@ quick-cut
 
 ## Metrics
 - conversion@1#{h}
+
+## Hypotheses
+v2 raises conversion by shortening checkout.
+
+## Thresholds that would change the decision
+a drop of 1pt kills v2.
+
+## Exclusion and outlier rules
+exclude staff orders.
 
 ## Prior exposure
 none known
@@ -62,6 +74,7 @@ class Base(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp(prefix="dda-p2-"))
         self._env = dict(os.environ)
         _env_home(self.tmp / "home")
+        os.environ["DDA_TEST_MODE"] = "1"
         self.raw = self.tmp / "raw"
         self.raw.mkdir()
         (self.raw / "orders.csv").write_text("id,amount\n1,10\n", encoding="utf-8")
@@ -85,7 +98,14 @@ class Base(unittest.TestCase):
 
     def write_spec(self, extra=""):
         h = self.pin.split("#")[1]
-        self.wd.spec_path.write_text(SPEC.format(h=h, tier=self.tier) + extra, encoding="utf-8", newline="\n")
+        # G0 names a decision: EXPLORE analyses state there is none at
+        # stake; DECIDE analyses name the decision (which also drives the
+        # G2 tier trigger to DECIDE, matching the locked tier).
+        decision = ("none \u2014 EXPLORE" if self.tier == "EXPLORE"
+                    else "Whether to roll out checkout v2 to all traffic.")
+        self.wd.spec_path.write_text(
+            SPEC.format(h=h, tier=self.tier, decision=decision) + extra,
+            encoding="utf-8", newline="\n")
 
     def cli(self, *args):
         import io
@@ -94,6 +114,34 @@ class Base(unittest.TestCase):
         with redirect_stdout(out), redirect_stderr(err):
             rc = cli.main(list(args))
         return rc, out.getvalue(), err.getvalue()
+
+    def decide_ready(self):
+        """Satisfy the cascade intermediates at DECIDE (G2 tier confirmation,
+        G3 teardown review + spec approval, G5 profile) so `gate G4`/`gate G6`
+        report their own verdicts. Stubbed goldfish; unsigned approvals are
+        disclosed, not hidden, below PUBLISH."""
+        rc, out, _ = self.cli("approve", "tier", "--no-sign", str(self.wd.root))
+        self.assertEqual(rc, 0, out)
+        rc, out, _ = self.cli("approved", "tier", str(self.wd.root))
+        self.assertEqual(rc, 0, out)
+        rc, out, _ = self.cli("profile", str(self.wd.root))
+        self.assertEqual(rc, 0, out)
+        rc, out, _ = self.cli("packet", "teardown", str(self.wd.root))
+        self.assertEqual(rc, 0, out)
+        old_stub = os.environ.get("DDA_GOLDFISH_STUB")
+        os.environ["DDA_GOLDFISH_STUB"] = "pass"
+        try:
+            rc, out, _ = self.cli("review", "run", "teardown", str(self.wd.root))
+        finally:
+            if old_stub is None:
+                os.environ.pop("DDA_GOLDFISH_STUB", None)
+            else:
+                os.environ["DDA_GOLDFISH_STUB"] = old_stub
+        self.assertEqual(rc, 0, out)
+        rc, out, _ = self.cli("approve", "spec", "--no-sign", str(self.wd.root))
+        self.assertEqual(rc, 0, out)
+        rc, out, _ = self.cli("approved", "spec", str(self.wd.root))
+        self.assertEqual(rc, 0, out)
 
     def hook(self, name, tool, args, session="b-1", event="pre_tool_call", **extra):
         payload = {"hook_event_name": event, "tool_name": tool, "tool_input": args, "session_id": session,
@@ -376,11 +424,16 @@ class TestUnbound(Base):
         self.tier = "DECIDE"
         self.write_spec()
         self.lock()
+        self.decide_ready()
         rc, out, _ = self.cli("gate", "G4", str(self.wd.root))
         self.assertEqual(rc, 1)
         self.assertIn("no config approval", out)
         self.assertIn("dda approve config", out)
-        # G6 (phase 3) is built: a fresh lock with no data runs passes vacuously.
+        # G6 (phase 3) is built: with the cascade satisfied through G4 (the
+        # config now approved, unverified and disclosed), a fresh lock with
+        # no data runs passes vacuously.
+        rc, out, _ = self.cli("approve", "config", "--no-sign", str(self.wd.root))
+        self.assertEqual(rc, 0, out)
         rc, out, _ = self.cli("gate", "G6", str(self.wd.root))
         self.assertEqual(rc, 0, out)
         self.assertIn("G6 pass", out)
@@ -389,6 +442,7 @@ class TestUnbound(Base):
         self.tier = "DECIDE"
         self.write_spec()
         self.lock()
+        self.decide_ready()
         rc, out, _ = self.cli("approve", "config", "--no-sign", str(self.wd.root))
         self.assertEqual(rc, 0, out)
         rc, out, _ = self.cli("approved", "config", str(self.wd.root))

@@ -33,7 +33,7 @@ SPEC = """# Analysis spec
 {q}
 
 ## Decision it informs
-Ship v2 or roll back.
+none — EXPLORE
 
 ## Tier
 This is an EXPLORE analysis.
@@ -46,6 +46,15 @@ quick-cut
 
 ## Metrics
 - conversion@1#{h}
+
+## Hypotheses
+v2 raises conversion by shortening checkout.
+
+## Thresholds that would change the decision
+a drop of 1pt kills v2.
+
+## Exclusion and outlier rules
+exclude staff orders.
 
 ## Prior exposure
 none known

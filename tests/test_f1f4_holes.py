@@ -135,6 +135,21 @@ class Base(unittest.TestCase):
         p = subprocess.run([sys.executable, "-m", "ddalib.cli"] + list(args), **kw)
         return p.returncode, p.stdout + p.stderr
 
+    def hook(self, name, tool, args, session="s-1", event="pre_tool_call", **extra):
+        import json as _json
+        payload = {"hook_event_name": event, "tool_name": tool, "tool_input": args,
+                   "session_id": session, "cwd": str(self.wd.root),
+                   "extra": {"tool_call_id": "c-hb", **extra}}
+        r = subprocess.run([sys.executable, "-I", "-S", str(REPO / "hooks" / "dda_hook.py"), name],
+                           input=_json.dumps(payload), capture_output=True, text=True,
+                           env=dict(self.env))
+        return r.returncode, _json.loads(r.stdout)
+
+    def bind(self, session="s-1"):
+        rc, out = self.cli("start", str(self.wd.root), "--session", session)
+        self.assertEqual(rc, 0, "start failed: " + out)
+        return out
+
 
 class TestF1UnicodeFormulas(Base):
     """Each Unicode operator must fail G1 exactly like its ASCII twin."""
@@ -227,6 +242,11 @@ class TestF4ProfileBeforeResults(Base):
     def _run_first_variant(self):
         from ddalib import kernel
         self._baseline()
+        self.bind("s-1")
+        self.hook("runlog", "terminal", {"command": "dda meta sales"}, session="s-1",
+                  event="pre_tool_call")
+        self.hook("runlog", "terminal", {"command": "dda meta sales"}, session="s-1",
+                  event="post_tool_call")
         kernel.register_variant(self.wd, "v1", why="baseline cut",
                                 header={"population": "all", "model": "diff"})
         sp = self.wd.analysis / "variants" / "v1.py"

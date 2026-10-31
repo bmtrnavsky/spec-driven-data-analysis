@@ -63,7 +63,12 @@ def goldfish_calls_gate(wd: Workdir, stage: str, spec_hash: str,
     def _bound(call: dict) -> bool:
         for e in _chain_revs:
             try:
-                same_seq = int(e.get("seq") or -1) == int(call.get("seq") or -2)
+                # `review_seq` is the per-stage call counter. `chain.append`
+                # overwrites a caller `seq` with the global chain position,
+                # so fall back to the chain position only for entries written
+                # before `review_seq` existed (their positions coincided).
+                entry_seq = e.get("review_seq", e.get("seq"))
+                same_seq = int(entry_seq or -1) == int(call.get("seq") or -2)
             except (TypeError, ValueError):
                 same_seq = False
             if (str(e.get("round") or "") == str(call.get("round") or "")
@@ -195,22 +200,16 @@ def gate_g3(wd: Workdir) -> tuple[bool, str, dict]:
                 else:
                     notes.append("second goldfish: same model — correlated blind spots possible (§5.0)")
 
-    # Human spec approval at DECIDE+ (§3 row 3, §4.5).
+    # Human spec approval at DECIDE+ (§3 row 3, §4.5): the one requirements
+    # table (M1). Below PUBLISH an unverified/downgraded approval is
+    # disclosed; at PUBLISH only a verified approval passes.
     if comp.tier in ("DECIDE", "PUBLISH"):
-        from . import approvals as _approvals
-        verdict = _approvals.verify_approval(wd, "spec", spec_hash)
-        if verdict.get("verified"):
-            notes.append(f"human spec approval verified ({verdict.get('reason')})")
-        elif "not found" in str(verdict.get("reason", "")) or "not committed" in str(
-                verdict.get("reason", "")):
-            problems.append(f"no human spec approval for this spec hash "
-                            f"(`dda approve spec` in your own terminal, then `dda approved spec`; §3.2 case 2)")
-        elif comp.tier == "PUBLISH":
-            problems.append(f"PUBLISH needs a verified spec approval: "
-                            f"{verdict.get('reason')} (§3.2 case 9: parks)")
+        from . import requirements as _requirements
+        ok, req_notes, _info = _requirements.require(wd, "G3")
+        if ok:
+            notes.append(f"human approval holds ({'; '.join(req_notes)})")
         else:
-            notes.append(f"human spec approval unverified (agent could have produced it): "
-                         f"{verdict.get('reason')}")
+            problems.append("; ".join(req_notes) + " (§3.2 case 2/9: parks at PUBLISH)")
     if problems:
         return False, "G3 fail: " + "; ".join(problems[:6]), {"rounds": rounds}
     return True, "G3 pass: " + "; ".join(notes), {"rounds": rounds}

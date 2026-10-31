@@ -25,6 +25,9 @@ SPEC = """# Analysis spec
 ## Question
 Did checkout v2 raise conversion?
 
+## Decision it informs
+{decision}
+
 ## Tier
 This is a {tier} analysis.
 
@@ -36,6 +39,15 @@ quick-cut
 
 ## Metrics
 - conversion@1#{h}
+
+## Hypotheses
+v2 raises conversion by shortening checkout.
+
+## Thresholds that would change the decision
+a drop of 1pt kills v2.
+
+## Exclusion and outlier rules
+exclude staff orders.
 
 ## Prior exposure
 none known
@@ -103,7 +115,13 @@ class Base(unittest.TestCase):
 
     def write_spec(self, extra=""):
         h = self.pin.split("#")[1]
-        self.wd.spec_path.write_text(SPEC.format(h=h, tier=self.tier) + extra, encoding="utf-8", newline="\n")
+        # G0 names a decision: EXPLORE analyses state there is none at
+        # stake (which also keeps the G2 tier trigger at EXPLORE).
+        decision = ("none — EXPLORE" if self.tier == "EXPLORE"
+                    else "Whether to roll out checkout v2 to all traffic.")
+        self.wd.spec_path.write_text(
+            SPEC.format(h=h, tier=self.tier, decision=decision) + extra,
+            encoding="utf-8", newline="\n")
 
     def cli(self, *args):
         out, err = io.StringIO(), io.StringIO()
@@ -555,6 +573,14 @@ class TestG6(Base):
         self.assertIn("orphan", reason)
 
     def test_g6_pass_after_clean_run(self):
+        # The shared fixture flags `sales` PII for the hook/redaction
+        # tests, which steps the G2 minimum tier to DECIDE; this EXPLORE
+        # heartbeat test uses a non-PII config so the fixture is valid
+        # at EXPLORE (G2 still evaluates, with no triggers to confirm).
+        cfg = self.wd.config_path.read_text(encoding="utf-8")
+        self.wd.config_path.write_text(
+            cfg.replace('    pii_columns: ["name"]\n', ""),
+            encoding="utf-8", newline="\n")
         self.stub_baseline()
         self.lock()
         self.paired_session()

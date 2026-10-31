@@ -21,7 +21,7 @@ SPEC = """# Analysis spec
 Did checkout v2 raise conversion?
 
 ## Decision it informs
-Ship v2 or roll back.
+{decision}
 
 ## Tier
 {tier}
@@ -110,13 +110,21 @@ class P7Setup(unittest.TestCase):
     def write_spec(self, tier=None, rung=None, sources="- `sales` — orders table",
                    metrics=None, hypotheses="v2 raises conversion by shortening checkout.",
                    exclusion="exclude staff orders.",
-                   thresholds="a drop of 1pt kills v2.", exposure="none known"):
+                   thresholds="a drop of 1pt kills v2.", exposure="none known",
+                   decision=None):
         if metrics is None:
             metrics = "- %s" % self.pin
+        tier = tier or self.TIER
+        if decision is None:
+            # A named decision triggers the DECIDE minimum tier (G2), so
+            # EXPLORE fixtures state there is none at stake.
+            decision = ("none — EXPLORE" if "EXPLORE" in tier
+                        else "Ship v2 or roll back.")
         self.wd.spec_path.write_text(SPEC.format(
-            tier=tier or self.TIER, rung=rung or self.RUNG, sources=sources,
+            tier=tier, rung=rung or self.RUNG, sources=sources,
             metrics=metrics, hypotheses=hypotheses, exclusion=exclusion,
-            thresholds=thresholds, exposure=exposure), encoding="utf-8")
+            thresholds=thresholds, exposure=exposure,
+            decision=decision), encoding="utf-8")
 
     def cli(self, *args, stub=None):
         import os as _os
@@ -226,6 +234,7 @@ class TestG3(P7Setup):
                 f"# self re-read round {r}\n\nChecked the spec cold. No objection.\n", encoding="utf-8")
 
     def test_g3_explore_self_rereads(self):
+        self.assertEqual(self.cli("lock")[0], 0)
         rc, out = self.cli("gate", "G3")
         self.assertNotEqual(rc, 0, f"G3 passed with no review at all: {out}")
         self.self_files(rounds=("1",))
@@ -237,6 +246,7 @@ class TestG3(P7Setup):
 
     def test_g3_decide_needs_human_spec_approval(self):
         self.write_spec(tier="This is a DECIDE analysis.", rung="glance")
+        self.assertEqual(self.cli("lock")[0], 0)
         self.assertEqual(self.cli("packet", "teardown")[0], 0)
         rc, out = self.cli("review", "run", "teardown", stub="pass")
         self.assertEqual(rc, 0, out)
@@ -261,6 +271,7 @@ class TestG3(P7Setup):
 
     def test_g3_earlier_objection_needs_answer(self):
         self.write_spec(tier="This is a DECIDE analysis.", rung="glance")
+        self.assertEqual(self.cli("lock")[0], 0)
         self.assertEqual(self.cli("packet", "teardown")[0], 0)
         self.assertEqual(self.cli("review", "run", "teardown", stub="fail")[0], 1)
         self.assertEqual(self.cli("approve", "spec", "--no-sign")[0], 0)

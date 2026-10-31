@@ -153,6 +153,21 @@ class P8Setup(unittest.TestCase):
         p = subprocess.run([sys.executable, "-m", "ddalib.cli"] + list(args), **kw)
         return p.returncode, p.stdout + p.stderr
 
+    def hook(self, name, tool, args, session="s-1", event="pre_tool_call", **extra):
+        import json as _json
+        payload = {"hook_event_name": event, "tool_name": tool, "tool_input": args,
+                   "session_id": session, "cwd": str(self.wd.root),
+                   "extra": {"tool_call_id": "c-hb", **extra}}
+        r = subprocess.run([sys.executable, "-I", "-S", str(REPO / "hooks" / "dda_hook.py"), name],
+                           input=_json.dumps(payload), capture_output=True, text=True,
+                           env=dict(self.env))
+        return r.returncode, _json.loads(r.stdout)
+
+    def bind(self, session="s-1"):
+        rc, out = self.cli("start", str(self.wd.root), "--session", session)
+        self.assertEqual(rc, 0, f"start failed: {out}")
+        return out
+
     # -- shared happy-path helpers -------------------------------------
     def lock(self):
         rc, out = self.cli("lock", str(self.wd.root))
@@ -188,6 +203,14 @@ class P8Setup(unittest.TestCase):
     def register_and_run(self, vid="v1", script_body=None):
         from ddalib import kernel
         self.stub_baseline()
+        # Pair the run session through the real runlog hook (as production
+        # runs do): the G6 cascade intermediate requires every session with
+        # runs.log lines to have a verifiable heartbeat log (§6.8).
+        self.bind("s-1")
+        self.hook("runlog", "terminal", {"command": "dda meta sales"}, session="s-1",
+                  event="pre_tool_call")
+        self.hook("runlog", "terminal", {"command": "dda meta sales"}, session="s-1",
+                  event="post_tool_call")
         kernel.register_variant(self.wd, vid, why="baseline cut",
                                 header={"population": "all", "model": "diff"})
         sp = self.wd.analysis / "variants" / f"{vid}.py"

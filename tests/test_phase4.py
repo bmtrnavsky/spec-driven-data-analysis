@@ -34,6 +34,9 @@ SPEC = """# Analysis spec
 ## Question
 Did checkout v2 raise conversion?
 
+## Decision it informs
+none — EXPLORE
+
 ## Tier
 This is a EXPLORE analysis.
 
@@ -45,6 +48,15 @@ quick-cut
 
 ## Metrics
 - conversion@1#{h}
+
+## Hypotheses
+v2 raises conversion by shortening checkout.
+
+## Thresholds that would change the decision
+a drop of 1pt kills v2.
+
+## Exclusion and outlier rules
+exclude staff orders.
 
 ## Prior exposure
 none known
@@ -467,7 +479,7 @@ class ApprovalsTests(Base):
         self.assertIn("UNSIGNED (unverified)", out)
         from ddalib import approvals
         ch = approvals.current_artifact(self.wd, "config")
-        self.assertTrue((self.wd.analysis / "approvals" / f"config-{ch}.json").is_file())
+        self.assertTrue((self.wd.analysis / "approvals" / f"config-{ch[:16]}.json").is_file())
         rc, out, err = self.cli("approved", "config", str(self.wd.root))
         self.assertEqual(rc, 0, err)
         self.assertIn("UNVERIFIED", out)
@@ -490,8 +502,8 @@ class ApprovalsTests(Base):
     def test_approved_missing_file_fails(self):
         self.lock()
         rc, out, _ = self.cli("approved", "config", str(self.wd.root))
-        self.assertEqual(rc, 0)  # recorded, but UNVERIFIED
-        self.assertIn("UNVERIFIED", out)
+        self.assertEqual(rc, 0)  # recorded as MISSING, never verified
+        self.assertIn("MISSING", out)
 
     def test_g4_rejects_stale_config_approval(self):
         self.lock()

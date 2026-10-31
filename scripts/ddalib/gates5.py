@@ -167,10 +167,16 @@ def gate_g8(wd: Workdir, report: str | None = None) -> tuple[bool, str, dict]:
         return False, "G8 fail: footer does not verify: " + "; ".join(bad[:6]) + scope_note, {}
     tier = (lock.get("tier") or "EXPLORE").upper()
     if tier == "PUBLISH":
-        from . import approvals as _approvals
-        st = _approvals.config_status(wd).get("state")
-        if st != "verified":
-            return False, "G8 fail: PUBLISH needs a verified human sign-off for this report", {}
+        # M1/M3: PUBLISH needs a verified human SIGNOFF for the release
+        # digest (report bytes incl. footer + lock hash + verify.md hash +
+        # gate-verdict digest) — never a config approval for a different
+        # artifact. The evaluator additionally forces G8 to fail whenever
+        # any earlier gate fails.
+        from . import requirements as _requirements
+        ok, req_notes, _info = _requirements.require(wd, "G8")
+        if not ok:
+            return False, "G8 fail: PUBLISH needs a verified human sign-off for this report: " + \
+                "; ".join(req_notes), {}
     names = ", ".join(t.name for t in targets)
     return True, "G8 pass: report(s) %s footer verifies%s" % (names, scope_note), {}
 

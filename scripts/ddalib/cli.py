@@ -193,28 +193,18 @@ def cmd_verify_chain(args) -> int:
 
 
 def cmd_gate(args) -> int:
+    # M3: every gate runs through the single evaluator — a gate passes
+    # only if all earlier gates pass, and wayfinder lines are written from
+    # the evaluator's verdicts (G0 through the requested gate).
+    from . import evaluate as _evaluate
     wd = _wd(args)
     g = args.gate.upper()
-    if g == "G4":
-        passed, reason, _ = ledger.gate_g4(wd)
-        ledger.write_wayfinder(wd, g, passed, reason)
-        print(f"{g}: {'pass' if passed else 'fail'} — {reason}")
-        return 0 if passed else 1
-    if g == "G6":
-        passed, reason, _ = ledger.gate_g6(wd)
-        ledger.write_wayfinder(wd, g, passed, reason)
-        print(f"{g}: {'pass' if passed else 'fail'} — {reason}")
-        return 0 if passed else 1
-    if g in ("G0", "G1", "G2", "G3", "G5", "G7", "G8", "G9"):
-        from . import gates5, gates6, gates7, gates8
-        fn = {"G0": gates5.gate_g0, "G1": gates6.gate_g1, "G2": gates8.gate_g2,
-              "G3": gates7.gate_g3, "G5": gates8.gate_g5, "G7": gates8.gate_g7,
-              "G8": gates5.gate_g8, "G9": gates5.gate_g9}[g]
-        if g == "G8" and getattr(args, "report", None):
-            passed, reason, _ = fn(wd, report=args.report)
-        else:
-            passed, reason, _ = fn(wd)
-        ledger.write_wayfinder(wd, g, passed, reason)
+    if g in ("G4", "G6", "G0", "G1", "G2", "G3", "G5", "G7", "G8", "G9"):
+        res = _evaluate.evaluate(wd, through=g, report=getattr(args, "report", None))
+        for gate in _evaluate.ORDER[:_evaluate.ORDER.index(g) + 1]:
+            passed, reason, _info = res["verdicts"][gate]
+            ledger.write_wayfinder(wd, gate, passed, reason)
+        passed, reason, _info = res["verdicts"][g]
         print(f"{g}: {'pass' if passed else 'fail'} — {reason}")
         return 0 if passed else 1
     if g in GATE_PHASE:
@@ -354,9 +344,9 @@ def cmd_approve(args) -> int:
     wd = Workdir.at(workdir or os.getcwd(), args.milestone)
     res = approvals.do_approve(wd, kind, artifact=artifact, key=args.key,
                                sign=not args.no_sign, message=args.message)
-    print(f"approved {res['kind']} {res['artifact'][:16]} — commit {res['commit'][:12]} "
+    print(f"approved {res['kind']} {res['digest'][:16]} — commit {res['commit'][:12]} "
           f"({'signed' if res['signed'] else 'UNSIGNED (unverified)'}); "
-          f"run `dda approved {res['kind']} {res['artifact'][:16]}` to record the verification")
+          f"run `dda approved {res['kind']} {res['digest'][:16]}` to record the verification")
     return 0
 
 
@@ -364,8 +354,9 @@ def cmd_approved(args) -> int:
     kind, artifact, workdir = _kind_artifact_workdir(args)
     wd = Workdir.at(workdir or os.getcwd(), args.milestone)
     verdict = approvals.do_approved(wd, kind, artifact=artifact)
-    state = "verified" if verdict["verified"] else "UNVERIFIED"
-    print(f"{args.kind} {verdict['artifact'][:16]}: {state} — {verdict['reason']}")
+    shown = (verdict.get("digest") or artifact or kind)[:16]
+    # Typed state, uppercase for visibility (MISSING, STALE, UNVERIFIED, ...).
+    print(f"{args.kind} {shown}: {verdict['state'].upper()} — {verdict['reason']}")
     return 0
 
 
@@ -728,7 +719,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("approve", help="commit a human approval file (signed; run in your own terminal)")
     s.add_argument("kind", help=f"approval kind: {', '.join(approvals.KINDS)}")
-    s.add_argument("artifact", nargs="?", help="artifact hash (defaults from the workdir for config/spec/amendment/tier)")
+    s.add_argument("artifact", nargs="?", help="case/definition selector, or the digest itself (digests are computed by dda; free-form tokens are rejected)")
     s.add_argument("workdir", nargs="?")
     s.add_argument("--milestone")
     s.add_argument("--key", help="signing key id passed to git (default: the key's own default)")
@@ -738,7 +729,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("approved", help="verify an approval and record the verdict in approvals.index.jsonl")
     s.add_argument("kind", help=f"approval kind: {', '.join(approvals.KINDS)}")
-    s.add_argument("artifact", nargs="?", help="artifact hash (defaults from the workdir for config/spec/amendment)")
+    s.add_argument("artifact", nargs="?", help="digest, digest prefix, or case/definition selector (defaults to the current digest)")
     s.add_argument("workdir", nargs="?")
     s.add_argument("--milestone")
     s.set_defaults(func=cmd_approved)

@@ -137,6 +137,45 @@ class P7R2Setup(unittest.TestCase):
         p = subprocess.run([sys.executable, "-m", "ddalib.cli"] + list(args), **kw)
         return p.returncode, p.stdout + p.stderr
 
+    def hook(self, name, tool, args, session="s-1", event="pre_tool_call", **extra):
+        import json as _json
+        payload = {"hook_event_name": event, "tool_name": tool, "tool_input": args,
+                   "session_id": session, "cwd": str(self.wd.root),
+                   "extra": {"tool_call_id": "c-hb", **extra}}
+        r = subprocess.run([sys.executable, "-I", "-S", str(REPO / "hooks" / "dda_hook.py"), name],
+                           input=_json.dumps(payload), capture_output=True, text=True,
+                           env=dict(self.env))
+        return r.returncode, _json.loads(r.stdout)
+
+    def bind(self, session="s-1"):
+        rc, out = self.cli("start", str(self.wd.root), "--session", session)
+        self.assertEqual(rc, 0, f"start failed: {out}")
+        return out
+
+    def stub_baseline(self):
+        d = self.tmp / "stubs"
+        d.mkdir(exist_ok=True)
+        for name in ("pandas", "numpy", "pyarrow", "polars", "duckdb", "scipy",
+                     "statsmodels", "sklearn", "matplotlib", "seaborn",
+                     "openpyxl", "xlrd", "ipykernel", "IPython", "jupyter_client"):
+            body = ("def get_ipython():\n    return None\n" if name in ("IPython", "jupyter_client")
+                    else ("def connect(*a, **k):\n    raise RuntimeError('stub')\n" if name == "duckdb"
+                          else '"""stub"""\n'))
+            (d / f"{name}.py").write_text(body, encoding="utf-8")
+        os.environ["DDA_BASELINE_DIR"] = str(d)
+        self.env["DDA_BASELINE_DIR"] = str(d)
+
+    def answer(self, text="# Answer\n\nConversion rose.\n"):
+        (self.wd.analysis / "answer.md").write_text(text, encoding="utf-8")
+
+    def self_rereads(self, stage="post-result", rounds=("1", "2")):
+        d = self.wd.analysis / "reviews" / "self"
+        d.mkdir(parents=True, exist_ok=True)
+        for r in rounds:
+            (d / f"{stage}-round{r}.md").write_text(
+                f"# self re-read round {r}\n\nChecked claims against outputs. No objection.\n",
+                encoding="utf-8")
+
 
 class TestG3BindsChain(P7R2Setup):
     TIER = "This is a DECIDE analysis."
@@ -203,12 +242,52 @@ class TestGovernanceJsonCommittable(P7R2Setup):
     TIER = "This is a DECIDE analysis."
     RUNG = "glance"
 
+    SCRIPT = (
+        "import csv, os\n"
+        "root = {root!r}\n"
+        "rows = list(csv.reader(open(os.path.join(root, 'orders.csv'))))\n"
+        "n = len(rows) - 1\n"
+        "os.makedirs('outputs', exist_ok=True)\n"
+        "open('outputs/summary.csv', 'w').write('n,total\\n%d,%d\\n' % (n, sum(int(r[1]) for r in rows[1:])))\n"
+        "print('rows=%d' % n)\n")
+
     def test_g9_passes_with_reviews_and_packets_committed(self):
+        from ddalib import kernel
         self.write_spec()
         self.assertEqual(self.cli("lock")[0], 0)
+        # Lawful order: profile before results (G5/G7), teardown review (G3).
+        self.assertEqual(self.cli("profile")[0], 0)
         self.assertEqual(self.cli("packet", "teardown")[0], 0)
         rc, out = self.cli("review", "run", "teardown", stub="pass")
         self.assertEqual(rc, 0, out)
+        # Paired run session + heartbeat (G6), then verify the replay (G7).
+        self.stub_baseline()
+        self.bind("s-1")
+        self.hook("runlog", "terminal", {"command": "dda meta sales"}, session="s-1",
+                  event="pre_tool_call")
+        self.hook("runlog", "terminal", {"command": "dda meta sales"}, session="s-1",
+                  event="post_tool_call")
+        kernel.register_variant(self.wd, "v1", why="baseline cut",
+                                header={"population": "all", "model": "diff"})
+        sp = self.wd.analysis / "variants" / "v1.py"
+        sp.write_text(self.SCRIPT.format(root=self.raw.as_posix()), encoding="utf-8")
+        rec = kernel.do_run(self.wd, "v1", str(sp), [], session="s-1")
+        self.assertEqual(rec["returncode"], 0, rec.get("stderr_tail"))
+        kernel.mark_locked(self.wd, "v1")
+        self.assertEqual(self.cli("verify")[0], 0)
+        # Approvals: spec covers the G2/G3 intermediates, config covers G4
+        # (unsigned approvals are disclosed, not hidden, at DECIDE).
+        self.assertEqual(self.cli("approve", "spec", "--no-sign")[0], 0)
+        self.assertEqual(self.cli("approved", "spec")[0], 0)
+        self.assertEqual(self.cli("approve", "config", "--no-sign")[0], 0)
+        self.assertEqual(self.cli("approved", "config")[0], 0)
+        # Post-result review + self re-reads (G7), then the report (G8).
+        self.answer()
+        self.assertEqual(self.cli("packet", "post-result")[0], 0)
+        rc, out = self.cli("review", "run", "post-result", stub="pass")
+        self.assertEqual(rc, 0, out)
+        self.self_rereads()
+        self.assertEqual(self.cli("report", "--slug", "good")[0], 0)
         subprocess.run(["git", "add", "-A"], cwd=str(self.wd.root), check=True)
         subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t.t",
                         "-c", "commit.gpgsign=false", "commit", "-q", "-m", "evidence"],

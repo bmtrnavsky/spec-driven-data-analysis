@@ -544,7 +544,8 @@ def do_review_run(wd: Workdir, stage: str, round_: str | None = None,
             json.dumps(rec, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
         chain.append(ledger.runs_log(wd),
                      {"type": "review", "kind": "goldfish", "stage": stage, "round": r,
-                      "seq": call_seq, "verdict": rec["verdict"], "spec_hash": comp.spec_hash,
+                      "seq": call_seq, "review_seq": call_seq, "verdict": rec["verdict"],
+                      "spec_hash": comp.spec_hash,
                       "packet_hash": manifest["packet_hash"], "request": rec["provider_request_id"],
                       "model": model})
         with open(base / f"{stage}.md", "a", encoding="utf-8", newline="\n") as fh:
