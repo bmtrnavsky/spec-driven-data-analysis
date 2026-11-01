@@ -1,8 +1,6 @@
 """N3-class via real git: `git clean -fdx` on untracked reviews must not clear G3."""
 from probelib import new_fixture, finding, cleanup, g3_failed_fixture, g3_verdict, git, git_ok
 
-EXPECTED = "G3-STILL-FAILING"
-
 f = new_fixture("f7", prefix="dda-n-gclean3-")
 try:
     gdir = g3_failed_fixture(f)

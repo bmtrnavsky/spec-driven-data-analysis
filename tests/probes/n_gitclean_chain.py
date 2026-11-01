@@ -3,8 +3,6 @@ FAIL CLOSED (heads mirror survives) and verify-chain must report the gap."""
 from probelib import new_fixture, finding, cleanup, git
 from ddalib import chain, ledger
 
-EXPECTED = "CHAIN-FAIL-CLOSED"
-
 f = new_fixture("p8", prefix="dda-n-gclean6-")
 try:
     f.lock()

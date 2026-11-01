@@ -2,8 +2,6 @@
 import shutil
 from probelib import new_fixture, finding, cleanup, evals_blocked_fixture
 
-EXPECTED = "EVALS-STILL-BLOCKED"
-
 f = new_fixture("p8", prefix="dda-n-rmcorr-")
 try:
     evals_blocked_fixture(f)

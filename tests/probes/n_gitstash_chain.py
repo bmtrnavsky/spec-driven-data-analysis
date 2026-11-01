@@ -3,8 +3,6 @@ CLOSED and verify-chain must report the gap (stash entry kept for forensics)."""
 from probelib import new_fixture, finding, cleanup, git, git_ok
 from ddalib import chain, ledger
 
-EXPECTED = "CHAIN-FAIL-CLOSED"
-
 f = new_fixture("p8", prefix="dda-n-gstash6-")
 try:
     f.lock()

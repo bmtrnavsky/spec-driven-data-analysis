@@ -17,8 +17,9 @@ Mutation classes (applied to every fixture):
   touch_mtimes, unset_key, sibling_variant, edit_report, plus the git
   operations exercised by the probe suite: git_clean, git_stash_u,
   git_reset_hard, git_rebase, git_commit_amend, git_filter_branch,
-  git_update_ref (see tests/probes/ — each is a real git op whose
-  expected finding the regression test asserts).
+  git_update_ref (each runs the real git op in the fork; see
+  tests/probes/ — each is a real git op whose expected finding the
+  regression test asserts).
 
 Fixtures:
   TestInvEvalBinding    N1: bound correction case with a failing check.
@@ -56,7 +57,9 @@ PASSING_STATES = {"verified", "unverified"}
 
 MUTATIONS = ["cosmetic_amend", "reprofile", "rerun", "rename_artifact",
              "delete_artifact", "touch_mtimes", "unset_key",
-             "sibling_variant", "edit_report"]
+             "sibling_variant", "edit_report", "git_clean", "git_stash_u",
+             "git_reset_hard", "git_rebase", "git_commit_amend",
+             "git_filter_branch", "git_update_ref"]
 
 
 def recorded_artifacts(wd):
@@ -149,6 +152,14 @@ class InvMixin:
         self.raw = self.tmp / "raw"
         from ddalib.layout import Workdir
         self.wd = Workdir.at(self.tmp / "wd")
+        # Isolate the guard under test from line-ending noise: with the
+        # global core.autocrlf=true, git workdir rewrites (stash pop,
+        # checkout, reset, rebase) smudge chains to CRLF and mutations
+        # would fail closed on "not in canonical form" instead of the
+        # guard they target.
+        subprocess.run(["git", "-C", str(self.wd.root), "config",
+                        "core.autocrlf", "false"], check=False,
+                       capture_output=True)
         self.env = dict(base.env)
         self.env["DDA_HOME"] = str(self.tmp / "home")
         self.env["DDA_TEST_MODE"] = "1"
@@ -164,8 +175,13 @@ class InvMixin:
             for p in list(heads.iterdir()):
                 if p.name.startswith(base_key + "."):
                     shutil.copy2(p, heads / (fork_key + p.name[len(base_key):]))
+        # A fork is a legitimate home move: rebind the recorded DDA_HOME so
+        # the anchored append (M6) keeps working in the fork. Must run after
+        # os.environ points at the fork's home (note_home_move reads it).
         os.environ["DDA_TEST_MODE"] = "1"
         os.environ["DDA_HOME"] = self.env["DDA_HOME"]
+        from ddalib import ledger as _ledger
+        _ledger.note_home_move(self.wd)
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -266,6 +282,76 @@ class InvMixin:
         ans = self.wd.analysis / "answer.md"
         ans.write_text(ans.read_text(encoding="utf-8") + "\n", encoding="utf-8")
 
+    # -- git-operation mutations (same ops the probe suite runs end to end) --
+    def _git(self, *args, check=True):
+        p = subprocess.run(["git", "-C", str(self.wd.root), *args],
+                           capture_output=True, text=True, env=self.env)
+        if check:
+            self.assertEqual(p.returncode, 0,
+                             f"git {' '.join(args)} failed: {(p.stdout + p.stderr)[-500:]}")
+        return p
+
+    @staticmethod
+    def _gitfb():
+        for c in ("C:/Program Files/Git/bin/git.exe",
+                  "C:/Program Files/Git/cmd/git.exe"):
+            if Path(c).is_file():
+                return c
+        import shutil as _shutil
+        return _shutil.which("git") or "git"
+
+    def mut_git_clean(self):
+        rel = self.delete_target().relative_to(self.wd.root).as_posix()
+        self._git("clean", "-fdx", "--", rel)
+        self.assertFalse(self.delete_target().exists(),
+                         f"git clean did not remove {rel}")
+
+    def mut_git_stash_u(self):
+        # Leave the stash in place: the fork is discarded, and the
+        # snapshot must see the evidence gone (fail-closed).
+        self._git("stash", "-u", "-m", "inv", check=False)
+        self.assertFalse(self.delete_target().exists(),
+                         "git stash -u did not remove the target")
+
+    def mut_git_reset_hard(self):
+        self._git("reset", "--hard", "-q", "HEAD~1")
+
+    def mut_git_rebase(self):
+        sha = self._git("rev-parse", "HEAD").stdout.strip()
+        self._git("add", "-A")
+        self._git("commit", "-qm", "inv-prestate", "--allow-empty")
+        self._git("rebase", "-q", "--onto", f"{sha}~1", sha)
+        log = self._git("log", "--format=%H").stdout.split()
+        self.assertNotIn(sha, log, "rebase did not drop the tip commit")
+
+    def mut_git_commit_amend(self):
+        self._git("commit", "-q", "--amend", "--no-edit", "--allow-empty")
+
+    def mut_git_filter_branch(self):
+        arts = recorded_artifacts(self.wd)
+        self.assertTrue(arts, "no recorded approvals to purge")
+        kind, artifact = arts[0]
+        rel = f".analysis/approvals/{kind}-{artifact}.json"
+        self._git("add", "-A")
+        self._git("commit", "-qm", "inv-prestate", "--allow-empty")
+        env = dict(self.env, FILTER_BRANCH_SQUELCH_WARNING="1")
+        p = subprocess.run([self._gitfb(), "filter-branch", "-f",
+                            "--index-filter",
+                            f"git rm -q --cached --ignore-unmatch -- '{rel}'",
+                            "--", "--all"],
+                           capture_output=True, text=True,
+                           cwd=str(self.wd.root), env=env)
+        self.assertEqual(p.returncode, 0, (p.stdout + p.stderr)[-500:])
+        gone = self._git("log", "--diff-filter=A", "--format=%H",
+                         "--", rel).stdout.strip()
+        self.assertFalse(gone, "filter-branch did not purge the approval")
+
+    def mut_git_update_ref(self):
+        sha = self._git("rev-parse", "HEAD").stdout.strip()
+        self._git("update-ref", "HEAD", "HEAD~1")
+        now = self._git("rev-parse", "HEAD").stdout.strip()
+        self.assertNotEqual(now, sha, "update-ref did not move HEAD")
+
     # -- per-fixture targets -------------------------------------------------
     def rename_target(self):
         raise NotImplementedError
@@ -287,7 +373,10 @@ class InvMixin:
                 self.assertTrue(after["lineage"].get(k),
                                 f"{step}: sticky lineage flag {k} disappeared")
         for key, st0 in before["approvals"].items():
-            st1 = after["approvals"][key]
+            # An approval whose record file is gone from the workdir (e.g. a
+            # git op rolled tracked files back) verifies as missing — never
+            # as passing.
+            st1 = after["approvals"].get(key, "missing")
             self.assertFalse(st0 in INVALID_STATES and st1 in PASSING_STATES,
                              f"{step}: approval {key} recovered "
                              f"{st0}->{st1} without re-approval")
@@ -453,12 +542,27 @@ class TestInvStickyExposure(InvMixin, P9Setup):
 
 
 class TestDdaprobeRegression(unittest.TestCase):
-    """Re-run every tests/probes/ probe: exit 0 AND expected finding present.
+    """Re-run every tests/probes/ probe: exit 0 AND the manifest finding.
 
-    Probes live in-repo (no scratch-dir dependency) and declare EXPECTED;
-    a probe that runs but prints a different FINDING (attack succeeded)
-    fails the suite — exit codes alone cannot catch bypasses.
+    tests/probes/MANIFEST.json is the single authority mapping each probe
+    filename to its one expected FINDING token — probes no longer declare
+    their own expectations. The match is anchored to EXACTLY ONE
+    `FINDING: <token>` line equal to the manifest token: a substring
+    match would let EXPECTED='' match anything and EVALS-OK match
+    EVALS-OK-BUT-UNBOUND. A probe that runs but prints a different
+    FINDING (attack succeeded) fails the suite — exit codes alone cannot
+    catch bypasses.
     """
+
+    @staticmethod
+    def _manifest() -> dict:
+        import json as _json
+        mp = REPO / "tests" / "probes" / "MANIFEST.json"
+        data = _json.loads(mp.read_text(encoding="utf-8"))
+        assert isinstance(data, dict) and data, "probe manifest missing/empty"
+        for k, v in data.items():
+            assert isinstance(v, str) and v, f"manifest {k}: expected one token string"
+        return data
 
     def _probes(self):
         dd = REPO / "tests" / "probes"
@@ -466,42 +570,153 @@ class TestDdaprobeRegression(unittest.TestCase):
         self.assertTrue(files, f"no ddaprobe probes found in {dd}")
         return files
 
-    @staticmethod
-    def _expected(probe: Path) -> tuple:
-        import ast as _ast
-        import re as _re
-        m = _re.search(r"^EXPECTED\s*=\s*(.+?)\s*$",
-                       probe.read_text(encoding="utf-8"), _re.M)
-        assert m, f"{probe.name} declares no EXPECTED finding"
-        val = _ast.literal_eval(m.group(1))
-        return (val,) if isinstance(val, str) else tuple(val)
+    def test_probe_names_match_manifest(self):
+        """The probe floor is enforced BY NAME: no missing, no unlisted."""
+        found = {p.name for p in self._probes()}
+        wanted = set(self._manifest())
+        self.assertEqual(found - wanted, set(),
+                         f"probes missing from MANIFEST.json: {sorted(found - wanted)}")
+        self.assertEqual(wanted - found, set(),
+                         f"MANIFEST.json lists missing probes: {sorted(wanted - found)}")
 
-    def test_probe_list_nonempty(self):
-        self.assertGreaterEqual(len(self._probes()), 13)
+    def _run_probe(self, probe: Path, env) -> tuple:
+        try:
+            p = subprocess.run([sys.executable, str(probe)],
+                               capture_output=True, text=True, env=env,
+                               cwd=str(probe.parent), timeout=600)
+        except subprocess.TimeoutExpired:
+            return None, ["TIMEOUT"]
+        return p, [ln for ln in p.stdout.splitlines() if ln.startswith("FINDING:")]
 
     def test_all_probes(self):
         env = dict(os.environ)
         env["DDA_TEST_MODE"] = "1"
         env["PYTHONPATH"] = str(REPO / "scripts") + os.pathsep + str(REPO) \
             + os.pathsep + env.get("PYTHONPATH", "")
+        manifest = self._manifest()
         failures = []
         for probe in self._probes():
-            expected = self._expected(probe)
-            try:
-                p = subprocess.run([sys.executable, str(probe)],
-                                   capture_output=True, text=True, env=env,
-                                   cwd=str(probe.parent), timeout=600)
-            except subprocess.TimeoutExpired:
+            expected = manifest[probe.name]
+            p, findings = self._run_probe(probe, env)
+            if p is None:
                 failures.append(f"{probe.name}: TIMEOUT")
                 continue
             tail = (p.stdout + p.stderr).strip().splitlines()[-3:]
             print(f"[{probe.name}] rc={p.returncode} :: " + " | ".join(t[:160] for t in tail))
             if p.returncode != 0:
                 failures.append(f"{probe.name}: rc={p.returncode} (probe did not run clean)")
-            elif not any(f"FINDING: {e}" in p.stdout for e in expected):
-                got = [ln for ln in p.stdout.splitlines() if ln.startswith("FINDING:")]
-                failures.append(f"{probe.name}: expected one of {expected!r} absent; got {got}")
+            elif findings != [f"FINDING: {expected}"]:
+                failures.append(f"{probe.name}: want exactly [FINDING: {expected}]; got {findings}")
         self.assertEqual(failures, [], f"{len(failures)} probe(s) regressed: {failures}")
+
+
+class TestProbeRevertSensitivity(unittest.TestCase):
+    """Each negative probe must FAIL when its fix is reverted.
+
+    For every scenario below the test temporarily neuters the guard in
+    the source, re-runs the affected probes as subprocesses, and
+    requires the manifest-expected FINDING to be absent — the attack
+    then escapes (VULN token) or the probe errors. This proves the
+    probes are live: they pass because the fix holds, not because they
+    cannot fail. Sources are restored in `finally` even when a
+    scenario fails.
+    """
+
+    # (scenario, {relpath: [(old, new), ...]}, [probe names])
+    SCENARIOS = [
+        ("pre-N1 early return",
+         {"scripts/ddalib/stage8.py": [
+             ('    base = wd.root / "evals" / "corrections"\n',
+              '    base = wd.root / "evals" / "corrections"\n'
+              '    if not base.is_dir():  # REVERT-TEST pre-N1 early return\n'
+              '        return []\n')]},
+         ["n_rm_corrections_evals.py"]),
+        ("pre-N7 no index fallback",
+         {"scripts/ddalib/stage8.py": [
+             ('    for entry in _approvals.index_approvals(wd, "correction"):',
+              '    for entry in []:  # REVERT-TEST pre-N7 no index fallback')]},
+         ["n_gitamend_evals.py", "n_gitrebase_evals.py",
+          "n_gitreset_evals.py", "n_gitupdate_evals.py",
+          "n_filterbranch_evals.py", "n_prefix_evals.py"]),
+        ("pre-I6/N6/M7 no fail-closed chains",
+         {"scripts/ddalib/chain.py": [
+             ('        if mirror_seq > 0:\n            raise DdaError(\n'
+              '                f"{path}: file is missing or empty but the heads mirror records "',
+              '        if False:  # REVERT-TEST pre-N6 no fail-closed restart\n            raise DdaError(\n'
+              '                f"{path}: file is missing or empty but the heads mirror records "'),
+             ('        ckpt = _committed_checkpoint_seq(path)\n        if ckpt > 0:',
+              '        ckpt = _committed_checkpoint_seq(path)\n'
+              '        if False:  # REVERT-TEST pre-M7 no checkpoint fail-closed'),
+             ('        if heads is None:\n            raise DdaError(\n'
+              '                f"{path}: {n} line(s) but no heads mirror records this chain "',
+              '        if False:  # REVERT-TEST pre-I6 no mirror-required append\n            raise DdaError(\n'
+              '                f"{path}: {n} line(s) but no heads mirror records this chain "'),
+             ('        if n != mirror_seq:',
+              '        if False:  # REVERT-TEST pre-I6 no anchored append'),
+             ('        if line_hash(last) != mirror_hash:',
+              '        if False:  # REVERT-TEST pre-I6 no mirror-hash check'),
+             ('    assert seq == mirror_seq + 1, (seq, mirror_seq)',
+              '    # REVERT-TEST pre-I6 no CAS anchor'),
+             ('    if mirror_seq > 0:\n        assert prev == heads.get("hash"), "mirror moved under the file lock"',
+              '    if False:  # REVERT-TEST pre-I6 no CAS anchor'),
+             ('        elif hs > len(hashes):',
+              '        elif False:  # REVERT-TEST pre-I6 verify ignores truncation'),
+             ('        if heads and heads.get("seq", 0) > 0:\n'
+              '            problems.append(f"{path.name}: file missing but heads mirror records seq {heads[\'seq\']}")',
+              '        if False:  # REVERT-TEST pre-N6 verify ignores deletion')]},
+         ["n_gitstash_chain.py", "n_gitclean_chain.py",
+          "n_gitclean_g3.py", "n_rm_reviews_g3.py",
+          "n_prefix_g3.py", "n_prefix_sticky.py"]),
+        ("pre-N10 no git-op verdict",
+         {"scripts/ddalib/hooks.py": [
+             ('    gv = _git_op_verdict(code) if code else None',
+              '    gv = None  # REVERT-TEST pre-N10 no git-op verdict')]},
+         ["n_hook_gitops.py"]),
+    ]
+
+    def test_reverts_flip_probes(self):
+        import json as _json
+        manifest = _json.loads(
+            (REPO / "tests" / "probes" / "MANIFEST.json").read_text(encoding="utf-8"))
+        env = dict(os.environ)
+        env["DDA_TEST_MODE"] = "1"
+        env["PYTHONPATH"] = str(REPO / "scripts") + os.pathsep + str(REPO) \
+            + os.pathsep + env.get("PYTHONPATH", "")
+        failures = []
+        for label, patches, probes in self.SCENARIOS:
+            saved = {}
+            try:
+                for rel, pairs in patches.items():
+                    fp = REPO / rel
+                    text = fp.read_text(encoding="utf-8")
+                    saved[rel] = text
+                    for old, new in pairs:
+                        self.assertIn(old, text,
+                                      f"[{label}] revert anchor not found in {rel}: {old[:80]!r}")
+                        text = text.replace(old, new, 1)
+                    fp.write_text(text, encoding="utf-8")
+                for name in probes:
+                    probe = REPO / "tests" / "probes" / name
+                    try:
+                        p = subprocess.run(
+                            [sys.executable, str(probe)], capture_output=True,
+                            text=True, env=env, cwd=str(probe.parent), timeout=600)
+                    except subprocess.TimeoutExpired:
+                        failures.append(f"[{label}] {name}: TIMEOUT under revert")
+                        continue
+                    findings = [ln for ln in p.stdout.splitlines()
+                                if ln.startswith("FINDING:")]
+                    tail = (p.stdout + p.stderr).strip().splitlines()[-2:]
+                    print(f"[revert:{label}] {name} rc={p.returncode} findings={findings} :: "
+                          + " | ".join(t[:160] for t in tail))
+                    if findings == [f"FINDING: {manifest[name]}"]:
+                        failures.append(
+                            f"[{label}] {name}: still prints the expected finding "
+                            f"with its fix reverted — probe cannot fail")
+            finally:
+                for rel, text in saved.items():
+                    (REPO / rel).write_text(text, encoding="utf-8")
+        self.assertEqual(failures, [], f"{len(failures)} revert check(s) failed: {failures}")
 
 
 if __name__ == "__main__":

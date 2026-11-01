@@ -127,6 +127,47 @@ def heads_path(path: Path) -> Path:
     return dda_home() / "heads" / f"{key}.{name.replace('/', '__')}.json"
 
 
+def _workdir_root_for(path: Path) -> Path | None:
+    """Workdir root for a workdir chain path, else None (global chains)."""
+    cp = canonical_path(path)
+    marker = "/.analysis/"
+    i = cp.rfind(marker)
+    if i < 0:
+        return None
+    return Path(cp[:i])
+
+
+def _check_dda_home_binding(path: Path) -> None:
+    """Refuse when the current DDA_HOME differs from the one recorded at lock.
+
+    The heads mirror path is derived from DDA_HOME, which the agent can
+    redirect per command. Without this check an attacker points DDA_HOME at
+    a fresh (or forged-mirror) dir to hide a missing or short mirror and
+    the anchored-append check below would consult the wrong mirror.
+    Global (dda-home) chains carry no lock context and are exempt.
+    """
+    root = _workdir_root_for(path)
+    if root is None:
+        return
+    lock_path = root / ".analysis" / "spec.lock"
+    try:
+        raw = lock_path.read_bytes()
+    except OSError:
+        return  # pre-lock: nothing recorded yet, nothing to enforce
+    try:
+        recorded = json.loads(raw).get("dda_home")
+    except ValueError:
+        return
+    if not recorded:
+        return  # lock predates home binding; nothing to enforce
+    current = canonical_path(dda_home())
+    if current != recorded:
+        raise DdaError(
+            f"{path}: current DDA_HOME ({current}) differs from the one recorded "
+            f"at lock ({recorded}); refusing to consult a different heads mirror "
+            f"(restore DDA_HOME or re-lock, §3.2 case 8)")
+
+
 def _write_json_atomic(path: Path, data) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
@@ -197,26 +238,90 @@ def read_records(path: Path) -> list[dict]:
 
 # ---------- appending ----------
 
+def _committed_checkpoint_seq(path: Path) -> int:
+    """Highest seq any git-committed chain-heads.json checkpoint records for C.
+
+    Consulted only on the tamper-evidence path (missing/empty chain with no
+    usable mirror), never on the hot path. Returns 0 when the workdir is not
+    a git repo, git is unavailable, or no checkpoint mentions this chain.
+    """
+    from . import ledger as _ledger
+    root = _workdir_root_for(path)
+    if root is None:
+        return 0
+    best = 0
+    for _sha, heads in _ledger.chain_checkpoints(root):
+        try:
+            rel = canonical_path(path)[len(canonical_path(root)) + 1:]
+            rel = rel.replace("\\", "/")
+            ent = heads.get(rel)
+        except (AttributeError, TypeError):
+            continue
+        if isinstance(ent, dict) and isinstance(ent.get("seq"), int):
+            best = max(best, ent["seq"])
+    return best
+
+
 def _append_locked(path: Path, record: dict) -> dict:
-    last = _last_line(path)
-    if last is None:
-        # N6 fail-closed: the heads mirror lives outside the workdir (dda
-        # home), so `git clean -fdx` / `git stash -u` delete the chain file
-        # but not the mirror. Restarting from seq 1 here would overwrite the
-        # mirror and launder the deletion (verify-chain would report ok,
-        # sticky flags like results_seen_before_profile would flip). A
-        # missing/empty chain with a non-empty mirror is tamper evidence:
-        # refuse to append until a human restores or investigates.
-        heads = _read_heads(path)
-        if heads and isinstance(heads.get("seq"), int) and heads["seq"] > 0:
+    # Anchored append (invariant I6): a chain file may only be extended
+    # exactly at its mirrored head. Restoring an older prefix — with or
+    # without the mirror — fails closed instead of silently restarting.
+    _check_dda_home_binding(path)
+    try:
+        with open(path, "rb") as fh:
+            data = fh.read()
+    except FileNotFoundError:
+        data = None
+    heads = _read_heads(path)
+    mirror_seq = heads.get("seq") if isinstance(heads, dict) else None
+    if not isinstance(mirror_seq, int) or mirror_seq < 1:
+        heads, mirror_seq = None, 0
+    if not data:
+        # Missing or empty file: a fresh chain starts only from genesis.
+        # A non-empty mirror means evidence was deleted (N6: `git clean
+        # -fdx` / `git stash -u` remove the file but not the mirror);
+        # a committed checkpoint recording this chain means the file was
+        # deleted and the mirror rolled back or redirected (N8/M7).
+        if mirror_seq > 0:
             raise DdaError(
                 f"{path}: file is missing or empty but the heads mirror records "
-                f"seq {heads['seq']} (evidence was deleted, e.g. by `git clean -fdx` "
+                f"seq {mirror_seq} (evidence was deleted, e.g. by `git clean -fdx` "
                 f"or `git stash -u`); restore it before appending (§3.2 case 8)")
+        ckpt = _committed_checkpoint_seq(path)
+        if ckpt > 0:
+            raise DdaError(
+                f"{path}: file is missing or empty with no heads mirror, but a "
+                f"committed checkpoint records seq {ckpt} for this chain — "
+                f"the chain is below committed checkpoint; restore it before "
+                f"appending (§3.2 case 8)")
         seq, prev = 1, GENESIS
     else:
-        if not last.endswith(b"\n"):
+        if not data.endswith(b"\n"):
             raise DdaError(f"{path}: last line is incomplete (torn write); run `dda verify-chain`")
+        lines = data.split(b"\n")
+        lines.pop()  # trailing newline
+        n = len(lines)
+        last = lines[-1]
+        if heads is None:
+            raise DdaError(
+                f"{path}: {n} line(s) but no heads mirror records this chain "
+                f"(file was not written by the appender, or the mirror was "
+                f"deleted); restore the mirror before appending (§3.2 case 8)")
+        mirror_hash = heads.get("hash")
+        if n != mirror_seq:
+            if n < mirror_seq:
+                raise DdaError(
+                    f"{path}: {n} line(s) but the heads mirror records seq "
+                    f"{mirror_seq} — the chain was replaced by an older prefix; "
+                    f"restore it before appending (§3.2 case 8)")
+            raise DdaError(
+                f"{path}: {n} line(s) but the heads mirror records seq "
+                f"{mirror_seq} — line(s) after the heads mirror (appended "
+                f"outside the appender); run `dda verify-chain` (§3.2 case 8)")
+        if line_hash(last) != mirror_hash:
+            raise DdaError(
+                f"{path}: last line does not match the heads mirror "
+                f"(rewritten or forked); restore it before appending (§3.2 case 8)")
         try:
             seq = int(json.loads(last)["seq"]) + 1
         except Exception:
@@ -234,6 +339,12 @@ def _append_locked(path: Path, record: dict) -> dict:
         fh.write(line)
         fh.flush()
         os.fsync(fh.fileno())
+    # CAS on the mirror: the new entry extends exactly the head we anchored
+    # on (new.seq == old.seq+1, new.prev == old.hash). The file lock held
+    # across read and write makes this atomic against other appenders.
+    assert seq == mirror_seq + 1, (seq, mirror_seq)
+    if mirror_seq > 0:
+        assert prev == heads.get("hash"), "mirror moved under the file lock"
     _write_json_atomic(heads_path(path), {"seq": seq, "hash": line_hash(line), "file": canonical_path(path)})
     return rec
 

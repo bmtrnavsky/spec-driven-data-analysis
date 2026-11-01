@@ -1,8 +1,11 @@
 """Human approval artifacts (spec §4.5) — M1 one-approval-model.
 
 An approval is a git commit, made by an approver in their own terminal with
-`dda approve <kind>`, that adds exactly one file
-`.analysis/approvals/<kind>-<digest16>.json` and is signed. Kinds:
+`dda approve <kind>`, that adds exactly one approval file,
+`.analysis/approvals/<kind>-<digest16>.json`, plus the machine-written
+chain checkpoint `.analysis/chain-heads.json` (M7: git history pins chain
+lengths so an older-prefix restore fails closed). The approval file is
+signed. Kinds:
 tier, spec, amendment, signoff, definition, correction, config.
 
 The digest is content-addressed and computed ONLY by dda
@@ -466,8 +469,11 @@ def do_approve(wd: Workdir, kind: str, artifact: str | None = None,
     path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
     if _git(wd, "rev-parse", "--show-toplevel").returncode != 0:
         raise DdaError(f"{wd.root} is not a git repo; approvals must be committable")
+    from . import ledger as _ledger
+    heads_rel = _ledger.CHAIN_HEADS_REL
+    _ledger.snapshot_chain_heads(wd)  # M7: pin chain lengths in git history
     msg = message or f"dda approve {kind} {short}"
-    _git(wd, "add", "--", rel)
+    _git(wd, "add", "--", rel, heads_rel)
     pre: list[str] = []
     cmd = ["commit"]
     if sign:
@@ -478,7 +484,7 @@ def do_approve(wd: Workdir, kind: str, artifact: str | None = None,
         pre += ["-c", "commit.gpgsign=false", "-c", "tag.gpgSign=false"]
     if not _git(wd, "config", "--get", "user.email").stdout.strip():
         pre += ["-c", "user.name=dda", "-c", "user.email=dda@localhost"]
-    cmd += ["--no-verify", "-q", "-m", msg, "--", rel]
+    cmd += ["--no-verify", "-q", "-m", msg, "--", rel, heads_rel]
     r = _git(wd, *pre, *cmd)
     if r.returncode != 0:
         err = (r.stderr or r.stdout).strip()[-400:]
@@ -487,21 +493,41 @@ def do_approve(wd: Workdir, kind: str, artifact: str | None = None,
                            f"or re-run with --no-sign to record an unverified approval")
         raise DdaError(f"committing the approval failed ({err})")
     sha = _git(wd, "rev-parse", "HEAD").stdout.strip()
-    # The commit must add exactly this one file.
+    # The commit must add exactly this one approval file (plus the
+    # machine-written chain checkpoint, which _only_added_file tolerates).
     if _only_added_file(wd, sha) != rel:
         raise DdaError(f"approval commit {sha[:12]} touches more than {rel}; "
-                       "an approval commit must add exactly one file (§4.5)")
+                       "an approval commit must add exactly one approval file (§4.5)")
     return {"kind": kind, "artifact": digest, "digest": digest, "file": rel,
             "commit": sha, "signed": sign}
 
 
 def _only_added_file(wd: Workdir, sha: str) -> str | None:
+    """The single approval file added by commit `sha`, else None.
+
+    Tolerates the machine-written chain checkpoint
+    (`.analysis/chain-heads.json`, M7) alongside the approval file —
+    anything else still disqualifies the commit.
+    """
+    from .ledger import CHAIN_HEADS_REL
     r = _git(wd, "show", "--pretty=format:", "--name-status", sha)
     lines = [ln for ln in r.stdout.splitlines() if ln.strip()]
-    if len(lines) != 1:
+    added = []
+    for ln in lines:
+        m = re.match(r"^A\t(.*)$", ln)
+        if m:
+            added.append(m.group(1).replace("\\", "/"))
+            continue
+        # The machine-written checkpoint is tracked since the lock commit,
+        # so approval commits MODIFY it — anything else still disqualifies.
+        m = re.match(r"^M\t(.*)$", ln)
+        if m and m.group(1).replace("\\", "/") == CHAIN_HEADS_REL:
+            continue
         return None
-    m = re.match(r"^A\t(.*)$", lines[0])
-    return m.group(1).replace("\\", "/") if m else None
+    approval = [a for a in added if a != CHAIN_HEADS_REL]
+    if len(approval) != 1 or len(added) > 2:
+        return None
+    return approval[0]
 
 
 # ---------- dda approved ----------
@@ -673,7 +699,7 @@ def verify_approval(wd: Workdir, kind: str, artifact: str | None = None) -> dict
                     commit=sha, digest=digest)
     if _only_added_file(wd, sha) != rel:
         return fail(ApprovalState.BAD_SIG,
-                    f"commit {sha[:12]} touches more than {rel}; an approval commit adds exactly one file",
+                    f"{rel} is committed as {sha[:12]} but that commit touches more than {rel}; an approval commit adds exactly one approval file",
                     commit=sha, digest=digest)
     # Coverage: the approved digest must equal the current digest. A v1
     # record carries no payload — v1 correction/definition records cannot

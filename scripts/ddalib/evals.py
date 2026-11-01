@@ -177,6 +177,15 @@ def do_run(wd: Workdir) -> dict:
     failures block (exit 1); unbound drafts are reported, never blocking.
     """
     from . import stage8 as _stage8
+    from . import ledger as _ledger
+    # N9: a deleted approval or correction file unbinds the case (matching
+    # returns no bound case) — but that must never read as a pass. Failing
+    # closed here keeps the evals verdict consistent with verify-chain and
+    # the gates (which fail through _preamble's chain check).
+    problems, _ = _ledger.verify_all(wd)
+    if problems:
+        raise DdaError("evidence chain failed to verify — stop and ask (§3.2 case 8):\n  - " + "\n  - ".join(problems),
+                       _ledger.EXIT_CHAIN)
     matched = do_match(wd)
     results = _stage8.run_eval_checks(wd, matched)
     by_case = {m["case"]: m for m in matched}

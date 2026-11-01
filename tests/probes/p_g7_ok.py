@@ -1,8 +1,6 @@
 """Positive: lock -> register/lock variant -> profile -> run -> verify -> G7 passes."""
 from probelib import new_fixture, finding, cleanup
 
-EXPECTED = "G7-PASS"
-
 f = new_fixture("p8", prefix="dda-p-g7ok-")
 try:
     f.lock()

@@ -2,8 +2,6 @@
 evals run must STILL block via the index record."""
 from probelib import new_fixture, finding, cleanup, evals_blocked_fixture, git, git_ok
 
-EXPECTED = "EVALS-STILL-BLOCKED"
-
 f = new_fixture("p8", prefix="dda-n-gamend7-")
 try:
     sha = evals_blocked_fixture(f)

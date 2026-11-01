@@ -66,20 +66,55 @@ def workdir_chains(wd: Workdir) -> list[Path]:
 
 
 def verify_all(wd: Workdir, merge: bool = True, include_global: bool = True) -> tuple[list[str], int]:
-    """Merge spills (optional) and verify every chain. Returns (problems, merged)."""
+    """Merge spills (optional) and verify every evidence chain. Returns (problems, merged)."""
+    from . import chain as _chain
     paths = workdir_chains(wd)
     if include_global:
         paths.append(unbound_log())
     merged = 0
     if merge:
         for p in paths:
-            merged += chain.merge_spills(p)
+            merged += _chain.merge_spills(p)
     problems = []
     for p in paths:
-        problems += chain.verify(p)
-        if not merge and chain.pending_spills(p):
-            problems.append(f"{p.name}: {len(chain.pending_spills(p))} unmerged spill file(s) (hook fault)")
+        problems += _chain.verify(p)
+        if not merge and _chain.pending_spills(p):
+            problems.append(f"{p.name}: {len(_chain.pending_spills(p))} unmerged spill file(s) (hook fault)")
+    # Committed checkpoints (M7): a restored older prefix with a rolled-back
+    # or redirected mirror still verifies against its (stale) mirror, so
+    # consult git history — but only when some workdir chain lacks a usable
+    # mirror, which keeps the hot path (every CLI call) free of git walks.
+    if in_git_repo(wd.root):
+        missing_mirror = False
+        for p in workdir_chains(wd):
+            if not p.is_file():
+                continue
+            heads = _chain._read_heads(p)
+            if not isinstance(heads, dict) or not isinstance(heads.get("seq"), int) \
+                    or heads["seq"] < 1 or not isinstance(heads.get("hash"), str):
+                missing_mirror = True
+                break
+        if missing_mirror:
+            problems += _checkpoint_problems(wd)
     return problems, merged
+
+
+def note_home_move(wd: Workdir) -> None:
+    """Rebind a copied workdir to the current DDA_HOME (test-fork support).
+
+    The anchored append refuses when the current DDA_HOME differs from the
+    one recorded at lock; a forked fixture (copied workdir + copied home)
+    is a legitimate move, so it updates the recorded home and refreshes
+    the lock-state cache. Never used outside tests.
+    """
+    from . import lockstate as _lockstate
+    raw = wd.lock_path.read_bytes()
+    lock = json.loads(raw)
+    lock["dda_home"] = canonical_path(dda_home())
+    with open(wd.lock_path, "w", encoding="utf-8", newline="\n") as fh:
+        json.dump(lock, fh, indent=2, sort_keys=True)
+        fh.write("\n")
+    _lockstate.write_cache(wd, _lockstate.read_lock(wd))
 
 
 def last_lock_record(wd: Workdir) -> dict | None:
@@ -307,6 +342,123 @@ def _git(root: Path, *args, check=True) -> subprocess.CompletedProcess:
 
 def in_git_repo(root: Path) -> bool:
     return shutil.which("git") is not None and _git(root, "rev-parse", "--show-toplevel", check=False).returncode == 0
+
+
+# ---------- chain checkpoints in git (M7) ----------
+
+CHAIN_HEADS_REL = ".analysis/chain-heads.json"
+
+
+def chain_heads_path(wd: Workdir) -> Path:
+    return wd.root / CHAIN_HEADS_REL
+
+
+def snapshot_chain_heads(wd: Workdir) -> Path:
+    """Write .analysis/chain-heads.json: {chain rel: {seq, hash}} for every
+    non-empty workdir chain, sourced from the heads mirrors (the
+    appender-maintained heads, never hand-read file tails).
+
+    Called before every dda-made commit (lock, amend, approve, signoff) so
+    git history pins the chain lengths the workdir must still extend: any
+    later restore of an older file prefix fails closed as "below committed
+    checkpoint" (N8). Best effort per chain — a chain with no mirror and no
+    readable file simply contributes no entry.
+    """
+    from . import chain as _chain
+    snap: dict[str, dict] = {}
+    for p in workdir_chains(wd):
+        try:
+            rel = str(p.relative_to(wd.root)).replace("\\", "/")
+        except ValueError:
+            continue
+        heads = _chain._read_heads(p)
+        if isinstance(heads, dict) and isinstance(heads.get("seq"), int) and heads["seq"] > 0 \
+                and isinstance(heads.get("hash"), str):
+            snap[rel] = {"seq": heads["seq"], "hash": heads["hash"]}
+    _chain._write_json_atomic(chain_heads_path(wd), snap)
+    return chain_heads_path(wd)
+
+
+def chain_checkpoints(root: Path) -> list[tuple[str, dict]]:
+    """[(commit sha, checkpoint dict)] for every git commit that records
+    .analysis/chain-heads.json — across all refs AND the reflog (dropped
+    commits survive there: `git reset --hard`, rebase-onto, update-ref).
+
+    Returns [] when git is missing or `root` is not a repo. Capped to keep
+    verify_all cheap on large histories.
+    """
+    if shutil.which("git") is None:
+        return []
+    out: list[tuple[str, dict]] = []
+    seen: set[str] = set()
+    shas: list[str] = []
+    for args in (["log", "--all", "--format=%H", "--", CHAIN_HEADS_REL],
+                 ["log", "-g", "--format=%H", "--", CHAIN_HEADS_REL]):
+        try:
+            r = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, timeout=60)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if r.returncode != 0:
+            continue
+        for ln in r.stdout.splitlines():
+            sha = ln.strip()
+            if sha and sha not in seen:
+                seen.add(sha)
+                shas.append(sha)
+                if len(shas) >= 200:
+                    break
+        if len(shas) >= 200:
+            break
+    for sha in shas:
+        try:
+            r = subprocess.run(["git", "-C", str(root), "show", f"{sha}:{CHAIN_HEADS_REL}"],
+                               capture_output=True, text=True, timeout=60)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if r.returncode != 0:
+            continue
+        try:
+            snap = json.loads(r.stdout)
+        except ValueError:
+            continue
+        if isinstance(snap, dict):
+            out.append((sha, snap))
+    return out
+
+
+def _checkpoint_problems(wd: Workdir) -> list[str]:
+    """Every committed checkpoint must still be extended by the live file:
+    lines(C)[seq-1] hashes to the checkpointed value (invariant I7)."""
+    from . import chain as _chain
+    ckpts = chain_checkpoints(wd.root)
+    if not ckpts:
+        return []
+    problems: list[str] = []
+    for sha, snap in ckpts:
+        if not isinstance(snap, dict):
+            continue
+        for rel, ent in snap.items():
+            if not isinstance(ent, dict) or not isinstance(ent.get("seq"), int) or ent["seq"] < 1:
+                continue
+            if not isinstance(ent.get("hash"), str):
+                continue
+            p = wd.root / rel
+            try:
+                data = p.read_bytes()
+            except OSError:
+                problems.append(
+                    f"{rel}: file missing but commit {sha[:12]} checkpoints seq {ent['seq']} "
+                    f"for this chain — the chain is below committed checkpoint (§3.2 case 8)")
+                continue
+            lines = data.split(b"\n")
+            if lines and lines[-1] == b"":
+                lines.pop()
+            if len(lines) < ent["seq"] or _chain.line_hash(lines[ent["seq"] - 1]) != ent["hash"]:
+                problems.append(
+                    f"{rel}: commit {sha[:12]} checkpoints seq {ent['seq']} for this chain "
+                    f"but the live file does not extend it — the chain is below "
+                    f"committed checkpoint (§3.2 case 8)")
+    return problems
 
 
 def git_commit(root: Path, paths: list[Path], message: str) -> str:
@@ -778,6 +930,7 @@ def do_lock(wd: Workdir, amend: str | None = None) -> dict:
         "amend_reason": amend,
         "prev_lock_hash": existing["lock_hash"] if existing else None,
         "milestone": wd.milestone,
+        "dda_home": canonical_path(dda_home()),
     }
     summary = {k: len(v) for k, v in found.items() if v}
     chain.append(ledger_path(wd), {
@@ -798,7 +951,7 @@ def do_lock(wd: Workdir, amend: str | None = None) -> dict:
     binding.refresh_registry(wd)
 
     files = [wd.spec_path, vpath, wd.lock_path, ledger_path(wd), wd.config_path, wd.root / ".gitignore",
-             runs_log(wd), audit_log(wd), specs_tried(wd)]
+             runs_log(wd), audit_log(wd), specs_tried(wd), snapshot_chain_heads(wd)]
     files += [wd.definitions / f"{p.split('@', 1)[0]}.md" for p in comp.pins]
     if blobs_dir(wd).is_dir() and any(blobs_dir(wd).iterdir()):
         files.append(blobs_dir(wd))

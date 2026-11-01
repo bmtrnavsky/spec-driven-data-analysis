@@ -1,8 +1,6 @@
 """Positive: valid goldfish flow passes G3 (control both attacks compare against)."""
 from probelib import new_fixture, finding, cleanup
 
-EXPECTED = "G3-PASS"
-
 f = new_fixture("f7", prefix="dda-p-g3pass-")
 try:
     f.write_spec()

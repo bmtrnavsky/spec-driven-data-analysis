@@ -2,8 +2,6 @@
 import shutil
 from probelib import new_fixture, finding, cleanup, g3_failed_fixture, g3_verdict
 
-EXPECTED = "G3-STILL-FAILING"
-
 f = new_fixture("f7", prefix="dda-n-rmrev-")
 try:
     gdir = g3_failed_fixture(f)

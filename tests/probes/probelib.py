@@ -1,10 +1,13 @@
 """Shared fixture helpers for the in-repo ddaprobe suite (tests/probes/).
 
 Probes run as scripts (subprocess per probe from TestDdaprobeRegression)
-and assert on OUTCOMES, not exit codes: every probe declares EXPECTED and
-prints exactly one `FINDING: <token>` line. The regression test fails when
-the finding is absent — an attack that silently succeeds can no longer
-hide behind exit code 0.
+and assert on OUTCOMES, not exit codes: the manifest
+(tests/probes/MANIFEST.json) maps each probe filename to its one
+expected token, and the regression test requires the probe to print
+EXACTLY ONE `FINDING: <token>` line equal to it. An attack that
+silently succeeds prints a different finding and fails the suite
+(exit-code-only assertions were blind to N1/N2-class bypasses, which
+exit 0 while laundering evidence).
 """
 import os
 import subprocess
@@ -19,9 +22,18 @@ os.environ["DDA_TEST_MODE"] = "1"
 
 from tests.test_phase8 import P8Setup  # noqa: E402
 from tests.test_phase7_round2 import P7R2Setup  # noqa: E402
+from tests.test_phase9 import P9Setup  # noqa: E402
 
 
 class F8(P8Setup):
+    def runTest(self):
+        pass
+
+
+class F9(P9Setup):
+    TIER = "This is a DECIDE analysis."
+    DECISION = "Ship v2 or roll back."
+
     def runTest(self):
         pass
 
@@ -36,7 +48,7 @@ class F7(P7R2Setup):
 
 def new_fixture(kind="p8", prefix="dda-probe-"):
     """Fresh isolated workdir: git repo, identity, config, definitions, spec."""
-    F = F8 if kind == "p8" else F7
+    F = {"p8": F8, "f7": F7, "p9": F9}[kind]
     f = F()
     f.tmp = Path(tempfile.mkdtemp(prefix=prefix))
     os.environ["DDA_HOME"] = str(f.tmp / "home")
@@ -54,6 +66,11 @@ def new_fixture(kind="p8", prefix="dda-probe-"):
     git(f, "init", "-q")
     git(f, "config", "user.email", "t@t.t")
     git(f, "config", "user.name", "t")
+    # Isolate the guard under test from line-ending noise: with the global
+    # core.autocrlf=true, git workdir rewrites (stash pop, checkout,
+    # reset) smudge chains to CRLF and every probe would block on
+    # "not in canonical form" instead of the guard it targets.
+    git(f, "config", "core.autocrlf", "false")
     git(f, "commit", "-q", "--allow-empty", "-m", "dda probe seed")
     if kind == "p8":
         f.write_config()

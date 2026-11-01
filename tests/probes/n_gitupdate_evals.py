@@ -2,8 +2,6 @@
 evals run must STILL block."""
 from probelib import new_fixture, finding, cleanup, evals_blocked_fixture, git_ok
 
-EXPECTED = "EVALS-STILL-BLOCKED"
-
 f = new_fixture("p8", prefix="dda-n-gupdate7-")
 try:
     sha = evals_blocked_fixture(f)

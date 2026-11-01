@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 from pathlib import Path
 
 from . import chain, footer, ledger, lockstate
@@ -213,6 +214,112 @@ def _frozen_variant(ctx: Ctx, tail: str) -> bool:
     return any(r.get("variant") == vid and r.get("frozen_hash") for r in chain.read_records(ledger.specs_tried(ctx.wd)))
 
 
+# ---------- git-operation parsing (N10) ----------
+
+# Destructive git operations: blocked in a bound session even when they name
+# no evidence path (the old hook only matched path text, so a bare
+# `git clean -fdx` or `git stash -u` sailed through and wiped chains).
+_GIT_DESTRUCTIVE_SUBS = {"clean", "stash", "reset", "checkout", "restore"}
+_GIT_STASH_DESTRUCTIVE = {"push", "save", "apply", "pop", "drop", "clear", "branch", None}
+_GIT_REWRITE_SUBS = {"rebase", "update-ref", "filter-branch", "filter-repo"}
+
+_GIT_SKIP_NEXT = {"-C", "--git-dir", "--work-tree", "--namespace", "--super-prefix"}
+
+
+def _clean_tok(t: str) -> str:
+    return t.strip("\"'").rstrip(",;").strip("\"'")
+
+
+def _git_invocations(code: str) -> list[list[str]]:
+    """Token lists (args after `git`) for every git invocation in `code`.
+
+    Handles shell chaining (`&&`, `;`, `|`, newlines), `sudo`/env prefixes,
+    `git -c k=v` / `git -C dir` globals, and `subprocess`-style list
+    spellings (`["git", "clean", ...]`) by cleaning each token.
+    """
+    invs: list[list[str]] = []
+    for seg in re.split(r"[;&|\n]+", code):
+        try:
+            toks = [t.strip("\"'") for t in shlex.split(seg, posix=False)]
+        except ValueError:
+            toks = seg.split()
+        toks = [_clean_tok(t) for t in toks if _clean_tok(t)]
+        base = lambda t: re.split(r"[\\/]", t)[-1].lower()  # noqa: E731
+        idx = next((i for i, t in enumerate(toks) if base(t) in ("git", "git.exe")), None)
+        if idx is None:
+            continue
+        args: list[str] = []
+        skip = False
+        for t in toks[idx + 1:]:
+            if skip:
+                skip = False
+                continue
+            if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", t):
+                continue  # VAR=val env prefix
+            if t in _GIT_SKIP_NEXT:
+                skip = True
+                continue
+            if t == "-c" or t.startswith("--config-env"):
+                if t == "-c":
+                    skip = True
+                continue
+            if t.startswith("-") and "=" in t:
+                continue  # --git-dir=x style global
+            args.append(t)
+        invs.append(args)
+    return invs
+
+
+def _git_op_verdict(code: str) -> tuple[str, str] | None:
+    """("block"|"warn", message) for destructive/rewrite git ops, else None.
+
+    Judges the git OPERATION, not the paths it mentions: `git clean -fdx`
+    with no pathspec wipes the same untracked chains as
+    `git clean -fdx -- .analysis`. Rewrite ops (rebase, amend, update-ref,
+    filter-branch) are allowed but recorded — the caller appends a lineage
+    event so the rewrite stays visible to the gates.
+    """
+    for args in _git_invocations(code):
+        if not args:
+            continue
+        sub = args[0].lower()
+        rest = args[1:]
+        if sub == "clean":
+            if any(f == "-f" or (f.startswith("-") and not f.startswith("--") and "f" in f)
+                   or f in ("--force",) for f in rest if f.startswith("-")):
+                return ("block", "dda evidenceguard: `git clean -f*` deletes untracked evidence chains "
+                                 "(runs.log, reviews, lineage) outside git history; restore via the dda "
+                                 "ledger instead (§3.2 case 8).")
+        elif sub == "stash":
+            sub2 = rest[0].lower() if rest and not rest[0].startswith("-") else None
+            if sub2 in _GIT_STASH_DESTRUCTIVE:
+                return ("block", f"dda evidenceguard: `git stash{' ' + sub2 if sub2 else ''}` "
+                                 "moves evidence chains (tracked and untracked) out of the workdir; "
+                                 "a later apply/pop restores a stale prefix that fails closed (§3.2 case 8).")
+        elif sub == "reset":
+            if any(f in ("--hard", "--merge", "--keep") for f in rest):
+                return ("block", "dda evidenceguard: `git reset --hard/--merge/--keep` drops commits and "
+                                 "rewrites tracked evidence to an older prefix; it fails closed (§3.2 case 8).")
+        elif sub in ("checkout", "restore"):
+            pathspec = False
+            if "--" in rest:
+                pathspec = bool(rest[rest.index("--") + 1:])
+            elif sub == "restore" and any(not p.startswith("-") for p in rest):
+                pathspec = True
+            elif sub == "checkout" and sum(1 for p in rest if not p.startswith("-")) >= 2:
+                pathspec = True  # `git checkout <rev> <path>` (old-style, no --)
+            if pathspec:
+                return ("block", f"dda evidenceguard: `git {sub}` with a pathspec restores tracked files "
+                                 "to an older revision; evidence must only move forward (§3.2 case 8).")
+        elif sub in _GIT_REWRITE_SUBS:
+            return ("warn", f"dda evidenceguard: `git {sub}` rewrites history; recorded in lineage "
+                            "— bound evals stay bound through the approvals index (N7).")
+        elif sub == "commit" and any(a == "--amend" for a in rest):
+            return ("warn", "dda evidenceguard: `git commit --amend` rewrites the approval/lock commit; "
+                            "recorded in lineage — bound evals stay bound through the approvals index (N7).")
+    return None
+
+
 def evidenceguard(ctx: Ctx) -> tuple[dict, int]:
     hb = human_only_block(ctx)
     if hb:
@@ -221,6 +328,24 @@ def evidenceguard(ctx: Ctx) -> tuple[dict, int]:
         return allow()
     view = ctx.view
     code = "\n".join(view.texts) if ctx.tool in CODE_TOOLS else ""
+    gv = _git_op_verdict(code) if code else None
+    if gv is not None:
+        kind, msg = gv
+        if kind == "block":
+            return block(msg)
+        # Rewrite op (rebase, amend, update-ref, filter-branch): allow but
+        # leave a lineage event so the rewrite stays visible to the gates.
+        try:
+            from . import lineage as _lineage, lockstate as _lockstate
+            lock = _lockstate.read_lock(ctx.wd) or {}
+            _lineage.stage_event(ctx.wd, "git-rewrite",
+                                 lock_hash=lock.get("lock_hash") or "",
+                                 version=lock.get("version") or 0,
+                                 command=code[:300], note=msg)
+        except DdaError:
+            return block("dda evidenceguard: cannot record the history rewrite in lineage "
+                         "(chains unverifiable); refusing to proceed (§3.2 case 8).")
+        return allow()
     if code and re.search(r"\bgit\b[^\n;&|]*\b(?:add|commit)\b", code) and "approvals" in view.blob \
             and any(t.startswith("approvals") for t in analysis_refs(view)):
         return block("dda evidenceguard: approval files are committed by a human approver with `dda approve` in "

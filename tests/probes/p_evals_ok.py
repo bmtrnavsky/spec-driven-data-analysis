@@ -3,8 +3,6 @@ import hashlib
 from probelib import new_fixture, finding, cleanup
 from tests.test_phase9 import TestEvalsMatchRun
 
-EXPECTED = "EVALS-OK"
-
 f = new_fixture("p8", prefix="dda-p-evalsok-")
 try:
     f.lock()
