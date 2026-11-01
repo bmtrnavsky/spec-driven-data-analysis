@@ -670,12 +670,13 @@ class TestProbeRevertSensitivity(unittest.TestCase):
              ('    assert seq == mirror_seq + 1, (seq, mirror_seq)',
               '    # REVERT-TEST pre-I6 no CAS anchor'),
              ('    if mirror_seq > 0:\n        assert prev == heads.get("hash"), "mirror moved under the file lock"',
-              '    if False:  # REVERT-TEST pre-I6 no CAS anchor'),
+              '    if False:  # REVERT-TEST pre-I6 no CAS anchor\n        assert prev == heads.get("hash"), "mirror moved under the file lock"'),
              ('        elif hs > len(hashes):',
               '        elif False:  # REVERT-TEST pre-I6 verify ignores truncation'),
              ('        if heads and heads.get("seq", 0) > 0:\n'
               '            problems.append(f"{path.name}: file missing but heads mirror records seq {heads[\'seq\']}")',
-              '        if False:  # REVERT-TEST pre-N6 verify ignores deletion')]},
+              '        if False:  # REVERT-TEST pre-N6 verify ignores deletion\n'
+              '            problems.append(f"{path.name}: file missing but heads mirror records seq {heads[\'seq\']}")')]},
          ["n_gitstash_chain.py", "n_gitclean_chain.py",
           "n_gitclean_g3.py", "n_rm_reviews_g3.py",
           "n_prefix_g3.py", "n_prefix_sticky.py"]),
@@ -726,9 +727,16 @@ class TestProbeRevertSensitivity(unittest.TestCase):
                     # pass a probe that errors out or prints nothing.
                     want = [f"FINDING: {manifest[name]['vuln']}"]
                     if findings != want:
-                        failures.append(
-                            f"[{label}] {name}: want exactly {want} "
-                            f"with its fix reverted — probe cannot fail; got {findings}")
+                        if findings == []:
+                            failures.append(
+                                f"[{label}] {name}: want exactly {want} "
+                                f"with its fix reverted — probe printed NO FINDING "
+                                f"(it crashed/errored before asserting, rc={p.returncode}; "
+                                f"see tail above) — distinct from printing the wrong token")
+                        else:
+                            failures.append(
+                                f"[{label}] {name}: want exactly {want} "
+                                f"with its fix reverted — probe printed the wrong token; got {findings}")
             finally:
                 for rel, text in saved.items():
                     (REPO / rel).write_text(text, encoding="utf-8")

@@ -32,6 +32,12 @@ try:
     print("evals run after stash-reset-pop rc:", rc)
     tail = out.strip().splitlines()[-1][:200] if out.strip() else ""
     print(tail)
-    finding("EVALS-STILL-BLOCKED" if rc != 0 else "EVALS-UNBOUND-VULNERABLE")
+    if "Traceback (most recent call last):" in out:
+        # The tool crashed — a crash is NOT a block. Report a token that
+        # matches neither the expected nor the vuln finding, so a crashed
+        # run can never pass as a held bound (or as a successful revert).
+        finding("EVALS-TOOL-CRASHED")
+    else:
+        finding("EVALS-STILL-BLOCKED" if rc != 0 else "EVALS-UNBOUND-VULNERABLE")
 finally:
     cleanup(f)
