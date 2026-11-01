@@ -51,6 +51,8 @@ sys.path.insert(0, str(REPO / "scripts"))
 sys.path.insert(0, str(REPO / "tests"))
 
 from revert.apply import CONFORMANCE, IncoherentRevert, apply_unit  # noqa: E402
+from revert.premise import check_pair, find_record, load_premise  # noqa: E402
+from revert.scenarios import SCENARIOS as REGISTRY, by_id as scenario_by_id  # noqa: E402
 
 from tests.test_phase8 import P8Setup  # noqa: E402
 from tests.test_phase9 import P9Setup  # noqa: E402
@@ -637,27 +639,14 @@ class TestProbeRevertSensitivity(unittest.TestCase):
     scenario fails.
     """
 
-    # (scenario, {relpath: [(old, new), ...]}, [probe names])
+    # Registry-derived: (scenario, {relpath: [(old, new), ...]}, [probe names]).
+    # Single source of truth is tests/revert/scenarios.py (I14); the
+    # validator certifies these pairs into tests/revert/PREMISE.json.
     SCENARIOS = [
-        ("pre-N1 early return",
-         {"scripts/ddalib/stage8.py": [
-             ('    base = wd.root / "evals" / "corrections"\n',
-              '    base = wd.root / "evals" / "corrections"\n'
-              '    if not base.is_dir():  # REVERT-TEST pre-N1 early return\n'
-              '        return []\n')]},
-         ["n_rm_corrections_evals.py"]),
-        ("pre-N7 no index fallback",
-         {"scripts/ddalib/stage8.py": [
-             ('    for entry in _approvals.index_approvals(wd, "correction"):',
-              '    for entry in []:  # REVERT-TEST pre-N7 no index fallback')]},
-         ["n_gitamend_evals.py", "n_gitrebase_evals.py",
-          "n_gitreset_evals.py", "n_gitupdate_evals.py",
-          "n_filterbranch_evals.py", "n_prefix_evals.py"]),
-        ("pre-N10 no git-op verdict",
-         {"scripts/ddalib/hooks.py": [
-             ('    gv = _git_op_verdict(code) if code else None',
-              '    gv = None  # REVERT-TEST pre-N10 no git-op verdict')]},
-         ["n_hook_gitops.py"]),
+        (s["id"],
+         {u["module"]: u["patches"] for u in s["units"]},
+         list(s["probes"]))
+        for s in REGISTRY if s["kind"] == "patch"
     ]
 
     def test_reverts_flip_probes(self):
@@ -669,6 +658,18 @@ class TestProbeRevertSensitivity(unittest.TestCase):
         env["PYTHONPATH"] = str(REPO / "scripts") + os.pathsep + str(REPO) \
             + os.pathsep + env.get("PYTHONPATH", "")
         failures = []
+        # I14 fast path: a pair whose probe, harness, or target code drifted
+        # since validation is STALE-PREMISE (or NO-RECORD) — it fails here
+        # and is not run, never trusted.
+        premise = load_premise(REPO)
+        stale = set()
+        for _label, _patches, _probes in self.SCENARIOS:
+            for _name in _probes:
+                _msg = check_pair(REPO, scenario_by_id(_label), _name,
+                                  find_record(premise, _label, _name))
+                if _msg is not None:
+                    failures.append(_msg)
+                    stale.add((_label, _name))
         for label, patches, probes in self.SCENARIOS:
             saved = {}
             try:
@@ -682,6 +683,8 @@ class TestProbeRevertSensitivity(unittest.TestCase):
                         text = text.replace(old, new, 1)
                     fp.write_text(text, encoding="utf-8")
                 for name in probes:
+                    if (label, name) in stale:
+                        continue
                     probe = REPO / "tests" / "probes" / name
                     try:
                         p = subprocess.run(
@@ -715,33 +718,15 @@ class TestProbeRevertSensitivity(unittest.TestCase):
                     (REPO / rel).write_text(text, encoding="utf-8")
         self.assertEqual(failures, [], f"{len(failures)} revert check(s) failed: {failures}")
 
-    # Whole-function reference reverts (SPEC-504ed55 §3): (scenario label,
-    # [unit dicts], [probe names]). Unit: {"module", "func", "impl"} with
-    # paths relative to the repo root; the impl file holds exactly the
-    # replacement function, located BY FUNCTION NAME via the AST.
+    # Registry-derived whole-function reference reverts (SPEC-504ed55 §3):
+    # (scenario label, [unit dicts], [probe names]). Single source of
+    # truth is tests/revert/scenarios.py (I14).
     FUNC_SCENARIOS = [
-        ("pre-I6/N6/M7 no fail-closed append",
-         [{"module": "scripts/ddalib/chain.py", "func": "_append_locked",
-           "impl": "tests/revert/impl/chain_append_locked_historic_d135783.py"}],
-         ["n_gitstash_chain.py", "n_gitclean_chain.py"]),
-        ("pre-I12 no broken-chain pin",
-         [{"module": "scripts/ddalib/lineage.py", "func": "lineage",
-           "impl": "tests/revert/impl/lineage_lineage_no_pin.py"}],
-         ["n_prefix_sticky.py"]),
-        ("pre-N2 no lineage backstop",
-         [{"module": "scripts/ddalib/review.py", "func": "existing_calls",
-           "impl": "tests/revert/impl/review_existing_calls_preN2.py"}],
-         ["n_rm_reviews_g3.py", "n_gitclean_g3.py"]),
-        ("pre-I6 no anchored append",
-         [{"module": "scripts/ddalib/chain.py", "func": "_append_locked",
-           "impl": "tests/revert/impl/chain_append_locked_historic_d135783.py"}],
-         ["n_prefix_rerun_chain.py"]),
-        ("pre-M7 no committed checkpoints",
-         [{"module": "scripts/ddalib/chain.py", "func": "_append_locked",
-           "impl": "tests/revert/impl/chain_append_locked_no_M7.py"},
-          {"module": "scripts/ddalib/ledger.py", "func": "_checkpoint_problems",
-           "impl": "tests/revert/impl/ledger_checkpoint_problems_none.py"}],
-         ["n_prefix_m7_chain.py"]),
+        (s["id"],
+         [{"module": u["module"], "func": u["func"], "impl": u["impl"]}
+          for u in s["units"]],
+         list(s["probes"]))
+        for s in REGISTRY if s["kind"] == "function"
     ]
 
     def test_function_reverts_flip_probes(self):
@@ -753,6 +738,17 @@ class TestProbeRevertSensitivity(unittest.TestCase):
         env["PYTHONPATH"] = str(REPO / "scripts") + os.pathsep + str(REPO) \
             + os.pathsep + env.get("PYTHONPATH", "")
         failures = []
+        # I14 fast path: STALE-PREMISE / NO-RECORD pairs fail here and are
+        # not run, never trusted.
+        premise = load_premise(REPO)
+        stale = set()
+        for _label, _units, _probes in self.FUNC_SCENARIOS:
+            for _name in _probes:
+                _msg = check_pair(REPO, scenario_by_id(_label), _name,
+                                  find_record(premise, _label, _name))
+                if _msg is not None:
+                    failures.append(_msg)
+                    stale.add((_label, _name))
         for label, units, probes in self.FUNC_SCENARIOS:
             restores = []
             try:
@@ -794,6 +790,8 @@ class TestProbeRevertSensitivity(unittest.TestCase):
                 if not coherent:
                     continue
                 for name in probes:
+                    if (label, name) in stale:
+                        continue
                     probe = REPO / "tests" / "probes" / name
                     try:
                         p = subprocess.run(

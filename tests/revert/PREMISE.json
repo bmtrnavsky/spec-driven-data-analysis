@@ -1,0 +1,683 @@
+{
+  "records": [
+    {
+      "cross_flips": [],
+      "cross_observed": {
+        "pre-I6 no anchored append": "STICKY-HELD",
+        "pre-I6/N6/M7 no fail-closed append": "STICKY-HELD",
+        "pre-M7 no committed checkpoints": "STICKY-HELD",
+        "pre-N1 early return": "STICKY-HELD",
+        "pre-N10 no git-op verdict": "STICKY-HELD",
+        "pre-N2 no lineage backstop": "STICKY-HELD",
+        "pre-N7 no index fallback": "STICKY-HELD"
+      },
+      "dependency_set": [
+        "lineage.lineage::no-pin"
+      ],
+      "fixed": {
+        "rc": 0,
+        "token": "STICKY-HELD"
+      },
+      "hashes": {
+        "fixed_units": {
+          "lineage.lineage::no-pin": "61c8b0d3b79497514ad5067914e55ca20f8917fc7af751b21caf12282bf5e9c5"
+        },
+        "probelib": "e1564672c1ebfb332cad4b4b40497dd54967fe473a4c85f793ad0b6f180efe8c",
+        "revert_units": {
+          "lineage.lineage::no-pin": "a116f4c3fc8a135e809bf2f8cf72a44bcb34813fa77be6cd5e9bda3cb08beec1"
+        }
+      },
+      "historic": {
+        "commit": "ea94356^",
+        "rc": 0,
+        "token": "STICKY-FLIPPED-VULNERABLE"
+      },
+      "matrix": true,
+      "probe": "n_prefix_sticky.py",
+      "probe_hash": "6f1ebb73aa0c89edd20ad00caeb49f01b034e947bd83b33daf8a5a933989d0b7",
+      "reverted": {
+        "rc": 0,
+        "token": "STICKY-FLIPPED-VULNERABLE"
+      },
+      "scenario": "pre-I12 no broken-chain pin",
+      "validated_at": "cd3920d0d352fc0cb48eaf062bd1f9a0b7b3673c"
+    },
+    {
+      "cross_flips": [],
+      "cross_observed": {
+        "pre-I12 no broken-chain pin": "PREFIX-REFUSED",
+        "pre-M7 no committed checkpoints": "PREFIX-REFUSED",
+        "pre-N1 early return": "PREFIX-REFUSED",
+        "pre-N10 no git-op verdict": "PREFIX-REFUSED",
+        "pre-N2 no lineage backstop": "PREFIX-REFUSED",
+        "pre-N7 no index fallback": "PREFIX-REFUSED"
+      },
+      "dependency_set": [
+        "chain._append_locked::historic"
+      ],
+      "fixed": {
+        "rc": 0,
+        "token": "PREFIX-REFUSED"
+      },
+      "hashes": {
+        "fixed_units": {
+          "chain._append_locked::historic": "4c7207b5676fa9a8d1f69a7708c4aa693164d303ffeeeb245fe17292d35d83b7"
+        },
+        "probelib": "e1564672c1ebfb332cad4b4b40497dd54967fe473a4c85f793ad0b6f180efe8c",
+        "revert_units": {
+          "chain._append_locked::historic": "d590a43b5b36ce899d269032e35e398fd24a9ada00252baf9ffd3f1765d397bc"
+        }
+      },
+      "historic": {
+        "commit": "2391db5^",
+        "rc": 0,
+        "token": "PREFIX-ACCEPTED-VULNERABLE"
+      },
+      "matrix": true,
+      "probe": "n_prefix_rerun_chain.py",
+      "probe_hash": "1dbd081422de0406ff1eaeb4c5a18eea9496c7d547c1ed42250857c1f2dfe220",
+      "reverted": {
+        "rc": 0,
+        "token": "PREFIX-ACCEPTED-VULNERABLE"
+      },
+      "scenario": "pre-I6 no anchored append",
+      "validated_at": "cd3920d0d352fc0cb48eaf062bd1f9a0b7b3673c"
+    },
+    {
+      "cross_flips": [],
+      "cross_observed": {
+        "pre-I12 no broken-chain pin": "CHAIN-FAIL-CLOSED",
+        "pre-M7 no committed checkpoints": "CHAIN-FAIL-CLOSED",
+        "pre-N1 early return": "CHAIN-FAIL-CLOSED",
+        "pre-N10 no git-op verdict": "CHAIN-FAIL-CLOSED",
+        "pre-N2 no lineage backstop": "CHAIN-FAIL-CLOSED",
+        "pre-N7 no index fallback": "CHAIN-FAIL-CLOSED"
+      },
+      "dependency_set": [
+        "chain._append_locked::historic"
+      ],
+      "fixed": {
+        "rc": 0,
+        "token": "CHAIN-FAIL-CLOSED"
+      },
+      "hashes": {
+        "fixed_units": {
+          "chain._append_locked::historic": "4c7207b5676fa9a8d1f69a7708c4aa693164d303ffeeeb245fe17292d35d83b7"
+        },
+        "probelib": "e1564672c1ebfb332cad4b4b40497dd54967fe473a4c85f793ad0b6f180efe8c",
+        "revert_units": {
+          "chain._append_locked::historic": "d590a43b5b36ce899d269032e35e398fd24a9ada00252baf9ffd3f1765d397bc"
+        }
+      },
+      "historic": {
+        "commit": "2391db5^",
+        "rc": 0,
+        "token": "CHAIN-RESTARTED-VULNERABLE"
+      },
+      "matrix": true,
+      "probe": "n_gitclean_chain.py",
+      "probe_hash": "fe23cd35efaad3691ffbab050ec5f068430328adc223aa6aa8a58c657e3323ff",
+      "reverted": {
+        "rc": 0,
+        "token": "CHAIN-RESTARTED-VULNERABLE"
+      },
+      "scenario": "pre-I6/N6/M7 no fail-closed append",
+      "validated_at": "cd3920d0d352fc0cb48eaf062bd1f9a0b7b3673c"
+    },
+    {
+      "cross_flips": [],
+      "cross_observed": {
+        "pre-I12 no broken-chain pin": "CHAIN-FAIL-CLOSED",
+        "pre-M7 no committed checkpoints": "CHAIN-FAIL-CLOSED",
+        "pre-N1 early return": "CHAIN-FAIL-CLOSED",
+        "pre-N10 no git-op verdict": "CHAIN-FAIL-CLOSED",
+        "pre-N2 no lineage backstop": "CHAIN-FAIL-CLOSED",
+        "pre-N7 no index fallback": "CHAIN-FAIL-CLOSED"
+      },
+      "dependency_set": [
+        "chain._append_locked::historic"
+      ],
+      "fixed": {
+        "rc": 0,
+        "token": "CHAIN-FAIL-CLOSED"
+      },
+      "hashes": {
+        "fixed_units": {
+          "chain._append_locked::historic": "4c7207b5676fa9a8d1f69a7708c4aa693164d303ffeeeb245fe17292d35d83b7"
+        },
+        "probelib": "e1564672c1ebfb332cad4b4b40497dd54967fe473a4c85f793ad0b6f180efe8c",
+        "revert_units": {
+          "chain._append_locked::historic": "d590a43b5b36ce899d269032e35e398fd24a9ada00252baf9ffd3f1765d397bc"
+        }
+      },
+      "historic": {
+        "commit": "2391db5^",
+        "rc": 0,
+        "token": "CHAIN-RESTARTED-VULNERABLE"
+      },
+      "matrix": true,
+      "probe": "n_gitstash_chain.py",
+      "probe_hash": "39cd9b110198f95d861419add21352be0b95bafabf0dbebbe9d87c350157735a",
+      "reverted": {
+        "rc": 0,
+        "token": "CHAIN-RESTARTED-VULNERABLE"
+      },
+      "scenario": "pre-I6/N6/M7 no fail-closed append",
+      "validated_at": "cd3920d0d352fc0cb48eaf062bd1f9a0b7b3673c"
+    },
+    {
+      "cross_flips": [
+        "pre-I6 no anchored append",
+        "pre-I6/N6/M7 no fail-closed append"
+      ],
+      "cross_observed": {
+        "pre-I12 no broken-chain pin": "PREFIX-REFUSED-BY-CHECKPOINT",
+        "pre-I6 no anchored append": "PREFIX-ACCEPTED-VULNERABLE",
+        "pre-I6/N6/M7 no fail-closed append": "PREFIX-ACCEPTED-VULNERABLE",
+        "pre-N1 early return": "PREFIX-REFUSED-BY-CHECKPOINT",
+        "pre-N10 no git-op verdict": "PREFIX-REFUSED-BY-CHECKPOINT",
+        "pre-N2 no lineage backstop": "PREFIX-REFUSED-BY-CHECKPOINT",
+        "pre-N7 no index fallback": "PREFIX-REFUSED-BY-CHECKPOINT"
+      },
+      "dependency_set": [
+        "chain._append_locked::no-M7"
+      ],
+      "fixed": {
+        "rc": 0,
+        "token": "PREFIX-REFUSED-BY-CHECKPOINT"
+      },
+      "hashes": {
+        "fixed_units": {
+          "chain._append_locked::no-M7": "4c7207b5676fa9a8d1f69a7708c4aa693164d303ffeeeb245fe17292d35d83b7",
+          "ledger._checkpoint_problems::none": "3d76353dcb892b25c3cffd086650ad6141d21b8dc1bbddcbc7774127a6a2390a"
+        },
+        "probelib": "e1564672c1ebfb332cad4b4b40497dd54967fe473a4c85f793ad0b6f180efe8c",
+        "revert_units": {
+          "chain._append_locked::no-M7": "0f6bcd8e0a57e609328204bd02eedb591e480833f3d656daf8ecb36e058f77b6",
+          "ledger._checkpoint_problems::none": "b7bd4b27090ee2b5014941eb1fa914f9ccfe77f6ff719558d4f878a5366fb765"
+        }
+      },
+      "historic": {
+        "commit": "c4ede99^",
+        "rc": 0,
+        "token": "PREFIX-REFUSED-BY-CHECKPOINT"
+      },
+      "matrix": true,
+      "probe": "n_prefix_m7_chain.py",
+      "probe_hash": "6482c1d6c51be3d7347b1f6c8202d7ed96ecf005567f732582c7b424e574e0ec",
+      "reverted": {
+        "rc": 0,
+        "token": "PREFIX-ACCEPTED-VULNERABLE"
+      },
+      "scenario": "pre-M7 no committed checkpoints",
+      "validated_at": "cd3920d0d352fc0cb48eaf062bd1f9a0b7b3673c"
+    },
+    {
+      "cross_flips": [
+        "pre-I12 no broken-chain pin"
+      ],
+      "cross_observed": {
+        "pre-I12 no broken-chain pin": "ROLLBACK-LAUNDERED-VULNERABLE",
+        "pre-I6 no anchored append": "ROLLBACK-DETECTED",
+        "pre-I6/N6/M7 no fail-closed append": "ROLLBACK-DETECTED",
+        "pre-N1 early return": "ROLLBACK-DETECTED",
+        "pre-N10 no git-op verdict": "ROLLBACK-DETECTED",
+        "pre-N2 no lineage backstop": "ROLLBACK-DETECTED",
+        "pre-N7 no index fallback": "ROLLBACK-DETECTED"
+      },
+      "dependency_set": [
+        "ledger._checkpoint_problems::none"
+      ],
+      "fixed": {
+        "rc": 0,
+        "token": "ROLLBACK-DETECTED"
+      },
+      "hashes": {
+        "fixed_units": {
+          "chain._append_locked::no-M7": "4c7207b5676fa9a8d1f69a7708c4aa693164d303ffeeeb245fe17292d35d83b7",
+          "ledger._checkpoint_problems::none": "3d76353dcb892b25c3cffd086650ad6141d21b8dc1bbddcbc7774127a6a2390a"
+        },
+        "probelib": "e1564672c1ebfb332cad4b4b40497dd54967fe473a4c85f793ad0b6f180efe8c",
+        "revert_units": {
+          "chain._append_locked::no-M7": "0f6bcd8e0a57e609328204bd02eedb591e480833f3d656daf8ecb36e058f77b6",
+          "ledger._checkpoint_problems::none": "b7bd4b27090ee2b5014941eb1fa914f9ccfe77f6ff719558d4f878a5366fb765"
+        }
+      },
+      "historic": {
+        "commit": "c4ede99^",
+        "rc": 0,
+        "token": "ROLLBACK-LAUNDERED-VULNERABLE"
+      },
+      "matrix": true,
+      "probe": "n_prefix_mirror_rollback.py",
+      "probe_hash": "67d342fc2539371067840d6581bacdb88f5687f4eb1b4ed57cff7cea506c5919",
+      "reverted": {
+        "rc": 0,
+        "token": "ROLLBACK-LAUNDERED-VULNERABLE"
+      },
+      "scenario": "pre-M7 no committed checkpoints",
+      "validated_at": "cd3920d0d352fc0cb48eaf062bd1f9a0b7b3673c"
+    },
+    {
+      "cross_flips": [],
+      "cross_observed": {
+        "pre-I12 no broken-chain pin": "EVALS-STILL-BLOCKED",
+        "pre-I6 no anchored append": "EVALS-STILL-BLOCKED",
+        "pre-I6/N6/M7 no fail-closed append": "EVALS-STILL-BLOCKED",
+        "pre-M7 no committed checkpoints": "EVALS-STILL-BLOCKED",
+        "pre-N10 no git-op verdict": "EVALS-STILL-BLOCKED",
+        "pre-N2 no lineage backstop": "EVALS-STILL-BLOCKED",
+        "pre-N7 no index fallback": "EVALS-STILL-BLOCKED"
+      },
+      "dependency_set": [
+        "stage8.no-N1-early-return"
+      ],
+      "fixed": {
+        "rc": 0,
+        "token": "EVALS-STILL-BLOCKED"
+      },
+      "hashes": {
+        "fixed_units": {
+          "stage8.no-N1-early-return": "0a63d1273312109e4e24ed7fc2ad195bf66648bad8c04a3a2fd89c472043172f"
+        },
+        "probelib": "e1564672c1ebfb332cad4b4b40497dd54967fe473a4c85f793ad0b6f180efe8c",
+        "revert_units": {
+          "stage8.no-N1-early-return": "07ff30c71c3ec96e7a644d5f61c65a7aa25f9614561aec713fb48155eda26f04"
+        }
+      },
+      "historic": {
+        "commit": "d135783^",
+        "rc": 0,
+        "token": "EVALS-UNBOUND-VULNERABLE"
+      },
+      "matrix": true,
+      "probe": "n_rm_corrections_evals.py",
+      "probe_hash": "4071ac2ae45d4bf3de652c6a42cc6a3171f17c8b555f19a0e4f99da9e5c4ac91",
+      "reverted": {
+        "rc": 0,
+        "token": "EVALS-UNBOUND-VULNERABLE"
+      },
+      "scenario": "pre-N1 early return",
+      "validated_at": "cd3920d0d352fc0cb48eaf062bd1f9a0b7b3673c"
+    },
+    {
+      "cross_flips": [],
+      "cross_observed": {
+        "pre-I12 no broken-chain pin": "HOOK-BLOCKS-GITOPS",
+        "pre-I6 no anchored append": "HOOK-BLOCKS-GITOPS",
+        "pre-I6/N6/M7 no fail-closed append": "HOOK-BLOCKS-GITOPS",
+        "pre-M7 no committed checkpoints": "HOOK-BLOCKS-GITOPS",
+        "pre-N1 early return": "HOOK-BLOCKS-GITOPS",
+        "pre-N2 no lineage backstop": "HOOK-BLOCKS-GITOPS",
+        "pre-N7 no index fallback": "HOOK-BLOCKS-GITOPS"
+      },
+      "dependency_set": [
+        "hooks.no-N10-gitop-verdict"
+      ],
+      "fixed": {
+        "rc": 0,
+        "token": "HOOK-BLOCKS-GITOPS"
+      },
+      "hashes": {
+        "fixed_units": {
+          "hooks.no-N10-gitop-verdict": "544341e857be4ea0f06ef733d0cdfa98a7c956d4a0c3cb0417438ff3c83607c2"
+        },
+        "probelib": "e1564672c1ebfb332cad4b4b40497dd54967fe473a4c85f793ad0b6f180efe8c",
+        "revert_units": {
+          "hooks.no-N10-gitop-verdict": "1f15fd0ccbcded94b788636637772906c0a3db917361759a2db4a0f63314f28c"
+        }
+      },
+      "historic": {
+        "commit": "b8d8a3c^",
+        "rc": 0,
+        "token": "HOOK-GITOPS-VULNERABLE"
+      },
+      "matrix": true,
+      "probe": "n_hook_gitops.py",
+      "probe_hash": "b92ab95ce0dc0a5323c818054ee0bde25585e882efe48e2ae61f68744c9b62e9",
+      "reverted": {
+        "rc": 0,
+        "token": "HOOK-GITOPS-VULNERABLE"
+      },
+      "scenario": "pre-N10 no git-op verdict",
+      "validated_at": "cd3920d0d352fc0cb48eaf062bd1f9a0b7b3673c"
+    },
+    {
+      "cross_flips": [],
+      "cross_observed": {
+        "pre-I12 no broken-chain pin": "G3-STILL-FAILING",
+        "pre-I6 no anchored append": "G3-STILL-FAILING",
+        "pre-I6/N6/M7 no fail-closed append": "G3-STILL-FAILING",
+        "pre-M7 no committed checkpoints": "G3-STILL-FAILING",
+        "pre-N1 early return": "G3-STILL-FAILING",
+        "pre-N10 no git-op verdict": "G3-STILL-FAILING",
+        "pre-N7 no index fallback": "G3-STILL-FAILING"
+      },
+      "dependency_set": [
+        "review.existing_calls::preN2"
+      ],
+      "fixed": {
+        "rc": 0,
+        "token": "G3-STILL-FAILING"
+      },
+      "hashes": {
+        "fixed_units": {
+          "review.existing_calls::preN2": "7bee114d649a18221e6d889e2bd95b662c07474477605df0f8bbf2c83a7e3bff"
+        },
+        "probelib": "e1564672c1ebfb332cad4b4b40497dd54967fe473a4c85f793ad0b6f180efe8c",
+        "revert_units": {
+          "review.existing_calls::preN2": "ad937a25943010f2364b664501bb1815876ae654fabd4648a643f6e48c74a2ba"
+        }
+      },
+      "historic": {
+        "commit": "d135783^",
+        "rc": 0,
+        "token": "G3-LAUNDERED-VULNERABLE"
+      },
+      "matrix": true,
+      "probe": "n_gitclean_g3.py",
+      "probe_hash": "a5d2ba7f41061513be4663a75d192ff483719d3ea9328422509663f1246f94af",
+      "reverted": {
+        "rc": 0,
+        "token": "G3-LAUNDERED-VULNERABLE"
+      },
+      "scenario": "pre-N2 no lineage backstop",
+      "validated_at": "cd3920d0d352fc0cb48eaf062bd1f9a0b7b3673c"
+    },
+    {
+      "cross_flips": [],
+      "cross_observed": {
+        "pre-I12 no broken-chain pin": "G3-STILL-FAILING",
+        "pre-I6 no anchored append": "G3-STILL-FAILING",
+        "pre-I6/N6/M7 no fail-closed append": "G3-STILL-FAILING",
+        "pre-M7 no committed checkpoints": "G3-STILL-FAILING",
+        "pre-N1 early return": "G3-STILL-FAILING",
+        "pre-N10 no git-op verdict": "G3-STILL-FAILING",
+        "pre-N7 no index fallback": "G3-STILL-FAILING"
+      },
+      "dependency_set": [
+        "review.existing_calls::preN2"
+      ],
+      "fixed": {
+        "rc": 0,
+        "token": "G3-STILL-FAILING"
+      },
+      "hashes": {
+        "fixed_units": {
+          "review.existing_calls::preN2": "7bee114d649a18221e6d889e2bd95b662c07474477605df0f8bbf2c83a7e3bff"
+        },
+        "probelib": "e1564672c1ebfb332cad4b4b40497dd54967fe473a4c85f793ad0b6f180efe8c",
+        "revert_units": {
+          "review.existing_calls::preN2": "ad937a25943010f2364b664501bb1815876ae654fabd4648a643f6e48c74a2ba"
+        }
+      },
+      "historic": {
+        "commit": "d135783^",
+        "rc": 0,
+        "token": "G3-LAUNDERED-VULNERABLE"
+      },
+      "matrix": true,
+      "probe": "n_rm_reviews_g3.py",
+      "probe_hash": "8461d423cc7c443d0784be8e6a537625bace2e7bee76d4219c03e503585c909f",
+      "reverted": {
+        "rc": 0,
+        "token": "G3-LAUNDERED-VULNERABLE"
+      },
+      "scenario": "pre-N2 no lineage backstop",
+      "validated_at": "cd3920d0d352fc0cb48eaf062bd1f9a0b7b3673c"
+    },
+    {
+      "cross_flips": [],
+      "cross_observed": {
+        "pre-I12 no broken-chain pin": "EVALS-STILL-BLOCKED",
+        "pre-I6 no anchored append": "EVALS-STILL-BLOCKED",
+        "pre-I6/N6/M7 no fail-closed append": "EVALS-STILL-BLOCKED",
+        "pre-M7 no committed checkpoints": "EVALS-STILL-BLOCKED",
+        "pre-N1 early return": "EVALS-STILL-BLOCKED",
+        "pre-N10 no git-op verdict": "EVALS-STILL-BLOCKED",
+        "pre-N2 no lineage backstop": "EVALS-STILL-BLOCKED"
+      },
+      "dependency_set": [
+        "stage8.no-N7-index-fallback"
+      ],
+      "fixed": {
+        "rc": 0,
+        "token": "EVALS-STILL-BLOCKED"
+      },
+      "hashes": {
+        "fixed_units": {
+          "stage8.no-N7-index-fallback": "3001c005379bfee8c45c5775e0b8df4493478dbcda447cf66573aa3a6f67b7e2"
+        },
+        "probelib": "e1564672c1ebfb332cad4b4b40497dd54967fe473a4c85f793ad0b6f180efe8c",
+        "revert_units": {
+          "stage8.no-N7-index-fallback": "af4d1bf7090f124817103dd1375bf09fd281c01869467154aaa86578b08d1978"
+        }
+      },
+      "historic": {
+        "commit": "2391db5^",
+        "rc": 0,
+        "token": "EVALS-UNBOUND-VULNERABLE"
+      },
+      "matrix": true,
+      "probe": "n_filterbranch_evals.py",
+      "probe_hash": "0c33436b28abcd3b78c6be74c40c629ae35addaff3bb7252f869fd0bfe973c20",
+      "reverted": {
+        "rc": 0,
+        "token": "EVALS-UNBOUND-VULNERABLE"
+      },
+      "scenario": "pre-N7 no index fallback",
+      "validated_at": "cd3920d0d352fc0cb48eaf062bd1f9a0b7b3673c"
+    },
+    {
+      "cross_flips": [],
+      "cross_observed": {
+        "pre-I12 no broken-chain pin": "EVALS-STILL-BLOCKED",
+        "pre-I6 no anchored append": "EVALS-STILL-BLOCKED",
+        "pre-I6/N6/M7 no fail-closed append": "EVALS-STILL-BLOCKED",
+        "pre-M7 no committed checkpoints": "EVALS-STILL-BLOCKED",
+        "pre-N1 early return": "EVALS-STILL-BLOCKED",
+        "pre-N10 no git-op verdict": "EVALS-STILL-BLOCKED",
+        "pre-N2 no lineage backstop": "EVALS-STILL-BLOCKED"
+      },
+      "dependency_set": [
+        "stage8.no-N7-index-fallback"
+      ],
+      "fixed": {
+        "rc": 0,
+        "token": "EVALS-STILL-BLOCKED"
+      },
+      "hashes": {
+        "fixed_units": {
+          "stage8.no-N7-index-fallback": "3001c005379bfee8c45c5775e0b8df4493478dbcda447cf66573aa3a6f67b7e2"
+        },
+        "probelib": "e1564672c1ebfb332cad4b4b40497dd54967fe473a4c85f793ad0b6f180efe8c",
+        "revert_units": {
+          "stage8.no-N7-index-fallback": "af4d1bf7090f124817103dd1375bf09fd281c01869467154aaa86578b08d1978"
+        }
+      },
+      "historic": {
+        "commit": "2391db5^",
+        "rc": 0,
+        "token": "EVALS-UNBOUND-VULNERABLE"
+      },
+      "matrix": true,
+      "probe": "n_gitamend_evals.py",
+      "probe_hash": "08d1ae32b41d78178f324cba357ff7313bf03f3a0a4276a9c56c5362a7a50102",
+      "reverted": {
+        "rc": 0,
+        "token": "EVALS-UNBOUND-VULNERABLE"
+      },
+      "scenario": "pre-N7 no index fallback",
+      "validated_at": "cd3920d0d352fc0cb48eaf062bd1f9a0b7b3673c"
+    },
+    {
+      "cross_flips": [],
+      "cross_observed": {
+        "pre-I12 no broken-chain pin": "EVALS-STILL-BLOCKED",
+        "pre-I6 no anchored append": "EVALS-STILL-BLOCKED",
+        "pre-I6/N6/M7 no fail-closed append": "EVALS-STILL-BLOCKED",
+        "pre-M7 no committed checkpoints": "EVALS-STILL-BLOCKED",
+        "pre-N1 early return": "EVALS-STILL-BLOCKED",
+        "pre-N10 no git-op verdict": "EVALS-STILL-BLOCKED",
+        "pre-N2 no lineage backstop": "EVALS-STILL-BLOCKED"
+      },
+      "dependency_set": [
+        "stage8.no-N7-index-fallback"
+      ],
+      "fixed": {
+        "rc": 0,
+        "token": "EVALS-STILL-BLOCKED"
+      },
+      "hashes": {
+        "fixed_units": {
+          "stage8.no-N7-index-fallback": "3001c005379bfee8c45c5775e0b8df4493478dbcda447cf66573aa3a6f67b7e2"
+        },
+        "probelib": "e1564672c1ebfb332cad4b4b40497dd54967fe473a4c85f793ad0b6f180efe8c",
+        "revert_units": {
+          "stage8.no-N7-index-fallback": "af4d1bf7090f124817103dd1375bf09fd281c01869467154aaa86578b08d1978"
+        }
+      },
+      "historic": {
+        "commit": "2391db5^",
+        "rc": 0,
+        "token": "EVALS-UNBOUND-VULNERABLE"
+      },
+      "matrix": true,
+      "probe": "n_gitrebase_evals.py",
+      "probe_hash": "709504ece2fb917d93cf58b3123935ffb67b33a0a017792801f40648bab76a3f",
+      "reverted": {
+        "rc": 0,
+        "token": "EVALS-UNBOUND-VULNERABLE"
+      },
+      "scenario": "pre-N7 no index fallback",
+      "validated_at": "cd3920d0d352fc0cb48eaf062bd1f9a0b7b3673c"
+    },
+    {
+      "cross_flips": [],
+      "cross_observed": {
+        "pre-I12 no broken-chain pin": "EVALS-N7-STILL-BLOCKED",
+        "pre-I6 no anchored append": "EVALS-N7-STILL-BLOCKED",
+        "pre-I6/N6/M7 no fail-closed append": "EVALS-N7-STILL-BLOCKED",
+        "pre-M7 no committed checkpoints": "EVALS-N7-STILL-BLOCKED",
+        "pre-N1 early return": "EVALS-N7-STILL-BLOCKED",
+        "pre-N10 no git-op verdict": "EVALS-N7-STILL-BLOCKED",
+        "pre-N2 no lineage backstop": "EVALS-N7-STILL-BLOCKED"
+      },
+      "dependency_set": [
+        "stage8.no-N7-index-fallback"
+      ],
+      "fixed": {
+        "rc": 0,
+        "token": "EVALS-N7-STILL-BLOCKED"
+      },
+      "hashes": {
+        "fixed_units": {
+          "stage8.no-N7-index-fallback": "3001c005379bfee8c45c5775e0b8df4493478dbcda447cf66573aa3a6f67b7e2"
+        },
+        "probelib": "e1564672c1ebfb332cad4b4b40497dd54967fe473a4c85f793ad0b6f180efe8c",
+        "revert_units": {
+          "stage8.no-N7-index-fallback": "af4d1bf7090f124817103dd1375bf09fd281c01869467154aaa86578b08d1978"
+        }
+      },
+      "historic": {
+        "commit": "2391db5^",
+        "rc": 0,
+        "token": "EVALS-UNBOUND-VULNERABLE"
+      },
+      "matrix": true,
+      "probe": "n_gitreset_evals.py",
+      "probe_hash": "5e357a573050de8cfdeae576f90577ec2d6bc8423c8776d3544d9fa41aa0a1de",
+      "reverted": {
+        "rc": 0,
+        "token": "EVALS-UNBOUND-VULNERABLE"
+      },
+      "scenario": "pre-N7 no index fallback",
+      "validated_at": "cd3920d0d352fc0cb48eaf062bd1f9a0b7b3673c"
+    },
+    {
+      "cross_flips": [],
+      "cross_observed": {
+        "pre-I12 no broken-chain pin": "EVALS-STILL-BLOCKED",
+        "pre-I6 no anchored append": "EVALS-STILL-BLOCKED",
+        "pre-I6/N6/M7 no fail-closed append": "EVALS-STILL-BLOCKED",
+        "pre-M7 no committed checkpoints": "EVALS-STILL-BLOCKED",
+        "pre-N1 early return": "EVALS-STILL-BLOCKED",
+        "pre-N10 no git-op verdict": "EVALS-STILL-BLOCKED",
+        "pre-N2 no lineage backstop": "EVALS-STILL-BLOCKED"
+      },
+      "dependency_set": [
+        "stage8.no-N7-index-fallback"
+      ],
+      "fixed": {
+        "rc": 0,
+        "token": "EVALS-STILL-BLOCKED"
+      },
+      "hashes": {
+        "fixed_units": {
+          "stage8.no-N7-index-fallback": "3001c005379bfee8c45c5775e0b8df4493478dbcda447cf66573aa3a6f67b7e2"
+        },
+        "probelib": "e1564672c1ebfb332cad4b4b40497dd54967fe473a4c85f793ad0b6f180efe8c",
+        "revert_units": {
+          "stage8.no-N7-index-fallback": "af4d1bf7090f124817103dd1375bf09fd281c01869467154aaa86578b08d1978"
+        }
+      },
+      "historic": {
+        "commit": "2391db5^",
+        "rc": 0,
+        "token": "EVALS-UNBOUND-VULNERABLE"
+      },
+      "matrix": true,
+      "probe": "n_gitupdate_evals.py",
+      "probe_hash": "444707d10177444f1be524c07c2f1ce711bc91bbd57e1890b65aee2b2db19f44",
+      "reverted": {
+        "rc": 0,
+        "token": "EVALS-UNBOUND-VULNERABLE"
+      },
+      "scenario": "pre-N7 no index fallback",
+      "validated_at": "cd3920d0d352fc0cb48eaf062bd1f9a0b7b3673c"
+    },
+    {
+      "cross_flips": [],
+      "cross_observed": {
+        "pre-I12 no broken-chain pin": "EVALS-STILL-BLOCKED",
+        "pre-I6 no anchored append": "EVALS-STILL-BLOCKED",
+        "pre-I6/N6/M7 no fail-closed append": "EVALS-STILL-BLOCKED",
+        "pre-M7 no committed checkpoints": "EVALS-STILL-BLOCKED",
+        "pre-N1 early return": "EVALS-STILL-BLOCKED",
+        "pre-N10 no git-op verdict": "EVALS-STILL-BLOCKED",
+        "pre-N2 no lineage backstop": "EVALS-STILL-BLOCKED"
+      },
+      "dependency_set": [
+        "stage8.no-N7-index-fallback"
+      ],
+      "fixed": {
+        "rc": 0,
+        "token": "EVALS-STILL-BLOCKED"
+      },
+      "hashes": {
+        "fixed_units": {
+          "stage8.no-N7-index-fallback": "3001c005379bfee8c45c5775e0b8df4493478dbcda447cf66573aa3a6f67b7e2"
+        },
+        "probelib": "e1564672c1ebfb332cad4b4b40497dd54967fe473a4c85f793ad0b6f180efe8c",
+        "revert_units": {
+          "stage8.no-N7-index-fallback": "af4d1bf7090f124817103dd1375bf09fd281c01869467154aaa86578b08d1978"
+        }
+      },
+      "historic": {
+        "commit": "2391db5^",
+        "rc": 0,
+        "token": "EVALS-UNBOUND-VULNERABLE"
+      },
+      "matrix": true,
+      "probe": "n_prefix_evals.py",
+      "probe_hash": "de4d90734de0a06de1340b7507f2f768c32e42cbbcae0b6699795c7679cfd994",
+      "reverted": {
+        "rc": 0,
+        "token": "EVALS-UNBOUND-VULNERABLE"
+      },
+      "scenario": "pre-N7 no index fallback",
+      "validated_at": "cd3920d0d352fc0cb48eaf062bd1f9a0b7b3673c"
+    }
+  ],
+  "version": 1
+}

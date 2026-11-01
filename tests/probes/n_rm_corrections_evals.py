@@ -8,6 +8,11 @@ try:
     shutil.rmtree(f.wd.root / "evals" / "corrections")
     rc, out = f.cli("evals", "run", str(f.wd.root))
     print("evals run after rmtree rc:", rc)
-    finding("EVALS-STILL-BLOCKED" if rc != 0 else "EVALS-UNBOUND-VULNERABLE")
+    if rc == 1 and "bound correction eval(s) failed" in out:
+        finding("EVALS-STILL-BLOCKED")
+    elif rc == 0:
+        finding("EVALS-UNBOUND-VULNERABLE")
+    else:
+        raise SystemExit(f"unexpected evals rc={rc}")
 finally:
     cleanup(f)
