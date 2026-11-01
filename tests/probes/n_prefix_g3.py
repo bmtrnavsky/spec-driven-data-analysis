@@ -1,13 +1,12 @@
-"""N8: restore a pre-review .analysis prefix, then re-run a failed round.
+"""End-to-end regression probe (bound to no single guard): restore a
+pre-review .analysis prefix, then re-run a round with a PASSING stub.
 
 Locks and packets, snapshots the .analysis prefix (T0, no review calls
 yet), then records two failed goldfish rounds and the spec approval so
 G3 fails (control). The attack wipes .analysis and restores the T0
 prefix with the heads mirror untouched — dropping both failures.
-Re-running the round must be REFUSED (the anchored append fails closed
-on the shorter prefix) and G3 must still fail (verify-chain reports
-the truncation). Prints G3-STILL-FAILING when contained, else the
-VULN token.
+Re-running the round must be REFUSED and G3 must still fail. Prints
+G3-STILL-FAILING when contained, else the VULN token.
 """
 import shutil
 import tempfile
@@ -35,7 +34,7 @@ try:
     # Attack: true prefix restore — T0 files back, everything newer gone.
     shutil.rmtree(f.wd.analysis)
     shutil.copytree(t0, f.wd.analysis)
-    rc, out = f.cli("review", "run", "teardown", stub="fail")
+    rc, out = f.cli("review", "run", "teardown", stub="pass")
     refused = rc != 0
     print("re-run after restore rc:", rc, "::", out.strip().splitlines()[-1][:160] if out.strip() else "")
     v = g3_verdict(f)

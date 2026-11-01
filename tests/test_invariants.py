@@ -48,6 +48,9 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "scripts"))
+sys.path.insert(0, str(REPO / "tests"))
+
+from revert.apply import IncoherentRevert, apply_unit  # noqa: E402
 
 from tests.test_phase8 import P8Setup  # noqa: E402
 from tests.test_phase9 import P9Setup  # noqa: E402
@@ -659,10 +662,13 @@ class TestProbeRevertSensitivity(unittest.TestCase):
              ('        ckpt = _committed_checkpoint_seq(path)\n        if ckpt > 0:',
               '        ckpt = _committed_checkpoint_seq(path)\n'
               '        if False:  # REVERT-TEST pre-M7 no checkpoint fail-closed'),
-             ('        if heads is None:\n            raise DdaError(\n'
+             ('        if not isinstance(heads, dict):\n            raise DdaError(\n'
               '                f"{path}: {n} line(s) but no heads mirror records this chain "',
               '        if False:  # REVERT-TEST pre-I6 no mirror-required append\n            raise DdaError(\n'
               '                f"{path}: {n} line(s) but no heads mirror records this chain "'),
+             ('        ckpt = _committed_checkpoint_seq(path)\n        if ckpt > n:',
+              '        ckpt = _committed_checkpoint_seq(path)\n'
+              '        if False:  # REVERT-TEST pre-M7 no live-prefix checkpoint fail-closed'),
              ('        if n != mirror_seq:',
               '        if False:  # REVERT-TEST pre-I6 no anchored append'),
              ('        if line_hash(last) != mirror_hash:',
@@ -678,8 +684,7 @@ class TestProbeRevertSensitivity(unittest.TestCase):
               '        if False:  # REVERT-TEST pre-N6 verify ignores deletion\n'
               '            problems.append(f"{path.name}: file missing but heads mirror records seq {heads[\'seq\']}")')]},
          ["n_gitstash_chain.py", "n_gitclean_chain.py",
-          "n_gitclean_g3.py", "n_rm_reviews_g3.py",
-          "n_prefix_g3.py", "n_prefix_sticky.py"]),
+          "n_prefix_sticky.py"]),
         ("pre-N10 no git-op verdict",
          {"scripts/ddalib/hooks.py": [
              ('    gv = _git_op_verdict(code) if code else None',
@@ -741,6 +746,79 @@ class TestProbeRevertSensitivity(unittest.TestCase):
                 for rel, text in saved.items():
                     (REPO / rel).write_text(text, encoding="utf-8")
         self.assertEqual(failures, [], f"{len(failures)} revert check(s) failed: {failures}")
+
+    # Whole-function reference reverts (SPEC-504ed55 §3): (scenario label,
+    # [unit dicts], [probe names]). Unit: {"module", "func", "impl"} with
+    # paths relative to the repo root; the impl file holds exactly the
+    # replacement function, located BY FUNCTION NAME via the AST.
+    FUNC_SCENARIOS = [
+        ("pre-N2 no lineage backstop",
+         [{"module": "scripts/ddalib/review.py", "func": "existing_calls",
+           "impl": "tests/revert/impl/review_existing_calls_preN2.py"}],
+         ["n_rm_reviews_g3.py", "n_gitclean_g3.py"]),
+        ("pre-I6 no anchored append",
+         [{"module": "scripts/ddalib/chain.py", "func": "_append_locked",
+           "impl": "tests/revert/impl/chain_append_locked_historic_d135783.py"}],
+         ["n_prefix_rerun_chain.py"]),
+        ("pre-M7 no committed checkpoints",
+         [{"module": "scripts/ddalib/chain.py", "func": "_append_locked",
+           "impl": "tests/revert/impl/chain_append_locked_no_M7.py"},
+          {"module": "scripts/ddalib/ledger.py", "func": "_checkpoint_problems",
+           "impl": "tests/revert/impl/ledger_checkpoint_problems_none.py"}],
+         ["n_prefix_m7_chain.py"]),
+    ]
+
+    def test_function_reverts_flip_probes(self):
+        import json as _json
+        manifest = _json.loads(
+            (REPO / "tests" / "probes" / "MANIFEST.json").read_text(encoding="utf-8"))
+        env = dict(os.environ)
+        env["DDA_TEST_MODE"] = "1"
+        env["PYTHONPATH"] = str(REPO / "scripts") + os.pathsep + str(REPO) \
+            + os.pathsep + env.get("PYTHONPATH", "")
+        failures = []
+        for label, units, probes in self.FUNC_SCENARIOS:
+            restores = []
+            try:
+                try:
+                    for u in units:
+                        restores.append(apply_unit(
+                            REPO, u["module"], u["func"], u["impl"]))
+                except IncoherentRevert as e:
+                    failures.append(f"[{label}] INCOHERENT-REVERT: {e}")
+                    continue
+                for name in probes:
+                    probe = REPO / "tests" / "probes" / name
+                    try:
+                        p = subprocess.run(
+                            [sys.executable, str(probe)], capture_output=True,
+                            text=True, env=env, cwd=str(probe.parent), timeout=600)
+                        findings = [ln for ln in p.stdout.splitlines()
+                                    if ln.startswith("FINDING:")]
+                    except subprocess.TimeoutExpired:
+                        p, findings = None, ["TIMEOUT"]
+                    if p is None:
+                        failures.append(f"[{label}] {name}: TIMEOUT under revert")
+                        continue
+                    tail = (p.stdout + p.stderr).strip().splitlines()[-2:]
+                    print(f"[revert:{label}] {name} rc={p.returncode} findings={findings} :: "
+                          + " | ".join(t[:160] for t in tail))
+                    want = [f"FINDING: {manifest[name]['vuln']}"]
+                    if findings != want:
+                        if findings == []:
+                            failures.append(
+                                f"[{label}] {name}: want exactly {want} "
+                                f"with its fix reverted — probe printed NO FINDING "
+                                f"(it crashed/errored before asserting, rc={p.returncode}; "
+                                f"see tail above) — distinct from printing the wrong token")
+                        else:
+                            failures.append(
+                                f"[{label}] {name}: want exactly {want} "
+                                f"with its fix reverted — probe printed the wrong token; got {findings}")
+            finally:
+                for restore in reversed(restores):
+                    restore()
+        self.assertEqual(failures, [], f"{len(failures)} function-revert check(s) failed: {failures}")
 
 
 if __name__ == "__main__":
