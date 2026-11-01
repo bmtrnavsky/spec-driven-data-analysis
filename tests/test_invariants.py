@@ -32,6 +32,9 @@ re-run as a regression test. Each probe declares EXPECTED and prints
 expected finding — a bypass that silently succeeds prints a different
 finding and fails the suite (exit-code-only assertions were blind to
 N1/N2-class bypasses, which exit 0 while laundering evidence).
+tests/probes/MANIFEST.json maps each probe to {expected, vuln}: the
+revert-sensitivity test requires the reverted probe to print its
+specific vuln token.
 
 Run: DDA_TEST_MODE=1 python -m unittest tests.test_invariants
 """
@@ -549,13 +552,15 @@ class TestDdaprobeRegression(unittest.TestCase):
     """Re-run every tests/probes/ probe: exit 0 AND the manifest finding.
 
     tests/probes/MANIFEST.json is the single authority mapping each probe
-    filename to its one expected FINDING token — probes no longer declare
+    filename to {expected, vuln} FINDING tokens — probes no longer declare
     their own expectations. The match is anchored to EXACTLY ONE
-    `FINDING: <token>` line equal to the manifest token: a substring
+    `FINDING: <token>` line equal to the manifest expected token: a substring
     match would let EXPECTED='' match anything and EVALS-OK match
     EVALS-OK-BUT-UNBOUND. A probe that runs but prints a different
     FINDING (attack succeeded) fails the suite — exit codes alone cannot
-    catch bypasses.
+    catch bypasses. (The `vuln` token is asserted by
+    TestProbeRevertSensitivity: a reverted probe must print its specific
+    VULN token.)
     """
 
     @staticmethod
@@ -565,7 +570,9 @@ class TestDdaprobeRegression(unittest.TestCase):
         data = _json.loads(mp.read_text(encoding="utf-8"))
         assert isinstance(data, dict) and data, "probe manifest missing/empty"
         for k, v in data.items():
-            assert isinstance(v, str) and v, f"manifest {k}: expected one token string"
+            assert isinstance(v, dict) and isinstance(v.get("expected"), str) \
+                and v["expected"] and isinstance(v.get("vuln"), str) and v["vuln"], \
+                f"manifest {k}: need {{expected, vuln}} token strings"
         return data
 
     def _probes(self):
@@ -600,7 +607,8 @@ class TestDdaprobeRegression(unittest.TestCase):
         manifest = self._manifest()
         failures = []
         for probe in self._probes():
-            expected = manifest[probe.name]
+            entry = manifest[probe.name]
+            expected = entry["expected"]
             p, findings = self._run_probe(probe, env)
             if p is None:
                 failures.append(f"{probe.name}: TIMEOUT")
@@ -713,10 +721,14 @@ class TestProbeRevertSensitivity(unittest.TestCase):
                     tail = (p.stdout + p.stderr).strip().splitlines()[-2:]
                     print(f"[revert:{label}] {name} rc={p.returncode} findings={findings} :: "
                           + " | ".join(t[:160] for t in tail))
-                    if findings == [f"FINDING: {manifest[name]}"]:
+                    # The reverted probe must print its specific VULN token:
+                    # merely not printing the expected finding would also
+                    # pass a probe that errors out or prints nothing.
+                    want = [f"FINDING: {manifest[name]['vuln']}"]
+                    if findings != want:
                         failures.append(
-                            f"[{label}] {name}: still prints the expected finding "
-                            f"with its fix reverted — probe cannot fail")
+                            f"[{label}] {name}: want exactly {want} "
+                            f"with its fix reverted — probe cannot fail; got {findings}")
             finally:
                 for rel, text in saved.items():
                     (REPO / rel).write_text(text, encoding="utf-8")
