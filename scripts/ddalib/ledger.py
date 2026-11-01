@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import time
@@ -80,22 +81,13 @@ def verify_all(wd: Workdir, merge: bool = True, include_global: bool = True) -> 
         problems += _chain.verify(p)
         if not merge and _chain.pending_spills(p):
             problems.append(f"{p.name}: {len(_chain.pending_spills(p))} unmerged spill file(s) (hook fault)")
-    # Committed checkpoints (M7): a restored older prefix with a rolled-back
-    # or redirected mirror still verifies against its (stale) mirror, so
-    # consult git history — but only when some workdir chain lacks a usable
-    # mirror, which keeps the hot path (every CLI call) free of git walks.
+    # Committed checkpoints (M7, invariant I7″): a restored older prefix —
+    # even together with its rolled-back heads mirror — still verifies
+    # against that stale mirror, so git history is always consulted. The
+    # scan itself is cached on the commit/reflog state; only the live-file
+    # comparison runs on the hot path.
     if in_git_repo(wd.root):
-        missing_mirror = False
-        for p in workdir_chains(wd):
-            if not p.is_file():
-                continue
-            heads = _chain._read_heads(p)
-            if not isinstance(heads, dict) or not isinstance(heads.get("seq"), int) \
-                    or heads["seq"] < 1 or not isinstance(heads.get("hash"), str):
-                missing_mirror = True
-                break
-        if missing_mirror:
-            problems += _checkpoint_problems(wd)
+        problems += _checkpoint_problems(wd)
     return problems, merged
 
 
@@ -376,7 +368,76 @@ def chain_head_trailers(wd: Workdir) -> list[str]:
     return out
 
 
+def _checkpoint_state_key(root: Path) -> str | None:
+    """Fast git-state fingerprint for the checkpoint cache: every commit sha
+    across all refs plus the reflog. Any commit/amend/reset/rebase that could
+    add or drop a Dda-Chain-Head trailer changes this key, so a cached scan
+    stays correct; the live-file comparison itself is always fresh."""
+    if shutil.which("git") is None:
+        return None
+    parts: list[str] = []
+    for args in (["log", "--all", "--format=%H"],
+                 ["log", "-g", "--format=%H"]):
+        try:
+            r = subprocess.run(["git", "-C", str(root), *args], capture_output=True,
+                               text=True, timeout=60)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if r.returncode != 0:
+            parts.append("")
+        else:
+            parts.append(r.stdout)
+    key = hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
+    try:
+        top = _git(root, "rev-parse", "--show-toplevel", check=False).stdout.strip()
+    except DdaError:
+        top = str(root)
+    return f"{top}\x00{key}"
+
+
+def _checkpoint_cache_path(state_key: str) -> Path:
+    name = hashlib.sha256(state_key.encode("utf-8")).hexdigest()[:32] + ".json"
+    return dda_home() / "checkpoint-cache" / name
+
+
 def chain_checkpoints(root: Path) -> list[tuple[str, dict]]:
+    """Cached wrapper around :func:`_scan_chain_checkpoints` (invariant I7″).
+
+    The scan walks git history (one subprocess per commit), so results are
+    cached on disk keyed by the full commit/reflog state. Any history change
+    invalidates the key and triggers a rescan; the live-file comparison in
+    `_checkpoint_problems` is always computed fresh.
+    """
+    key = _checkpoint_state_key(root)
+    if key is None:
+        return _scan_chain_checkpoints(root)
+    try:
+        cp = _checkpoint_cache_path(key)
+        raw = json.loads(cp.read_text(encoding="utf-8"))
+        if isinstance(raw, dict) and raw.get("key") == key \
+                and isinstance(raw.get("snapshots"), list):
+            out: list[tuple[str, dict]] = []
+            for item in raw["snapshots"]:
+                if isinstance(item, list) and len(item) == 2 \
+                        and isinstance(item[0], str) and isinstance(item[1], dict):
+                    out.append((item[0], item[1]))
+            return out
+    except (OSError, ValueError):
+        pass
+    snaps = _scan_chain_checkpoints(root)
+    try:
+        cp = _checkpoint_cache_path(key)
+        cp.parent.mkdir(parents=True, exist_ok=True)
+        tmp = cp.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"key": key, "snapshots": snaps}, sort_keys=True),
+                       encoding="utf-8")
+        os.replace(tmp, cp)
+    except OSError:
+        pass
+    return snaps
+
+
+def _scan_chain_checkpoints(root: Path) -> list[tuple[str, dict]]:
     """[(commit sha, checkpoint dict)] for every git commit carrying
     Dda-Chain-Head trailers — across all refs AND the reflog (dropped
     commits survive there: `git reset --hard`, rebase-onto, update-ref).
@@ -432,6 +493,39 @@ def chain_checkpoints(root: Path) -> list[tuple[str, dict]]:
         if snap:
             out.append((sha, snap))
     return out
+
+
+def chain_below_checkpoint(wd: Workdir, path: Path) -> bool:
+    """True when a committed checkpoint records a longer chain than the live
+    file holds (invariant I7″ read side). Never raises: any git or IO failure
+    returns False so the `verify()` result stands on its own."""
+    try:
+        ckpts = chain_checkpoints(wd.root)
+        if not ckpts:
+            return False
+        try:
+            rel = path.relative_to(wd.root).as_posix()
+        except ValueError:
+            return False
+        best = 0
+        for _sha, snap in ckpts:
+            if not isinstance(snap, dict):
+                continue
+            ent = snap.get(rel)
+            if isinstance(ent, dict) and isinstance(ent.get("seq"), int):
+                best = max(best, ent["seq"])
+        if best < 1:
+            return False
+        try:
+            data = path.read_bytes()
+        except OSError:
+            return True
+        lines = data.split(b"\n")
+        if lines and lines[-1] == b"":
+            lines.pop()
+        return len(lines) < best
+    except Exception:
+        return False
 
 
 def _checkpoint_problems(wd: Workdir) -> list[str]:

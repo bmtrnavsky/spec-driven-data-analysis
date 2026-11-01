@@ -148,6 +148,16 @@ def lineage(wd: Workdir) -> dict:
     exposure away.
     """
     broken = bool(chain.verify(lineage_log(wd)))
+    if not broken:
+        # I7″ read side: a rolled-back prefix restored together with its
+        # rolled-back mirror still verifies, so a committed checkpoint
+        # recording a longer chain also marks the view broken. Without this
+        # the exposure flags would be unread from the rolled-back prefix.
+        try:
+            from . import ledger as _ledger
+            broken = _ledger.chain_below_checkpoint(wd, lineage_log(wd))
+        except Exception:
+            pass
     evs = events(wd)
     locks = [e for e in evs if e.get("type") in LOCK_EVENT]
     cur = locks[-1] if locks else None

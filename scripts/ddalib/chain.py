@@ -241,9 +241,11 @@ def read_records(path: Path) -> list[dict]:
 def _committed_checkpoint_seq(path: Path) -> int:
     """Highest seq any git-committed Dda-Chain-Head trailer records for C.
 
-    Consulted only on the tamper-evidence path (missing/empty chain with no
-    usable mirror), never on the hot path. Returns 0 when the workdir is not
-    a git repo, git is unavailable, or no trailer mentions this chain.
+    Consulted on every append path (invariant I7″): the live chain must
+    extend the newest committed checkpoint whether or not a mirror is
+    present. Returns 0 when the workdir is not a git repo, git is
+    unavailable, or no trailer mentions this chain. The history scan is
+    cached on the commit/reflog state (ledger.chain_checkpoints).
     """
     from . import ledger as _ledger
     root = _workdir_root_for(path)
@@ -302,7 +304,14 @@ def _append_locked(path: Path, record: dict) -> dict:
         lines.pop()  # trailing newline
         n = len(lines)
         last = lines[-1]
-        if heads is None:
+        ckpt = _committed_checkpoint_seq(path)
+        if ckpt > n:
+            raise DdaError(
+                f"{path}: live chain holds {n} line(s) but a committed "
+                f"checkpoint records seq {ckpt} for this chain — the prefix "
+                f"was rolled back; restore the newer prefix before appending "
+                f"(§3.2 case 8)")
+        if not isinstance(heads, dict):
             raise DdaError(
                 f"{path}: {n} line(s) but no heads mirror records this chain "
                 f"(file was not written by the appender, or the mirror was "
