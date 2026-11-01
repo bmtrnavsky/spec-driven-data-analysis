@@ -31,22 +31,6 @@ Current build: `0.9.0-phase9` (`python scripts/dda.py version`).
 
 The CLI is `dda` (pronounced "dee-dee-ay", short for disciplined data analysis).
 
-## Known gaps and accepted risks
-
-This tree is honest about what it does not yet defend against. The gates enforce the
-process and are difficult to bypass; they are not, and do not claim to be, impossible
-to bypass by an adversary with write access to the evidence store.
-
-**[docs/ACCEPTED-RISKS.md](docs/ACCEPTED-RISKS.md)** is the dated record: what is enforced
-and verified, what was closed with raw proof, and what remains open with the reasoning for
-accepting it. Read it before relying on any gate for an audit or compliance claim.
-
-The short version: the enforcement you would actually depend on — no skipped tiers, no
-self-authorized tier step-down, no reuse of a stale approval, no falsely reported eval
-pass, no quiet re-run until it looks green — all hold and are tested. What remains open
-requires deliberate, informed, adversarial effort (rewriting git history, building a
-directory junction, walking a checkpoint floor out of range).
-
 ## Use
 
 ```
@@ -135,26 +119,16 @@ that matches what you are allowed to do.
 ## Tests
 
 ```
-DDA_TEST_MODE=1 python -m unittest discover -s tests   # full suite; 369 tests, ~75 min
+DDA_TEST_MODE=1 python -m unittest discover -s tests   # full suite; 369 tests
 python redteam/run.py [--json out.json]                # phase-0 red-team; exit 0 = GREEN
-python -m tests.revert validate --matrix               # certify probe/anchor bindings (~60 min)
-python -m tests.revert selfcheck                       # repair a tree left stripped by a killed run
+python -m tests.revert validate --matrix               # certify probe/anchor bindings
+python -m tests.revert selfcheck                       # repair a tree left by a killed run
 ```
 
-Two things about this suite are unusual and worth knowing before you trust a green run:
-
-**The probes are certified.** `tests/probes/` holds adversarial probes, each declaring the
-finding it expects to produce. `tests/revert/` proves that every probe actually *depends* on
-the fix it is bound to — it reverts each fix and requires the probe to flip to its
-`vulnerable` token. A probe that would pass with or without the fix fails certification with
-`STALE-PREMISE`, and a probe whose fix changed under it fails with `STALE-PREMISE` too. This
-exists because a probe claiming to test something it does not test is worse than no probe.
-
-**Reverts never touch your checkout.** The revert machinery works on a temporary copy under
-an exclusive OS lock; pointing it at the working tree is an error. A run killed mid-flight
-is detected and repaired on next start (`selfcheck`), and product files are restored
-byte-identically. This matters because an earlier version did edit in place, and a killed
-run could leave `scripts/ddalib/` stripped of its fixes without saying so.
+`tests/probes/` holds adversarial probes, and `tests/revert/` certifies each one by
+reverting the fix it is bound to and requiring the probe to flip. A probe that would pass
+either way fails certification instead of quietly proving nothing. Reverts run on a
+temporary copy under a lock, never on your checkout.
 
 The red-team harness never touches the live Hermes profile: it points
 `DDA_HOME` and `HERMES_HOME` at a scratch directory and drives Hermes's own
