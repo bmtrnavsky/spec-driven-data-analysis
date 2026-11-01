@@ -700,6 +700,24 @@ def verify_approval(wd: Workdir, kind: str, artifact: str | None = None) -> dict
     # prove coverage and never verify (re-approve under v2); other v1
     # kinds fall back to the legacy artifact comparison.
     current = current_digest(wd, kind, rec.get("selector"))
+    if current is None:
+        # Verified read: the coverage digest is recomputed from workdir
+        # evidence (reports, review history, gate verdicts). When that
+        # evidence does not verify (deleted/stashed chains, torn files),
+        # the approval cannot move toward valid on an unproven current
+        # state — hold STALE so re-approval is required. A merely
+        # uncomputable digest over healthy evidence keeps the legacy
+        # fall-through below.
+        from . import ledger as _ledger
+        try:
+            chain_problems, _merged = _ledger.verify_all(wd, merge=False)
+        except (DdaError, OSError):
+            chain_problems = ["evidence chains unreadable"]
+        if chain_problems:
+            return fail(ApprovalState.STALE,
+                        f"cannot recompute the current {kind} digest: evidence chains do not verify "
+                        f"({chain_problems[0][:120]}); restore the workdir before re-approval",
+                        commit=sha, digest=digest)
     if rec.get("format") != FORMAT or rec.get("payload") is None:
         if kind in ("correction", "definition"):
             return fail(ApprovalState.STALE,

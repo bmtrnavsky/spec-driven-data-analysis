@@ -137,7 +137,17 @@ def due_teardown_rounds(wd: Workdir, comp) -> tuple[list[str], bool]:
 
 
 def lineage(wd: Workdir) -> dict:
-    """Computed history view over the lineage chain. Never stored."""
+    """Computed history view over the lineage chain. Never stored.
+
+    Verified read: when the lineage chain itself fails verification
+    (truncated, forked, hand-edited, or deleted with a heads mirror or
+    committed checkpoint behind it), the sticky exposure flags pin True
+    instead of reading False off the broken prefix — exposure once seen
+    is never unread by deleting evidence (fail closed). Gates stay safe
+    because they verify first; this keeps the read path from laundering
+    exposure away.
+    """
+    broken = bool(chain.verify(lineage_log(wd)))
     evs = events(wd)
     locks = [e for e in evs if e.get("type") in LOCK_EVENT]
     cur = locks[-1] if locks else None
@@ -150,6 +160,14 @@ def lineage(wd: Workdir) -> dict:
     degrades = [e for e in evs if e.get("type") == "degrade"]
     first_gf = min([e["seq"] for e in goldfish]) if goldfish else None
     degraded = bool(degrades) and (first_gf is None or min(e["seq"] for e in degrades) < first_gf)
+    goldfish_mode = bool(goldfish)
+    if broken:
+        # The chain does not verify, so the replay above proves nothing:
+        # hold every sticky flag True rather than report a clean view off
+        # deleted or rewritten evidence.
+        results_seen = True
+        goldfish_mode = True
+        degraded = True
     return {
         "lineage_id": lineage_id_of(wd),
         "epoch": cur.get("lock_epoch") if cur else None,
@@ -159,7 +177,7 @@ def lineage(wd: Workdir) -> dict:
         "results_profile_seq": anchor.get("seq") if anchor else None,
         "results_profile_lock_hash": anchor.get("lock_hash") if anchor else None,
         "first_run_seq": first_run.get("seq") if first_run else None,
-        "goldfish_mode": bool(goldfish),
+        "goldfish_mode": goldfish_mode,
         "degraded": degraded,
     }
 

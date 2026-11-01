@@ -528,8 +528,12 @@ class TestInvStickyExposure(InvMixin, P9Setup):
         return self.wd.analysis / "profile.json"
 
     def delete_target(self):
-        snaps = self.wd.root / "derived" / "snapshots"
-        return snaps
+        # Untracked and NOT gitignored, so `git stash -u` (N6b) really
+        # removes it: the lineage chain stages every lock/profile/run and
+        # is never committed. (derived/snapshots is gitignored, so the
+        # stash never touched it and the mutation was a no-op.)
+        from ddalib import lineage as _lineage
+        return _lineage.lineage_log(self.wd)
 
     def check_delete_caught(self, before, after):
         from ddalib import lineage as _lin
