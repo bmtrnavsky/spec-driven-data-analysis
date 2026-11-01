@@ -50,7 +50,13 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "scripts"))
 sys.path.insert(0, str(REPO / "tests"))
 
-from revert.apply import CONFORMANCE, IncoherentRevert, apply_unit  # noqa: E402
+from revert.apply import (  # noqa: E402
+    CONFORMANCE,
+    IncoherentRevert,
+    apply_patch_unit,
+    apply_unit,
+    revert_sandbox,
+)
 from revert.premise import check_pair, find_record, load_premise  # noqa: E402
 from revert.scenarios import SCENARIOS as REGISTRY, by_id as scenario_by_id  # noqa: E402
 
@@ -635,8 +641,9 @@ class TestProbeRevertSensitivity(unittest.TestCase):
     requires the manifest-expected FINDING to be absent — the attack
     then escapes (VULN token) or the probe errors. This proves the
     probes are live: they pass because the fix holds, not because they
-    cannot fail. Sources are restored in `finally` even when a
-    scenario fails.
+    cannot fail. Every revert is applied inside a private sandbox copy
+    held under the repo revert lock (I16, tests/revert/apply.py); the
+    source checkout is never written.
     """
 
     # Registry-derived: (scenario, {relpath: [(old, new), ...]}, [probe names]).
@@ -670,52 +677,56 @@ class TestProbeRevertSensitivity(unittest.TestCase):
                 if _msg is not None:
                     failures.append(_msg)
                     stale.add((_label, _name))
-        for label, patches, probes in self.SCENARIOS:
-            saved = {}
-            try:
-                for rel, pairs in patches.items():
-                    fp = REPO / rel
-                    text = fp.read_text(encoding="utf-8")
-                    saved[rel] = text
-                    for old, new in pairs:
-                        self.assertIn(old, text,
-                                      f"[{label}] revert anchor not found in {rel}: {old[:80]!r}")
-                        text = text.replace(old, new, 1)
-                    fp.write_text(text, encoding="utf-8")
-                for name in probes:
-                    if (label, name) in stale:
-                        continue
-                    probe = REPO / "tests" / "probes" / name
+        # I16: reverts run in a private sandbox copy under the repo revert
+        # lock; the source checkout is never written (SPEC-34478d1 NEW-5).
+        with revert_sandbox(REPO) as SBX:
+            senv = dict(env)
+            senv["PYTHONPATH"] = str(SBX / "scripts") + os.pathsep + str(SBX) \
+                + os.pathsep + os.environ.get("PYTHONPATH", "")
+            for label, patches, probes in self.SCENARIOS:
+                restores = []
+                try:
                     try:
-                        p = subprocess.run(
-                            [sys.executable, str(probe)], capture_output=True,
-                            text=True, env=env, cwd=str(probe.parent), timeout=600)
-                    except subprocess.TimeoutExpired:
-                        failures.append(f"[{label}] {name}: TIMEOUT under revert")
+                        for rel, pairs in patches.items():
+                            restores.append(apply_patch_unit(
+                                SBX, {"module": rel, "patches": pairs}))
+                    except IncoherentRevert as e:
+                        failures.append(f"[{label}] INCOHERENT-REVERT: {e}")
                         continue
-                    findings = [ln for ln in p.stdout.splitlines()
-                                if ln.startswith("FINDING:")]
-                    tail = (p.stdout + p.stderr).strip().splitlines()[-2:]
-                    print(f"[revert:{label}] {name} rc={p.returncode} findings={findings} :: "
-                          + " | ".join(t[:160] for t in tail))
-                    # The reverted probe must print its specific VULN token:
-                    # merely not printing the expected finding would also
-                    # pass a probe that errors out or prints nothing.
-                    want = [f"FINDING: {manifest[name]['vuln']}"]
-                    if findings != want:
-                        if findings == []:
-                            failures.append(
-                                f"[{label}] {name}: want exactly {want} "
-                                f"with its fix reverted — probe printed NO FINDING "
-                                f"(it crashed/errored before asserting, rc={p.returncode}; "
-                                f"see tail above) — distinct from printing the wrong token")
-                        else:
-                            failures.append(
-                                f"[{label}] {name}: want exactly {want} "
-                                f"with its fix reverted — probe printed the wrong token; got {findings}")
-            finally:
-                for rel, text in saved.items():
-                    (REPO / rel).write_text(text, encoding="utf-8")
+                    for name in probes:
+                        if (label, name) in stale:
+                            continue
+                        probe = SBX / "tests" / "probes" / name
+                        try:
+                            p = subprocess.run(
+                                [sys.executable, str(probe)], capture_output=True,
+                                text=True, env=senv, cwd=str(probe.parent), timeout=600)
+                        except subprocess.TimeoutExpired:
+                            failures.append(f"[{label}] {name}: TIMEOUT under revert")
+                            continue
+                        findings = [ln for ln in p.stdout.splitlines()
+                                    if ln.startswith("FINDING:")]
+                        tail = (p.stdout + p.stderr).strip().splitlines()[-2:]
+                        print(f"[revert:{label}] {name} rc={p.returncode} findings={findings} :: "
+                              + " | ".join(t[:160] for t in tail))
+                        # The reverted probe must print its specific VULN token:
+                        # merely not printing the expected finding would also
+                        # pass a probe that errors out or prints nothing.
+                        want = [f"FINDING: {manifest[name]['vuln']}"]
+                        if findings != want:
+                            if findings == []:
+                                failures.append(
+                                    f"[{label}] {name}: want exactly {want} "
+                                    f"with its fix reverted — probe printed NO FINDING "
+                                    f"(it crashed/errored before asserting, rc={p.returncode}; "
+                                    f"see tail above) — distinct from printing the wrong token")
+                            else:
+                                failures.append(
+                                    f"[{label}] {name}: want exactly {want} "
+                                    f"with its fix reverted — probe printed the wrong token; got {findings}")
+                finally:
+                    for restore in reversed(restores):
+                        restore()
         self.assertEqual(failures, [], f"{len(failures)} revert check(s) failed: {failures}")
 
     # Registry-derived whole-function reference reverts (SPEC-504ed55 §3):
@@ -749,79 +760,85 @@ class TestProbeRevertSensitivity(unittest.TestCase):
                 if _msg is not None:
                     failures.append(_msg)
                     stale.add((_label, _name))
-        for label, units, probes in self.FUNC_SCENARIOS:
-            restores = []
-            try:
+        # I16: reverts run in a private sandbox copy under the repo revert
+        # lock; the source checkout is never written (SPEC-34478d1 NEW-5).
+        with revert_sandbox(REPO) as SBX:
+            senv = dict(env)
+            senv["PYTHONPATH"] = str(SBX / "scripts") + os.pathsep + str(SBX) \
+                + os.pathsep + os.environ.get("PYTHONPATH", "")
+            for label, units, probes in self.FUNC_SCENARIOS:
+                restores = []
                 try:
+                    try:
+                        for u in units:
+                            restores.append(apply_unit(
+                                SBX, u["module"], u["func"], u["impl"]))
+                    except IncoherentRevert as e:
+                        failures.append(f"[{label}] INCOHERENT-REVERT: {e}")
+                        continue
+                    coherent = True
                     for u in units:
-                        restores.append(apply_unit(
-                            REPO, u["module"], u["func"], u["impl"]))
-                except IncoherentRevert as e:
-                    failures.append(f"[{label}] INCOHERENT-REVERT: {e}")
-                    continue
-                coherent = True
-                for u in units:
-                    check = CONFORMANCE.get(u["impl"])
-                    if check is None:
-                        failures.append(
-                            f"[{label}] INCOHERENT-REVERT: no conformance "
-                            f"check recorded for {u['impl']}")
-                        coherent = False
-                        continue
-                    try:
-                        c = subprocess.run(
-                            [sys.executable, str(REPO / check)],
-                            capture_output=True, text=True, env=env,
-                            cwd=str(REPO), timeout=600)
-                    except subprocess.TimeoutExpired:
-                        failures.append(f"[{label}] INCOHERENT-REVERT: "
-                                        f"{check} TIMEOUT")
-                        coherent = False
-                        continue
-                    tail = (c.stdout + c.stderr).strip().splitlines()[-1:]
-                    print(f"[revert:{label}] conformance {Path(check).name} "
-                          f"rc={c.returncode} :: "
-                          + " | ".join(t[:160] for t in tail))
-                    if c.returncode != 0:
-                        failures.append(
-                            f"[{label}] INCOHERENT-REVERT: {check} rc={c.returncode}; "
-                            f"the reverted unit does not behave like its pre-fix self")
-                        coherent = False
-                if not coherent:
-                    continue
-                for name in probes:
-                    if (label, name) in stale:
-                        continue
-                    probe = REPO / "tests" / "probes" / name
-                    try:
-                        p = subprocess.run(
-                            [sys.executable, str(probe)], capture_output=True,
-                            text=True, env=env, cwd=str(probe.parent), timeout=600)
-                        findings = [ln for ln in p.stdout.splitlines()
-                                    if ln.startswith("FINDING:")]
-                    except subprocess.TimeoutExpired:
-                        p, findings = None, ["TIMEOUT"]
-                    if p is None:
-                        failures.append(f"[{label}] {name}: TIMEOUT under revert")
-                        continue
-                    tail = (p.stdout + p.stderr).strip().splitlines()[-2:]
-                    print(f"[revert:{label}] {name} rc={p.returncode} findings={findings} :: "
-                          + " | ".join(t[:160] for t in tail))
-                    want = [f"FINDING: {manifest[name]['vuln']}"]
-                    if findings != want:
-                        if findings == []:
+                        check = CONFORMANCE.get(u["impl"])
+                        if check is None:
                             failures.append(
-                                f"[{label}] {name}: want exactly {want} "
-                                f"with its fix reverted — probe printed NO FINDING "
-                                f"(it crashed/errored before asserting, rc={p.returncode}; "
-                                f"see tail above) — distinct from printing the wrong token")
-                        else:
+                                f"[{label}] INCOHERENT-REVERT: no conformance "
+                                f"check recorded for {u['impl']}")
+                            coherent = False
+                            continue
+                        try:
+                            c = subprocess.run(
+                                [sys.executable, str(SBX / check)],
+                                capture_output=True, text=True, env=senv,
+                                cwd=str(SBX), timeout=600)
+                        except subprocess.TimeoutExpired:
+                            failures.append(f"[{label}] INCOHERENT-REVERT: "
+                                            f"{check} TIMEOUT")
+                            coherent = False
+                            continue
+                        tail = (c.stdout + c.stderr).strip().splitlines()[-1:]
+                        print(f"[revert:{label}] conformance {Path(check).name} "
+                              f"rc={c.returncode} :: "
+                              + " | ".join(t[:160] for t in tail))
+                        if c.returncode != 0:
                             failures.append(
-                                f"[{label}] {name}: want exactly {want} "
-                                f"with its fix reverted — probe printed the wrong token; got {findings}")
-            finally:
-                for restore in reversed(restores):
-                    restore()
+                                f"[{label}] INCOHERENT-REVERT: {check} rc={c.returncode}; "
+                                f"the reverted unit does not behave like its pre-fix self")
+                            coherent = False
+                    if not coherent:
+                        continue
+                    for name in probes:
+                        if (label, name) in stale:
+                            continue
+                        probe = SBX / "tests" / "probes" / name
+                        try:
+                            p = subprocess.run(
+                                [sys.executable, str(probe)], capture_output=True,
+                                text=True, env=senv, cwd=str(probe.parent), timeout=600)
+                            findings = [ln for ln in p.stdout.splitlines()
+                                        if ln.startswith("FINDING:")]
+                        except subprocess.TimeoutExpired:
+                            p, findings = None, ["TIMEOUT"]
+                        if p is None:
+                            failures.append(f"[{label}] {name}: TIMEOUT under revert")
+                            continue
+                        tail = (p.stdout + p.stderr).strip().splitlines()[-2:]
+                        print(f"[revert:{label}] {name} rc={p.returncode} findings={findings} :: "
+                              + " | ".join(t[:160] for t in tail))
+                        want = [f"FINDING: {manifest[name]['vuln']}"]
+                        if findings != want:
+                            if findings == []:
+                                failures.append(
+                                    f"[{label}] {name}: want exactly {want} "
+                                    f"with its fix reverted — probe printed NO FINDING "
+                                    f"(it crashed/errored before asserting, rc={p.returncode}; "
+                                    f"see tail above) — distinct from printing the wrong token")
+                            else:
+                                failures.append(
+                                    f"[{label}] {name}: want exactly {want} "
+                                    f"with its fix reverted — probe printed the wrong token; got {findings}")
+                finally:
+                    for restore in reversed(restores):
+                        restore()
         self.assertEqual(failures, [], f"{len(failures)} function-revert check(s) failed: {failures}")
 
 

@@ -1,6 +1,9 @@
 """PREMISE.json helpers and the refusal-reason oracle audit (SPEC-504ed55 §2).
 
-Hashes pin the exact code a validation run certified:
+Hashes pin the exact code a validation run certified. Every byte hash is
+taken over LF-NORMALIZED bytes (CRLF -> LF; SPEC-34478d1 NEW-6) so a record
+is checkout-independent: the same PREMISE.json validates on a clean
+`eol=lf` clone and on a Windows checkout whose working files are CRLF.
   probe:        sha256 of the probe file bytes.
   probelib:     sha256 of tests/probes/probelib.py.
   fixed_units:  per unit, sha256 of the AST dump of the fixed function
@@ -38,8 +41,14 @@ PREMISE_NAME = "tests/revert/PREMISE.json"
 GATE_CALLS = {"g3_verdict", "evaluate", "verify_all", "lineage", "chain_checkpoints"}
 
 
+def normalized_bytes(path: Path) -> bytes:
+    """File bytes with CRLF line endings folded to LF (NEW-6). Used on BOTH
+    the record side (validate) and the check side (check_pair)."""
+    return Path(path).read_bytes().replace(b"\r\n", b"\n")
+
+
 def sha_file(path: Path) -> str:
-    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    return hashlib.sha256(normalized_bytes(path)).hexdigest()
 
 
 def func_ast_hash(repo: Path, module: str, func: str) -> str:
@@ -55,9 +64,10 @@ def func_ast_hash(repo: Path, module: str, func: str) -> str:
 
 
 def patch_unit_hash(repo: Path, unit: dict) -> str:
-    """sha256 of the target file bytes plus the patch anchor strings."""
+    """sha256 of the LF-normalized target file bytes plus the patch anchor
+    strings."""
     h = hashlib.sha256()
-    h.update((Path(repo) / unit["module"]).read_bytes())
+    h.update(normalized_bytes(Path(repo) / unit["module"]))
     for old, new in unit["patches"]:
         h.update(b"\x00OLD\x00" + old.encode())
         h.update(b"\x00NEW\x00" + new.encode())

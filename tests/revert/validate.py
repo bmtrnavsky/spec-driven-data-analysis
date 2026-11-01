@@ -43,7 +43,12 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "tests"))
 
-from revert.apply import CONFORMANCE, IncoherentRevert, apply_unit  # noqa: E402
+from revert.apply import (  # noqa: E402
+    CONFORMANCE,
+    IncoherentRevert,
+    apply_units,
+    revert_sandbox,
+)
 from revert.premise import (  # noqa: E402
     audit_oracle,
     check_pair,
@@ -80,34 +85,10 @@ def run_probe(repo: Path, probe: str, timeout: int) -> tuple[int | None, list[st
 
 
 def apply_all(repo: Path, scenario: dict) -> list:
-    """Apply every unit of the scenario. Returns restore closures (call
-    reversed). Patch anchors missing from the tree raise IncoherentRevert."""
-    restores = []
-    try:
-        for u in scenario["units"]:
-            if u["kind"] == "function":
-                restores.append(apply_unit(repo, u["module"], u["func"], u["impl"]))
-            elif u["kind"] == "patch":
-                fp = repo / u["module"]
-                text = fp.read_text(encoding="utf-8")
-                saved = text
-                for old, new in u["patches"]:
-                    if old not in text:
-                        raise IncoherentRevert(
-                            f"{u['module']}: revert anchor not found: {old[:80]!r}")
-                    text = text.replace(old, new, 1)
-                fp.write_text(text, encoding="utf-8")
-
-                def _restore(fp=fp, saved=saved):
-                    fp.write_text(saved, encoding="utf-8")
-                restores.append(_restore)
-            else:
-                raise IncoherentRevert(f"unknown unit kind: {u['kind']!r}")
-    except Exception:
-        for r in reversed(restores):
-            r()
-        raise
-    return restores
+    """Apply every unit of the scenario INSIDE a revert sandbox (I16; `repo`
+    must be a sandbox root). Returns restore closures (call reversed).
+    Patch anchors missing from the tree raise IncoherentRevert."""
+    return apply_units(repo, scenario["units"])
 
 
 def run_conformance(repo: Path, scenario: dict, timeout: int,
@@ -189,7 +170,19 @@ def historic_token(repo: Path, scenario: dict, probe: str,
 
 def validate_pair(repo: Path, scenario: dict, probe: str, manifest: dict,
                   matrix: bool, timeout: int) -> tuple[dict | None, list[str]]:
-    """Run the arm matrix for one pair. Returns (record or None, failures)."""
+    """Run the arm matrix for one pair. Returns (record or None, failures).
+
+    Every arm runs in a private sandbox copy under the repo revert lock
+    (I16): the source checkout `repo` is never written. The historic arm
+    and the record hashes read from `repo` itself."""
+    with revert_sandbox(repo) as sbx:
+        return _validate_pair(sbx, scenario, probe, manifest, matrix, timeout,
+                              origin=Path(repo))
+
+
+def _validate_pair(repo: Path, scenario: dict, probe: str, manifest: dict,
+                   matrix: bool, timeout: int, origin: Path
+                   ) -> tuple[dict | None, list[str]]:
     label = scenario["id"]
     expected, vuln = manifest[probe]["expected"], manifest[probe]["vuln"]
     failures: list[str] = []
@@ -361,17 +354,17 @@ def validate_pair(repo: Path, scenario: dict, probe: str, manifest: dict,
                 r()
 
     # Arm (e): historic.
-    hist = historic_token(repo, scenario, probe, timeout)
+    hist = historic_token(origin, scenario, probe, timeout)
     print(f"[historic:{label}] {probe} -> {hist}")
 
     try:
-        head = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
+        head = subprocess.run(["git", "-C", str(origin), "rev-parse", "HEAD"],
                               capture_output=True, text=True,
                               timeout=60).stdout.strip()
     except Exception:
         head = "unknown"
-    hashes = pair_hashes(repo, scenario)
-    hashes["probe"] = sha_file(repo / "tests/probes" / probe)
+    hashes = pair_hashes(origin, scenario)
+    hashes["probe"] = sha_file(origin / "tests/probes" / probe)
     record = {
         "scenario": label,
         "probe": probe,
@@ -426,8 +419,9 @@ def main(argv: list[str] | None = None) -> int:
                 premise["records"].append(record)
 
     premise["records"].sort(key=lambda r: (r["scenario"], r["probe"]))
-    (REPO / "tests/revert/PREMISE.json").write_text(
-        json.dumps(premise, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    # write_bytes: always LF on disk, whatever the platform (NEW-6).
+    (REPO / "tests/revert/PREMISE.json").write_bytes(
+        (json.dumps(premise, indent=2, sort_keys=True) + "\n").encode("utf-8"))
     print(f"wrote {REPO / 'tests/revert/PREMISE.json'}: "
           f"{len(premise['records'])} records, {len(failures)} failures")
     for f in failures:
