@@ -344,44 +344,41 @@ def in_git_repo(root: Path) -> bool:
     return shutil.which("git") is not None and _git(root, "rev-parse", "--show-toplevel", check=False).returncode == 0
 
 
-# ---------- chain checkpoints in git (M7) ----------
+# ---------- chain checkpoints in git history (M7) ----------
 
-CHAIN_HEADS_REL = ".analysis/chain-heads.json"
-
-
-def chain_heads_path(wd: Workdir) -> Path:
-    return wd.root / CHAIN_HEADS_REL
+CHAIN_TRAILER = "Dda-Chain-Head"
 
 
-def snapshot_chain_heads(wd: Workdir) -> Path:
-    """Write .analysis/chain-heads.json: {chain rel: {seq, hash}} for every
-    non-empty workdir chain, sourced from the heads mirrors (the
-    appender-maintained heads, never hand-read file tails).
+def chain_head_trailers(wd: Workdir) -> list[str]:
+    """`Dda-Chain-Head: <rel> <seq> <hash>` trailers for every non-empty
+    workdir chain, sourced from the heads mirrors (the appender-maintained
+    heads, never hand-read file tails).
 
-    Called before every dda-made commit (lock, amend, approve, signoff) so
+    Appended to every dda-made commit message (lock, amend, approve) so
     git history pins the chain lengths the workdir must still extend: any
     later restore of an older file prefix fails closed as "below committed
     checkpoint" (N8). Best effort per chain — a chain with no mirror and no
-    readable file simply contributes no entry.
+    readable file simply contributes no trailer. Trailers ride in the
+    commit message, never the tree, so approval-commit purity is exact
+    and no checkpoint file can trip the G9 extension/allowlist checks.
     """
     from . import chain as _chain
-    snap: dict[str, dict] = {}
+    out: list[str] = []
     for p in workdir_chains(wd):
         try:
-            rel = str(p.relative_to(wd.root)).replace("\\", "/")
+            rel = p.relative_to(wd.root).as_posix()
         except ValueError:
             continue
         heads = _chain._read_heads(p)
         if isinstance(heads, dict) and isinstance(heads.get("seq"), int) and heads["seq"] > 0 \
                 and isinstance(heads.get("hash"), str):
-            snap[rel] = {"seq": heads["seq"], "hash": heads["hash"]}
-    _chain._write_json_atomic(chain_heads_path(wd), snap)
-    return chain_heads_path(wd)
+            out.append(f"{CHAIN_TRAILER}: {rel} {heads['seq']} {heads['hash']}")
+    return out
 
 
 def chain_checkpoints(root: Path) -> list[tuple[str, dict]]:
-    """[(commit sha, checkpoint dict)] for every git commit that records
-    .analysis/chain-heads.json — across all refs AND the reflog (dropped
+    """[(commit sha, checkpoint dict)] for every git commit carrying
+    Dda-Chain-Head trailers — across all refs AND the reflog (dropped
     commits survive there: `git reset --hard`, rebase-onto, update-ref).
 
     Returns [] when git is missing or `root` is not a repo. Capped to keep
@@ -392,8 +389,8 @@ def chain_checkpoints(root: Path) -> list[tuple[str, dict]]:
     out: list[tuple[str, dict]] = []
     seen: set[str] = set()
     shas: list[str] = []
-    for args in (["log", "--all", "--format=%H", "--", CHAIN_HEADS_REL],
-                 ["log", "-g", "--format=%H", "--", CHAIN_HEADS_REL]):
+    for args in (["log", "--all", "--format=%H"],
+                 ["log", "-g", "--format=%H"]):
         try:
             r = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, timeout=60)
         except (OSError, subprocess.SubprocessError):
@@ -411,17 +408,28 @@ def chain_checkpoints(root: Path) -> list[tuple[str, dict]]:
             break
     for sha in shas:
         try:
-            r = subprocess.run(["git", "-C", str(root), "show", f"{sha}:{CHAIN_HEADS_REL}"],
+            r = subprocess.run(["git", "-C", str(root), "log", "-1", "--format=%B", sha],
                                capture_output=True, text=True, timeout=60)
         except (OSError, subprocess.SubprocessError):
             continue
         if r.returncode != 0:
             continue
-        try:
-            snap = json.loads(r.stdout)
-        except ValueError:
-            continue
-        if isinstance(snap, dict):
+        snap: dict[str, dict] = {}
+        for ln in r.stdout.splitlines():
+            s = ln.strip()
+            if not s.startswith(CHAIN_TRAILER + ":"):
+                continue
+            rest = s.split(":", 1)[1].split()
+            if len(rest) != 3:
+                continue
+            rel, seq_s, h = rest
+            try:
+                seq = int(seq_s)
+            except ValueError:
+                continue
+            if seq >= 1 and h:
+                snap[rel] = {"seq": seq, "hash": h}
+        if snap:
             out.append((sha, snap))
     return out
 
@@ -461,10 +469,12 @@ def _checkpoint_problems(wd: Workdir) -> list[str]:
     return problems
 
 
-def git_commit(root: Path, paths: list[Path], message: str) -> str:
+def git_commit(root: Path, paths: list[Path], message: str, trailers: list[str] | None = None) -> str:
     if not in_git_repo(root):
         raise DdaError(f"{root} is not inside a git repository; locks are git commits (§4.2). Run `git init` there.")
     rels = [str(p.relative_to(root)).replace("\\", "/") for p in paths if p.exists()]
+    if trailers:
+        message = message + "\n\n" + "\n".join(trailers)
     ident = []
     if not _git(root, "config", "user.email", check=False).stdout.strip():
         ident = ["-c", "user.name=dda", "-c", "user.email=dda@localhost"]
@@ -951,12 +961,13 @@ def do_lock(wd: Workdir, amend: str | None = None) -> dict:
     binding.refresh_registry(wd)
 
     files = [wd.spec_path, vpath, wd.lock_path, ledger_path(wd), wd.config_path, wd.root / ".gitignore",
-             runs_log(wd), audit_log(wd), specs_tried(wd), snapshot_chain_heads(wd)]
+             runs_log(wd), audit_log(wd), specs_tried(wd)]
     files += [wd.definitions / f"{p.split('@', 1)[0]}.md" for p in comp.pins]
     if blobs_dir(wd).is_dir() and any(blobs_dir(wd).iterdir()):
         files.append(blobs_dir(wd))
     sha = git_commit(wd.root, files, f"dda lock v{version} {comp.lock_hash[:12]} ({label})"
-                     + (f"\n\nAmendment: {amend}" if amend else ""))
+                     + (f"\n\nAmendment: {amend}" if amend else ""),
+                     trailers=chain_head_trailers(wd))  # M7: pin chain lengths in the commit message
     lock["commit"] = sha
     lock["exposure"] = found
     lock["merged_spills"] = merged

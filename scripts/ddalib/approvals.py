@@ -2,10 +2,10 @@
 
 An approval is a git commit, made by an approver in their own terminal with
 `dda approve <kind>`, that adds exactly one approval file,
-`.analysis/approvals/<kind>-<digest16>.json`, plus the machine-written
-chain checkpoint `.analysis/chain-heads.json` (M7: git history pins chain
-lengths so an older-prefix restore fails closed). The approval file is
-signed. Kinds:
+`.analysis/approvals/<kind>-<digest16>.json`. The commit message carries
+machine-written `Dda-Chain-Head: <rel> <seq> <hash>` trailers (M7: git
+history pins chain lengths so an older-prefix restore fails closed). The
+approval file is signed. Kinds:
 tier, spec, amendment, signoff, definition, correction, config.
 
 The digest is content-addressed and computed ONLY by dda
@@ -470,10 +470,11 @@ def do_approve(wd: Workdir, kind: str, artifact: str | None = None,
     if _git(wd, "rev-parse", "--show-toplevel").returncode != 0:
         raise DdaError(f"{wd.root} is not a git repo; approvals must be committable")
     from . import ledger as _ledger
-    heads_rel = _ledger.CHAIN_HEADS_REL
-    _ledger.snapshot_chain_heads(wd)  # M7: pin chain lengths in git history
+    trailers = _ledger.chain_head_trailers(wd)  # M7: pin chain lengths in the commit message
     msg = message or f"dda approve {kind} {short}"
-    _git(wd, "add", "--", rel, heads_rel)
+    if trailers:
+        msg = msg + "\n\n" + "\n".join(trailers)
+    _git(wd, "add", "--", rel)
     pre: list[str] = []
     cmd = ["commit"]
     if sign:
@@ -484,7 +485,7 @@ def do_approve(wd: Workdir, kind: str, artifact: str | None = None,
         pre += ["-c", "commit.gpgsign=false", "-c", "tag.gpgSign=false"]
     if not _git(wd, "config", "--get", "user.email").stdout.strip():
         pre += ["-c", "user.name=dda", "-c", "user.email=dda@localhost"]
-    cmd += ["--no-verify", "-q", "-m", msg, "--", rel, heads_rel]
+    cmd += ["--no-verify", "-q", "-m", msg, "--", rel]
     r = _git(wd, *pre, *cmd)
     if r.returncode != 0:
         err = (r.stderr or r.stdout).strip()[-400:]
@@ -493,8 +494,8 @@ def do_approve(wd: Workdir, kind: str, artifact: str | None = None,
                            f"or re-run with --no-sign to record an unverified approval")
         raise DdaError(f"committing the approval failed ({err})")
     sha = _git(wd, "rev-parse", "HEAD").stdout.strip()
-    # The commit must add exactly this one approval file (plus the
-    # machine-written chain checkpoint, which _only_added_file tolerates).
+    # The commit must add exactly this one approval file (M7 checkpoints
+    # ride in the commit message, never the tree).
     if _only_added_file(wd, sha) != rel:
         raise DdaError(f"approval commit {sha[:12]} touches more than {rel}; "
                        "an approval commit must add exactly one approval file (§4.5)")
@@ -505,11 +506,10 @@ def do_approve(wd: Workdir, kind: str, artifact: str | None = None,
 def _only_added_file(wd: Workdir, sha: str) -> str | None:
     """The single approval file added by commit `sha`, else None.
 
-    Tolerates the machine-written chain checkpoint
-    (`.analysis/chain-heads.json`, M7) alongside the approval file —
-    anything else still disqualifies the commit.
+    Exact: the commit must add exactly one file and touch nothing else
+    (M7 checkpoints ride in the commit message as Dda-Chain-Head
+    trailers, never the tree) — anything else disqualifies the commit.
     """
-    from .ledger import CHAIN_HEADS_REL
     r = _git(wd, "show", "--pretty=format:", "--name-status", sha)
     lines = [ln for ln in r.stdout.splitlines() if ln.strip()]
     added = []
@@ -518,16 +518,10 @@ def _only_added_file(wd: Workdir, sha: str) -> str | None:
         if m:
             added.append(m.group(1).replace("\\", "/"))
             continue
-        # The machine-written checkpoint is tracked since the lock commit,
-        # so approval commits MODIFY it — anything else still disqualifies.
-        m = re.match(r"^M\t(.*)$", ln)
-        if m and m.group(1).replace("\\", "/") == CHAIN_HEADS_REL:
-            continue
         return None
-    approval = [a for a in added if a != CHAIN_HEADS_REL]
-    if len(approval) != 1 or len(added) > 2:
+    if len(added) != 1:
         return None
-    return approval[0]
+    return added[0]
 
 
 # ---------- dda approved ----------

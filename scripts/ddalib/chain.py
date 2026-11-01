@@ -239,11 +239,11 @@ def read_records(path: Path) -> list[dict]:
 # ---------- appending ----------
 
 def _committed_checkpoint_seq(path: Path) -> int:
-    """Highest seq any git-committed chain-heads.json checkpoint records for C.
+    """Highest seq any git-committed Dda-Chain-Head trailer records for C.
 
     Consulted only on the tamper-evidence path (missing/empty chain with no
     usable mirror), never on the hot path. Returns 0 when the workdir is not
-    a git repo, git is unavailable, or no checkpoint mentions this chain.
+    a git repo, git is unavailable, or no trailer mentions this chain.
     """
     from . import ledger as _ledger
     root = _workdir_root_for(path)
