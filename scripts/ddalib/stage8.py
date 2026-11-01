@@ -473,6 +473,60 @@ def _typed_hits(triggers: list[str], aliases: set[str], defs: set[str],
     return hits
 
 
+def _index_payload_fallback(wd: Workdir, digest: str, commit: str | None) -> str | None:
+    """Re-resolve a correction approval's canonical payload after a history rewrite.
+
+    Tries, in order: the workdir approval file (`correction-<digest16>.json`,
+    present unless the rewrite also wiped the tree), then the git object
+    store (`git show <commit>:<path>` — the commit object survives
+    `reset --hard`/rebase/update-ref until gc even when unreachable from
+    HEAD). Returns the payload string or None.
+    """
+    import subprocess as _sp
+    want = digest or ""
+    try:
+        adir = wd.analysis / "approvals"
+        if adir.is_dir():
+            for cand in sorted(adir.glob("correction-*.json")):
+                try:
+                    rec = json.loads(cand.read_text(encoding="utf-8"))
+                except (ValueError, OSError):
+                    continue
+                if not isinstance(rec, dict) or rec.get("kind") != "correction":
+                    continue
+                d = rec.get("digest") or rec.get("artifact")
+                if isinstance(d, str) and (d == want or want.startswith(d) or d.startswith(want)):
+                    p = rec.get("payload")
+                    if isinstance(p, str) and p:
+                        return p
+    except OSError:
+        pass
+    if commit:
+        try:
+            names = _sp.run(["git", "-C", str(wd.root), "show", "--pretty=format:",
+                             "--name-only", commit],
+                            capture_output=True, text=True, check=False)
+            rels = [ln.strip() for ln in (names.stdout or "").splitlines() if ln.strip()]
+            for rel in rels:
+                if "/approvals/" not in rel.replace("\\", "/"):
+                    continue
+                blob = _sp.run(["git", "-C", str(wd.root), "show", f"{commit}:{rel}"],
+                               capture_output=True, text=True, check=False)
+                if blob.returncode != 0 or not blob.stdout:
+                    continue
+                try:
+                    rec = json.loads(blob.stdout)
+                except ValueError:
+                    continue
+                if isinstance(rec, dict) and rec.get("kind") == "correction":
+                    p = rec.get("payload")
+                    if isinstance(p, str) and p:
+                        return p
+        except OSError:
+            pass
+    return None
+
+
 def match_evals(wd: Workdir) -> list[dict]:
     """Mechanically match correction cases to the locked spec (§9).
 
@@ -530,6 +584,59 @@ def match_evals(wd: Workdir) -> list[dict]:
                         "approval_reason": verdict.get("reason", ""),
                         "case_hash": digest,
                         "check": _eval_check(payload)})
+    # N7: history-rewrite fallback. `git reset --hard`, rebases,
+    # filter-branch, and update-ref drop approval commits from branch
+    # ancestry, so the git-history enumeration above goes blind — the case
+    # would unbind and `evals run` would exit 0. approvals.index.jsonl is
+    # an untracked chain that survives those rewrites: any index-known
+    # correction digest still binds (fail closed), with its payload
+    # re-resolved from the index record, the workdir approval file, or the
+    # git object store (the commit object survives until gc even when it
+    # is no longer reachable from HEAD).
+    seen_digests = {m.get("case_hash") for m in matched}
+    seen_digests.discard(None)
+    for entry in _approvals.index_approvals(wd, "correction"):
+        digest = entry.get("digest") or entry.get("artifact")
+        if not isinstance(digest, str) or not digest or digest in seen_digests:
+            continue
+        payload = entry.get("payload") if isinstance(entry.get("payload"), str) else None
+        case_id = entry.get("selector") or entry.get("case") or digest[:16]
+        if not payload:
+            payload = _index_payload_fallback(wd, digest, entry.get("commit"))
+        if not payload:
+            # The approval was recorded but its content is unrecoverable
+            # (index pruned AND object gc'd): stay bound on the digest
+            # alone — a recorded approval must never silently unbind.
+            # Triggers are unknown, so conservatively match every trigger
+            # family the spec side declares.
+            matched.append({"case": case_id, "triggers": sorted(aliases | defs) or ["*"],
+                            "bound": True, "verified": False,
+                            "approval_reason": (
+                                "correction approval recorded in approvals.index.jsonl "
+                                f"({str(digest)[:12]}) is no longer on this branch and its "
+                                "payload is unrecoverable (history rewrite + gc); "
+                                "bound fail-closed — restore history or re-approve (§4.5)"),
+                            "case_hash": digest, "check": None})
+            seen_digests.add(digest)
+            continue
+        case_id = entry.get("selector") or case_id
+        triggers = _case_triggers(payload)
+        if not triggers:
+            continue
+        hit = _typed_hits(triggers, aliases, defs, yes_tags)
+        if not hit:
+            continue
+        sha = entry.get("commit")
+        matched.append({"case": case_id, "triggers": hit, "bound": True,
+                        "verified": False,
+                        "approval_reason": (
+                            "correction approval recorded in approvals.index.jsonl "
+                            f"({str(digest)[:12]}{', commit ' + str(sha)[:12] if sha else ''}) "
+                            "is no longer on this branch (history rewrite does not "
+                            "unbind, §4.5); restore history or re-approve"),
+                        "case_hash": digest,
+                        "check": _eval_check(payload)})
+        seen_digests.add(digest)
     # Working-dir drafts with no committed approval are still matched but
     # NEVER bound: an unapproved draft is reported (never blocking) while
     # the approved copy — enumerated above — still binds. Skips cases the

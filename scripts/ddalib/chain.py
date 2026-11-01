@@ -200,6 +200,19 @@ def read_records(path: Path) -> list[dict]:
 def _append_locked(path: Path, record: dict) -> dict:
     last = _last_line(path)
     if last is None:
+        # N6 fail-closed: the heads mirror lives outside the workdir (dda
+        # home), so `git clean -fdx` / `git stash -u` delete the chain file
+        # but not the mirror. Restarting from seq 1 here would overwrite the
+        # mirror and launder the deletion (verify-chain would report ok,
+        # sticky flags like results_seen_before_profile would flip). A
+        # missing/empty chain with a non-empty mirror is tamper evidence:
+        # refuse to append until a human restores or investigates.
+        heads = _read_heads(path)
+        if heads and isinstance(heads.get("seq"), int) and heads["seq"] > 0:
+            raise DdaError(
+                f"{path}: file is missing or empty but the heads mirror records "
+                f"seq {heads['seq']} (evidence was deleted, e.g. by `git clean -fdx` "
+                f"or `git stash -u`); restore it before appending (§3.2 case 8)")
         seq, prev = 1, GENESIS
     else:
         if not last.endswith(b"\n"):

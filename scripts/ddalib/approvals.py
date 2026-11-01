@@ -816,14 +816,43 @@ def do_approved(wd: Workdir, kind: str, artifact: str | None = None) -> dict:
     if artifact is None and kind in ("correction", "definition"):
         raise DdaError(f"`dda approved {kind}` needs a case/definition selector or digest")
     verdict = verify_approval(wd, kind, artifact)
-    chain.append(ledger.approvals_index(wd), {
+    index_rec = {
         "type": "approval", "kind": kind, "artifact": verdict.get("digest") or artifact,
         "digest": verdict.get("digest"), "commit": verdict.get("commit"),
         "signer": verdict.get("signer"), "sig_ok": verdict.get("sig_ok"),
         "verified": verdict["verified"], "state": verdict["state"],
         "reason": verdict["reason"],
-    })
+    }
+    # N7: embed the canonical payload so a later history rewrite (`git
+    # reset --hard`, rebase, filter-branch, update-ref) cannot drop the
+    # binding — match_evals re-resolves index-known approvals from this
+    # record even when the commit is no longer on the branch. Best effort:
+    # a missing payload only loses the fast path (git object store next).
+    try:
+        _rec, _payload = approved_payload(wd, kind, artifact)
+        if isinstance(_payload, str) and _payload:
+            index_rec["payload"] = _payload
+    except DdaError:
+        pass
+    chain.append(ledger.approvals_index(wd), index_rec)
     return verdict
+
+
+def index_approvals(wd: Workdir, kind: str) -> list[dict]:
+    """Every `dda approved` verdict recorded in approvals.index.jsonl.
+
+    The index is an untracked chain that survives `git reset --hard` and
+    rebases (unlike `git log` ancestry), so evals matching consults it to
+    keep history rewrites from unbinding cases (N7). Returns oldest first.
+    """
+    from . import ledger
+    check_kind_artifact(kind)
+    try:
+        recs = chain.read_records(ledger.approvals_index(wd))
+    except OSError:
+        return []
+    return [r for r in recs
+            if isinstance(r, dict) and r.get("type") == "approval" and r.get("kind") == kind]
 
 
 def latest_record(wd: Workdir, kind: str, artifact: str) -> dict | None:

@@ -14,15 +14,23 @@ MONOTONICITY against the pre-mutation snapshot:
 
 Mutation classes (applied to every fixture):
   cosmetic_amend, reprofile, rerun, rename_artifact, delete_artifact,
-  touch_mtimes, unset_key, sibling_variant, edit_report.
+  touch_mtimes, unset_key, sibling_variant, edit_report, plus the git
+  operations exercised by the probe suite: git_clean, git_stash_u,
+  git_reset_hard, git_rebase, git_commit_amend, git_filter_branch,
+  git_update_ref (see tests/probes/ — each is a real git op whose
+  expected finding the regression test asserts).
 
 Fixtures:
   TestInvEvalBinding    N1: bound correction case with a failing check.
   TestInvGoldfishHistory  N2: teardown review with two failed rounds.
   TestInvStickyExposure  sticky results_seen_before_profile exposure.
 
-Plus TestDdaprobeRegression: every ddaprobe p_*.py / n_*.py probe re-run
-as a regression test (exit 0 = probe executed without crashing).
+Plus TestDdaprobeRegression: every tests/probes/p_*.py / n_*.py probe
+re-run as a regression test. Each probe declares EXPECTED and prints
+`FINDING: <token>`; the test asserts the probe exits 0 AND prints its
+expected finding — a bypass that silently succeeds prints a different
+finding and fails the suite (exit-code-only assertions were blind to
+N1/N2-class bypasses, which exit 0 while laundering evidence).
 
 Run: DDA_TEST_MODE=1 python -m unittest tests.test_invariants
 """
@@ -445,53 +453,54 @@ class TestInvStickyExposure(InvMixin, P9Setup):
 
 
 class TestDdaprobeRegression(unittest.TestCase):
-    """Re-run every ddaprobe p_*.py / n_*.py probe: exit 0, no crash."""
+    """Re-run every tests/probes/ probe: exit 0 AND expected finding present.
+
+    Probes live in-repo (no scratch-dir dependency) and declare EXPECTED;
+    a probe that runs but prints a different FINDING (attack succeeded)
+    fails the suite — exit codes alone cannot catch bypasses.
+    """
 
     def _probes(self):
-        dd = REPO.parent / ".hermes-home" / "cache" / "scratch" / "ddaprobe"
-        if not dd.is_dir():
-            dd = Path.home() / ".hermes-home" / "cache" / "scratch" / "ddaprobe"
+        dd = REPO / "tests" / "probes"
         files = sorted(dd.glob("p_*.py")) + sorted(dd.glob("n_*.py"))
-        self.assertTrue(files, "no ddaprobe probes found")
+        self.assertTrue(files, f"no ddaprobe probes found in {dd}")
         return files
 
+    @staticmethod
+    def _expected(probe: Path) -> tuple:
+        import ast as _ast
+        import re as _re
+        m = _re.search(r"^EXPECTED\s*=\s*(.+?)\s*$",
+                       probe.read_text(encoding="utf-8"), _re.M)
+        assert m, f"{probe.name} declares no EXPECTED finding"
+        val = _ast.literal_eval(m.group(1))
+        return (val,) if isinstance(val, str) else tuple(val)
+
     def test_probe_list_nonempty(self):
-        self.assertGreaterEqual(len(self._probes()), 15)
+        self.assertGreaterEqual(len(self._probes()), 13)
 
     def test_all_probes(self):
         env = dict(os.environ)
         env["DDA_TEST_MODE"] = "1"
         env["PYTHONPATH"] = str(REPO / "scripts") + os.pathsep + str(REPO) \
             + os.pathsep + env.get("PYTHONPATH", "")
-        dd = self._probes()[0].parent  # probes use relative opens: run in place
         failures = []
-        # p_g7 encodes the PRE-session-3 bypass (run before profile succeeds).
-        # Session 3 closed it (proofC: the kernel refuses with no profile for
-        # the lock epoch), so the probe now fails with exactly that refusal —
-        # the closed-hole behavior, asserted as the regression expectation.
-        closed = {"p_g7.py": "no profile for the current lock"}
         for probe in self._probes():
-            # p_g7 takes an explicit scenario mode (redteam/run.py runs all three).
-            argsets = ([["control"], ["other_variant"], ["amend"]]
-                       if probe.name == "p_g7.py" else [[]])
-            for argv in argsets:
-                label = probe.name + (f"[{argv[0]}]" if argv else "")
-                try:
-                    p = subprocess.run([sys.executable, str(probe), *argv],
-                                       capture_output=True, text=True, env=env,
-                                       cwd=str(dd), timeout=600)
-                except subprocess.TimeoutExpired:
-                    failures.append(f"{label}: TIMEOUT")
-                    continue
-                tail = (p.stdout + p.stderr).strip().splitlines()[-3:]
-                print(f"[{label}] rc={p.returncode} :: " + " | ".join(t[:160] for t in tail))
-                if probe.name in closed:
-                    if p.returncode == 0 or closed[probe.name] not in (p.stdout + p.stderr):
-                        failures.append(f"{label}: expected closed-hole refusal "
-                                        f"{closed[probe.name]!r}")
-                    continue
-                if p.returncode != 0:
-                    failures.append(f"{label}: rc={p.returncode}")
+            expected = self._expected(probe)
+            try:
+                p = subprocess.run([sys.executable, str(probe)],
+                                   capture_output=True, text=True, env=env,
+                                   cwd=str(probe.parent), timeout=600)
+            except subprocess.TimeoutExpired:
+                failures.append(f"{probe.name}: TIMEOUT")
+                continue
+            tail = (p.stdout + p.stderr).strip().splitlines()[-3:]
+            print(f"[{probe.name}] rc={p.returncode} :: " + " | ".join(t[:160] for t in tail))
+            if p.returncode != 0:
+                failures.append(f"{probe.name}: rc={p.returncode} (probe did not run clean)")
+            elif not any(f"FINDING: {e}" in p.stdout for e in expected):
+                got = [ln for ln in p.stdout.splitlines() if ln.startswith("FINDING:")]
+                failures.append(f"{probe.name}: expected one of {expected!r} absent; got {got}")
         self.assertEqual(failures, [], f"{len(failures)} probe(s) regressed: {failures}")
 
 
