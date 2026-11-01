@@ -740,7 +740,7 @@ def _git_safety_stream_git_blob(wd: Workdir, rel: str) -> bytes | None:
     if not git:
         return None
     try:
-        proc = subprocess.Popen([git, "-C", str(wd.root), "show", ":" + rel],
+        proc = subprocess.Popen([git, "-C", str(wd.root), "show", ":./" + rel],
                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     except OSError:
         return None
@@ -793,7 +793,7 @@ def _git_safety_blob(wd: Workdir, rel: str) -> bytes | None:
     if streamed is not None:
         return streamed
     try:
-        r = _git(wd.root, "show", ":" + rel, check=False)
+        r = _git(wd.root, "show", ":./" + rel, check=False)
         if r.returncode == 0:
             return _git_safety_sample(r.stdout.encode("utf-8", "ignore"))
     except Exception:
@@ -928,7 +928,14 @@ def git_safety_scan(wd: Workdir) -> list[str]:
     exact = _git_safety_evidence(wd, lock)
     known_res = _git_safety_known(wd)
     tracked = [t for t in _git(wd.root, "ls-files", "-z").stdout.split("\0") if t]
-    st = _git(wd.root, "status", "--porcelain=v1", "--untracked-files=all", "-z").stdout
+    # `ls-files` paths are relative to `-C wd.root` (the workdir), but
+    # porcelain `status` paths are always repo-ROOT-relative and cover the
+    # whole repo. For a workdir nested in a bigger repo, scope status to the
+    # workdir (`-- .`) and strip the repo prefix so both lists are
+    # workdir-relative (`:./<rel>` index reads below rely on that too).
+    pref = _git(wd.root, "rev-parse", "--show-prefix", check=False)
+    prefix = pref.stdout.strip().replace("\\", "/") if pref.returncode == 0 else ""
+    st = _git(wd.root, "status", "--porcelain=v1", "--untracked-files=all", "-z", "--", ".").stdout
     toks = st.split("\0")
     i = 0
     status_paths: list[str] = []
@@ -943,6 +950,8 @@ def git_safety_scan(wd: Workdir) -> list[str]:
                 i += 1  # skip the rename/copy source; scan the destination
             if not path:
                 continue
+        if path and prefix:
+            path = path[len(prefix):] if path.startswith(prefix) else ""
         if path:
             status_paths.append(path)
     ign = _git(wd.root, "ls-files", "--others", "--ignored",

@@ -303,7 +303,9 @@ def gate_g9(wd: Workdir) -> tuple[bool, str, dict]:
     allow_problems, manifest = _g9_allowlist_check(wd)
     if allow_problems:
         return False, "G9 fail: committed file not allowlisted: " + "; ".join(allow_problems[:3]), {}
-    dirty = _git(wd.root, "status", "--porcelain").stdout
+    # Scope to the workdir: porcelain status covers the whole repo, so a
+    # workdir nested in a bigger project would fail on unrelated dirt.
+    dirty = _git(wd.root, "status", "--porcelain", "--", ".").stdout
     if dirty.strip():
         return False, "G9 fail: uncommitted changes present", {}
     digest = _hashlib.sha256(json.dumps(manifest, sort_keys=True).encode("utf-8")).hexdigest()

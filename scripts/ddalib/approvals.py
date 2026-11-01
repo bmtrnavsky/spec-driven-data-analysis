@@ -358,6 +358,32 @@ def _git_ok(wd: Workdir, *args) -> bool:
     return _git(wd, *args, check=False).returncode == 0
 
 
+# Two path spaces meet here. Every `rel` dda builds (approval_rel, the
+# `.analysis/approvals/...` prefix checks) is WORKDIR-relative. Git reports
+# `show --name-status` paths, and resolves `<rev>:<path>`, relative to the
+# REPO ROOT. They coincide only when the workdir IS the repo root; a workdir
+# nested in a bigger repo (`project/analysis/`) gets `analysis/.analysis/...`
+# from git. `_only_added_file` therefore strips the workdir's repo prefix
+# (`git rev-parse --show-prefix`, "" at the root) so callers only ever see
+# workdir-relative paths, and blobs are read via `_show_blob`, which uses
+# git's `<rev>:./<path>` form (resolved against `-C wd.root`, i.e. the
+# workdir) instead of the root-relative `<rev>:<path>`.
+
+def _repo_prefix(wd: Workdir) -> str | None:
+    """The workdir's path relative to the git repo root, POSIX with a
+    trailing slash ("analysis/"), "" when the workdir is the root, None
+    when not in a repo."""
+    r = _git(wd, "rev-parse", "--show-prefix")
+    if r.returncode != 0:
+        return None
+    return r.stdout.strip().replace("\\", "/")
+
+
+def _show_blob(wd: Workdir, sha: str, rel: str) -> subprocess.CompletedProcess:
+    """`git show <sha>:<rel>` for a WORKDIR-relative `rel` (see above)."""
+    return _git(wd, "show", f"{sha}:./{rel}")
+
+
 def _norm_fp(s: str) -> str:
     return re.sub(r"[^0-9A-Za-z]", "", s or "").upper()
 
@@ -503,13 +529,20 @@ def do_approve(wd: Workdir, kind: str, artifact: str | None = None,
             "commit": sha, "signed": sign}
 
 
-def _only_added_file(wd: Workdir, sha: str) -> str | None:
-    """The single approval file added by commit `sha`, else None.
+def _only_added_file(wd: Workdir, sha: str, prefix: str | None = None) -> str | None:
+    """The single approval file added by commit `sha`, WORKDIR-relative, else None.
 
     Exact: the commit must add exactly one file and touch nothing else
     (M7 checkpoints ride in the commit message as Dda-Chain-Head
     trailers, never the tree) — anything else disqualifies the commit.
+    Git reports repo-root-relative paths; the workdir's repo prefix is
+    stripped (pass `prefix` to reuse one `_repo_prefix` lookup across a
+    loop). A file added outside this workdir is not ours: None.
     """
+    if prefix is None:
+        prefix = _repo_prefix(wd)
+        if prefix is None:
+            return None
     r = _git(wd, "show", "--pretty=format:", "--name-status", sha)
     lines = [ln for ln in r.stdout.splitlines() if ln.strip()]
     added = []
@@ -521,7 +554,12 @@ def _only_added_file(wd: Workdir, sha: str) -> str | None:
         return None
     if len(added) != 1:
         return None
-    return added[0]
+    path = added[0]
+    if prefix:
+        if not path.startswith(prefix):
+            return None
+        path = path[len(prefix):]
+    return path
 
 
 # ---------- dda approved ----------
@@ -558,12 +596,13 @@ def _config_chain(wd: Workdir) -> tuple[dict[str, dict], list[str]]:
     if r.returncode != 0:
         return {}, []
     entries: list[dict] = []
+    prefix = _repo_prefix(wd)
     for sha in [ln.strip() for ln in r.stdout.splitlines() if ln.strip()]:
-        only = _only_added_file(wd, sha)
+        only = _only_added_file(wd, sha, prefix)
         if not only or not only.startswith(".analysis/approvals/config-"):
             continue
         try:
-            content = _git(wd, "show", f"{sha}:{only}").stdout
+            content = _show_blob(wd, sha, only).stdout
             rec = json.loads(content)
         except (ValueError, subprocess.SubprocessError):
             continue
@@ -619,12 +658,13 @@ def _resolve_record(wd: Workdir, kind: str, ref: str | None) -> tuple[dict | Non
              ".analysis/approvals")
     shas = [ln.strip() for ln in r.stdout.splitlines() if ln.strip()] if r.returncode == 0 else []
     cands: list[tuple[dict, str, str]] = []
+    prefix = _repo_prefix(wd)
     for sha in shas:
-        only = _only_added_file(wd, sha)
+        only = _only_added_file(wd, sha, prefix)
         if not only or not only.startswith(f".analysis/approvals/{kind}-"):
             continue
         try:
-            rec = json.loads(_git(wd, "show", f"{sha}:{only}").stdout)
+            rec = json.loads(_show_blob(wd, sha, only).stdout)
         except (ValueError, subprocess.SubprocessError):
             continue
         if not isinstance(rec, dict) or rec.get("kind") != kind:
@@ -680,7 +720,7 @@ def verify_approval(wd: Workdir, kind: str, artifact: str | None = None) -> dict
                     "restore it or re-approve",
                     commit=sha, digest=_record_digest(rec))
     try:
-        committed = _git(wd, "show", f"{sha}:{rel}").stdout
+        committed = _show_blob(wd, sha, rel).stdout
         live = path.read_text(encoding="utf-8")
     except OSError as exc:
         return fail(ApprovalState.MISSING, f"{rel} is unreadable ({exc})",
@@ -810,7 +850,7 @@ def approved_payload(wd: Workdir, kind: str, ref: str | None = None) -> tuple[di
     if not _git_ok(wd, "merge-base", "--is-ancestor", sha, "HEAD"):
         raise DdaError(f"{kind} approval {sha[:12]} is not on this branch")
     try:
-        committed = _git(wd, "show", f"{sha}:{rel}").stdout
+        committed = _show_blob(wd, sha, rel).stdout
         record = json.loads(committed)
     except (ValueError, subprocess.SubprocessError) as exc:
         raise DdaError(f"{kind} approval {sha[:12]} is not readable from git ({exc})") from None
@@ -832,14 +872,15 @@ def list_approvals(wd: Workdir, kind: str) -> list[dict]:
     if r.returncode != 0:
         return []
     out = []
+    prefix = _repo_prefix(wd)
     for sha in [ln.strip() for ln in r.stdout.splitlines() if ln.strip()]:
-        only = _only_added_file(wd, sha)
+        only = _only_added_file(wd, sha, prefix)
         if not only or not only.startswith(f".analysis/approvals/{kind}-"):
             continue
         if not _git_ok(wd, "merge-base", "--is-ancestor", sha, "HEAD"):
             continue
         try:
-            rec = json.loads(_git(wd, "show", f"{sha}:{only}").stdout)
+            rec = json.loads(_show_blob(wd, sha, only).stdout)
         except (ValueError, subprocess.SubprocessError):
             continue
         if isinstance(rec, dict) and rec.get("kind") == kind and _record_digest(rec):
