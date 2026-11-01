@@ -577,7 +577,7 @@ def cmd_evals(args) -> int:
             print("no correction evals matched: nothing to run")
             return 0
         for r in rec["results"]:
-            bound = "bound" if r.get("bound") else "unbound"
+            bound = "bound" if {m["case"]: m for m in rec["matched"]}.get(r["case"], {}).get("bound") else "unbound"
             note = (" -- " + r["note"]) if r.get("note") else ""
             print(r["case"] + " [" + bound + "]: " + r["status"] + note)
         for r in rec["failed_unbound"]:

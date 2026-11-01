@@ -428,16 +428,68 @@ def reviews_dir(wd: Workdir) -> Path:
 def existing_calls(wd: Workdir, stage: str) -> list[dict]:
     out = []
     base = reviews_dir(wd)
-    if not base.is_dir():
-        return out
-    for p in sorted(base.glob(f"{stage}-r*.json")):
-        try:
-            rec = json.loads(p.read_text(encoding="utf-8"))
-        except (ValueError, OSError):
+    if base.is_dir():
+        for p in sorted(base.glob(f"{stage}-r*.json")):
+            try:
+                rec = json.loads(p.read_text(encoding="utf-8"))
+            except (ValueError, OSError):
+                continue
+            if rec.get("format") == FORMAT_CALL and rec.get("stage") == stage:
+                out.append(rec)
+    # N2 backstop: review history is the lineage log, not the untracked
+    # working files. `.analysis/reviews/goldfish/*.json` is untracked, so
+    # `git clean -fdx` / `git stash -u` / `git reset --hard` delete the call
+    # files — but committed lineage `review` events and runs.log entries
+    # survive (deleting those breaks chain verification, which itself fails
+    # gates closed). Merge both so deleting the call files can never reset
+    # the re-run cap or launder a failed round with one passing re-run.
+    seen = {(str(c.get("round")), str(c.get("seq")),
+             str(c.get("provider_request_id"))) for c in out}
+    for ev in _lineage_and_chain_calls(wd, stage):
+        key = (str(ev.get("round")), str(ev.get("seq")),
+               str(ev.get("provider_request_id")))
+        if key in seen:
             continue
-        if rec.get("format") == FORMAT_CALL and rec.get("stage") == stage:
-            out.append(rec)
+        seen.add(key)
+        out.append(ev)
     return out
+
+
+def _lineage_and_chain_calls(wd: Workdir, stage: str) -> list[dict]:
+    """Goldfish review events from the lineage log and runs.log as call-shaped dicts."""
+    found: list[dict] = []
+    try:
+        from . import lineage as _lineage
+        lineage_evs = [e for e in _lineage.events(wd)
+                       if e.get("type") == "review" and e.get("kind") == "goldfish"
+                       and e.get("stage") == stage]
+    except Exception:
+        lineage_evs = []
+    chain_evs: list[dict] = []
+    try:
+        from . import ledger as _ledger
+        chain_evs = [e for e in chain.read_records(_ledger.runs_log(wd))
+                     if e.get("kind") == "goldfish" and e.get("stage") == stage]
+    except Exception:
+        chain_evs = []
+    for e in lineage_evs + chain_evs:
+        # `chain.append` overwrites a caller `seq` with the global chain
+        # position, so the per-stage call counter lives in `review_seq`
+        # (older entries coincide). The gate binds on (round, seq, packet,
+        # request), which these carry verbatim from the original call.
+        seq = e.get("review_seq", e.get("seq"))
+        try:
+            seq = int(seq)
+        except (TypeError, ValueError):
+            continue
+        found.append({"format": FORMAT_CALL, "stage": stage,
+                      "round": str(e.get("round") or ""),
+                      "seq": seq, "spec_hash": e.get("spec_hash"),
+                      "packet_hash": e.get("packet_hash"),
+                      "provider_request_id": e.get("request"),
+                      "verdict": e.get("verdict"), "model": e.get("model"),
+                      "backstop": "lineage-or-runs-log"})
+    return found
 
 
 def parse_verdicts(text: str, rounds: list[str]) -> dict[str, tuple[str, str]]:

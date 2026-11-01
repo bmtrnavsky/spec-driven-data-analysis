@@ -496,8 +496,11 @@ def match_evals(wd: Workdir) -> list[dict]:
     except DdaError:
         yes_tags = set()
     base = wd.root / "evals" / "corrections"
-    if not base.is_dir():
-        return []
+    # N1: no early return when the working dir is missing. Bound cases are
+    # enumerated from committed correction approvals (git history) above, so
+    # `rm -rf evals/corrections` cannot drop them — binding survives the
+    # deletion of the working copy by construction (M1.2). Only the
+    # unapproved-draft scan below depends on the working dir.
     # M1: bound cases are enumerated from committed correction approvals
     # (git history), never from the working-dir scan — an edited working
     # copy is an unapproved draft while the approved copy still binds. The
@@ -533,7 +536,8 @@ def match_evals(wd: Workdir) -> list[dict]:
     # approval loop already covered so an edited working copy cannot
     # shadow its approved payload.
     seen = {m["case"] for m in matched}
-    for d in sorted(p for p in base.iterdir() if p.is_dir()):
+    drafts_base = sorted(p for p in base.iterdir() if p.is_dir()) if base.is_dir() else []
+    for d in drafts_base:
         if d.name in seen:
             continue
         case = d / "case.md"
