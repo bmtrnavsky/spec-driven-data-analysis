@@ -58,13 +58,12 @@ try:
         g7 = False
     print("flag after restore:", flag, "| verify problems:", len(problems),
           "| G7:", "PASS" if g7 else "FAIL")
-    # Containment = the restore left tamper evidence (mirror ahead of the
-    # restored prefix) or the exposure flag survived. A clean verify with
-    # the flag gone means the exposure was laundered away.
+    # Containment is judged on the sticky flag ALONE: the pre-I12 guard is
+    # the broken-chain pin in lineage(), so a laundered flag is the exact
+    # failure. Problems are printed for forensics only.
     for p in problems[:3]:
         print("problem:", p[:160])
-    contained = bool(problems) or bool(flag)
-    finding("STICKY-HELD" if contained else "STICKY-FLIPPED-VULNERABLE")
+    finding("STICKY-HELD" if flag else "STICKY-FLIPPED-VULNERABLE")
 finally:
     shutil.rmtree(t0, ignore_errors=True)
     cleanup(f)

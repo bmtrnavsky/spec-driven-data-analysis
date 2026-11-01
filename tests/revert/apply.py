@@ -11,8 +11,25 @@ import ast
 from pathlib import Path
 
 
+# Reference impl -> conformance check run WHILE the revert is applied
+# (SPEC-504ed55 §3). A check exits 0 only when the reverted unit behaves
+# like its pre-fix self; anything else is INCOHERENT-REVERT, never a pass.
+CONFORMANCE = {
+    "tests/revert/impl/chain_append_locked_historic_d135783.py":
+        "tests/revert/conformance/check_chain_append_locked_historic.py",
+    "tests/revert/impl/chain_append_locked_no_M7.py":
+        "tests/revert/conformance/check_chain_append_locked_no_M7.py",
+    "tests/revert/impl/ledger_checkpoint_problems_none.py":
+        "tests/revert/conformance/check_ledger_checkpoint_problems_none.py",
+    "tests/revert/impl/lineage_lineage_no_pin.py":
+        "tests/revert/conformance/check_lineage_lineage_no_pin.py",
+    "tests/revert/impl/review_existing_calls_preN2.py":
+        "tests/revert/conformance/check_review_existing_calls_preN2.py",
+}
+
+
 class IncoherentRevert(Exception):
-    """The revert cannot be applied coherently: report, never run probes."""
+    """The reverted unit cannot be applied coherently: report, never run probes."""
 
 
 def _single_function(tree: ast.Module, func_name: str, where: str):

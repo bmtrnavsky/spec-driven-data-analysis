@@ -50,7 +50,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "scripts"))
 sys.path.insert(0, str(REPO / "tests"))
 
-from revert.apply import IncoherentRevert, apply_unit  # noqa: E402
+from revert.apply import CONFORMANCE, IncoherentRevert, apply_unit  # noqa: E402
 
 from tests.test_phase8 import P8Setup  # noqa: E402
 from tests.test_phase9 import P9Setup  # noqa: E402
@@ -653,38 +653,6 @@ class TestProbeRevertSensitivity(unittest.TestCase):
          ["n_gitamend_evals.py", "n_gitrebase_evals.py",
           "n_gitreset_evals.py", "n_gitupdate_evals.py",
           "n_filterbranch_evals.py", "n_prefix_evals.py"]),
-        ("pre-I6/N6/M7 no fail-closed chains",
-         {"scripts/ddalib/chain.py": [
-             ('        if mirror_seq > 0:\n            raise DdaError(\n'
-              '                f"{path}: file is missing or empty but the heads mirror records "',
-              '        if False:  # REVERT-TEST pre-N6 no fail-closed restart\n            raise DdaError(\n'
-              '                f"{path}: file is missing or empty but the heads mirror records "'),
-             ('        ckpt = _committed_checkpoint_seq(path)\n        if ckpt > 0:',
-              '        ckpt = _committed_checkpoint_seq(path)\n'
-              '        if False:  # REVERT-TEST pre-M7 no checkpoint fail-closed'),
-             ('        if not isinstance(heads, dict):\n            raise DdaError(\n'
-              '                f"{path}: {n} line(s) but no heads mirror records this chain "',
-              '        if False:  # REVERT-TEST pre-I6 no mirror-required append\n            raise DdaError(\n'
-              '                f"{path}: {n} line(s) but no heads mirror records this chain "'),
-             ('        ckpt = _committed_checkpoint_seq(path)\n        if ckpt > n:',
-              '        ckpt = _committed_checkpoint_seq(path)\n'
-              '        if False:  # REVERT-TEST pre-M7 no live-prefix checkpoint fail-closed'),
-             ('        if n != mirror_seq:',
-              '        if False:  # REVERT-TEST pre-I6 no anchored append'),
-             ('        if line_hash(last) != mirror_hash:',
-              '        if False:  # REVERT-TEST pre-I6 no mirror-hash check'),
-             ('    assert seq == mirror_seq + 1, (seq, mirror_seq)',
-              '    # REVERT-TEST pre-I6 no CAS anchor'),
-             ('    if mirror_seq > 0:\n        assert prev == heads.get("hash"), "mirror moved under the file lock"',
-              '    if False:  # REVERT-TEST pre-I6 no CAS anchor\n        assert prev == heads.get("hash"), "mirror moved under the file lock"'),
-             ('        elif hs > len(hashes):',
-              '        elif False:  # REVERT-TEST pre-I6 verify ignores truncation'),
-             ('        if heads and heads.get("seq", 0) > 0:\n'
-              '            problems.append(f"{path.name}: file missing but heads mirror records seq {heads[\'seq\']}")',
-              '        if False:  # REVERT-TEST pre-N6 verify ignores deletion\n'
-              '            problems.append(f"{path.name}: file missing but heads mirror records seq {heads[\'seq\']}")')]},
-         ["n_gitstash_chain.py", "n_gitclean_chain.py",
-          "n_prefix_sticky.py"]),
         ("pre-N10 no git-op verdict",
          {"scripts/ddalib/hooks.py": [
              ('    gv = _git_op_verdict(code) if code else None',
@@ -752,6 +720,14 @@ class TestProbeRevertSensitivity(unittest.TestCase):
     # paths relative to the repo root; the impl file holds exactly the
     # replacement function, located BY FUNCTION NAME via the AST.
     FUNC_SCENARIOS = [
+        ("pre-I6/N6/M7 no fail-closed append",
+         [{"module": "scripts/ddalib/chain.py", "func": "_append_locked",
+           "impl": "tests/revert/impl/chain_append_locked_historic_d135783.py"}],
+         ["n_gitstash_chain.py", "n_gitclean_chain.py"]),
+        ("pre-I12 no broken-chain pin",
+         [{"module": "scripts/ddalib/lineage.py", "func": "lineage",
+           "impl": "tests/revert/impl/lineage_lineage_no_pin.py"}],
+         ["n_prefix_sticky.py"]),
         ("pre-N2 no lineage backstop",
          [{"module": "scripts/ddalib/review.py", "func": "existing_calls",
            "impl": "tests/revert/impl/review_existing_calls_preN2.py"}],
@@ -786,6 +762,36 @@ class TestProbeRevertSensitivity(unittest.TestCase):
                             REPO, u["module"], u["func"], u["impl"]))
                 except IncoherentRevert as e:
                     failures.append(f"[{label}] INCOHERENT-REVERT: {e}")
+                    continue
+                coherent = True
+                for u in units:
+                    check = CONFORMANCE.get(u["impl"])
+                    if check is None:
+                        failures.append(
+                            f"[{label}] INCOHERENT-REVERT: no conformance "
+                            f"check recorded for {u['impl']}")
+                        coherent = False
+                        continue
+                    try:
+                        c = subprocess.run(
+                            [sys.executable, str(REPO / check)],
+                            capture_output=True, text=True, env=env,
+                            cwd=str(REPO), timeout=600)
+                    except subprocess.TimeoutExpired:
+                        failures.append(f"[{label}] INCOHERENT-REVERT: "
+                                        f"{check} TIMEOUT")
+                        coherent = False
+                        continue
+                    tail = (c.stdout + c.stderr).strip().splitlines()[-1:]
+                    print(f"[revert:{label}] conformance {Path(check).name} "
+                          f"rc={c.returncode} :: "
+                          + " | ".join(t[:160] for t in tail))
+                    if c.returncode != 0:
+                        failures.append(
+                            f"[{label}] INCOHERENT-REVERT: {check} rc={c.returncode}; "
+                            f"the reverted unit does not behave like its pre-fix self")
+                        coherent = False
+                if not coherent:
                     continue
                 for name in probes:
                     probe = REPO / "tests" / "probes" / name

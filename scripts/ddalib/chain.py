@@ -351,9 +351,15 @@ def _append_locked(path: Path, record: dict) -> dict:
     # CAS on the mirror: the new entry extends exactly the head we anchored
     # on (new.seq == old.seq+1, new.prev == old.hash). The file lock held
     # across read and write makes this atomic against other appenders.
-    assert seq == mirror_seq + 1, (seq, mirror_seq)
-    if mirror_seq > 0:
-        assert prev == heads.get("hash"), "mirror moved under the file lock"
+    # Raises (never asserts: asserts vanish under `python -O`) on a move.
+    if seq != mirror_seq + 1:
+        raise DdaError(
+            f"{path}: mirror moved during append (wrote seq {seq} but anchored "
+            f"on mirror seq {mirror_seq}); run `dda verify-chain` (§3.2 case 8)")
+    if mirror_seq > 0 and prev != heads.get("hash"):
+        raise DdaError(
+            f"{path}: mirror moved under the file lock; run `dda verify-chain` "
+            f"(§3.2 case 8)")
     _write_json_atomic(heads_path(path), {"seq": seq, "hash": line_hash(line), "file": canonical_path(path)})
     return rec
 
