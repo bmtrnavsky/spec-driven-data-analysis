@@ -5,7 +5,9 @@ Gates call `require(wd, gate)` and nothing else — no gate may call
 at PUBLISH and `"unverified_ok"` below it: below PUBLISH an UNVERIFIED or
 DOWNGRADED approval is disclosed and passes; anything else (MISSING,
 UNCOMMITTED, STALE, BAD_SIG, UNKNOWN_SIGNER) fails everywhere, and at
-PUBLISH only VERIFIED passes.
+PUBLISH only a human state passes: VERIFIED (signed) or CONFIRMED
+(Telegram confirmation from an approver's account) — equivalent at every
+tier.
 """
 from __future__ import annotations
 
@@ -117,8 +119,10 @@ def tier_of(wd: Workdir) -> str:
 
 
 def _acceptable(state: str, tier: str) -> bool:
-    from .approvals import ApprovalState
-    if state == ApprovalState.VERIFIED.value:
+    from .approvals import ApprovalState, HUMAN_STATES
+    # VERIFIED (signed) and CONFIRMED (Telegram) are both a human's own
+    # approval and pass at every tier, PUBLISH included.
+    if state in HUMAN_STATES:
         return True
     if tier != "PUBLISH" and state in (ApprovalState.UNVERIFIED.value, ApprovalState.DOWNGRADED.value):
         return True
@@ -154,16 +158,18 @@ def require(wd: Workdir, gate: str, kinds: tuple[str, ...] | None = None) -> tup
             v = _approvals.verify_approval(wd, kind, digest)
             ok = _acceptable(v["state"], tier)
             items.append({"kind": kind, "digest": v.get("digest"), "state": v["state"],
-                          "ok": ok, "reason": v["reason"]})
+                          "ok": ok, "reason": v["reason"], "method": v.get("method"),
+                          "method_label": _approvals.method_label(v)})
         info["items"].extend(items)
         rep = next((i for i in items if i["ok"]), items[0] if items else None)
         if rep is None:
             continue
         if rep["ok"]:
-            if rep["state"] != "verified":
+            if rep["state"] not in _approvals.HUMAN_STATES:
                 notes.append(f"{rep['kind']} approval {rep['state']} (disclosed at {tier})")
             else:
-                notes.append(f"{rep['kind']} approval verified ({str(rep.get('digest') or '')[:12]})")
+                notes.append(f"{rep['kind']} approval {rep['state']} "
+                             f"({str(rep.get('digest') or '')[:12]}; {rep.get('method_label')})")
         else:
             failed.append(f"{rep['kind']}: {rep['reason']}")
     # EXPLORE G4 discloses a missing config instead of failing (legacy

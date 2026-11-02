@@ -577,7 +577,7 @@ def match_evals(wd: Workdir) -> list[dict]:
         verdict = _approvals.verify_approval(wd, "correction", digest)
         state = _approvals.ApprovalState(verdict.get("state", "missing"))
         V = _approvals.ApprovalState
-        bound = state == V.VERIFIED or (comp.tier != "PUBLISH"
+        bound = state in (V.VERIFIED, V.CONFIRMED) or (comp.tier != "PUBLISH"
                                         and state in (V.UNVERIFIED, V.DOWNGRADED, V.STALE))
         matched.append({"case": case_id, "triggers": hit, "bound": bound,
                         "verified": bool(verdict.get("verified")),
@@ -664,7 +664,7 @@ def match_evals(wd: Workdir) -> list[dict]:
         reason = str(verdict.get("reason", ""))
         state = _approvals.ApprovalState(verdict.get("state", "missing"))
         V = _approvals.ApprovalState
-        bound = state == V.VERIFIED or (comp.tier != "PUBLISH"
+        bound = state in (V.VERIFIED, V.CONFIRMED) or (comp.tier != "PUBLISH"
                                         and state in (V.UNVERIFIED, V.DOWNGRADED, V.STALE))
         matched.append({"case": d.name, "triggers": hit, "bound": bound,
                         "verified": bool(verdict.get("verified")),

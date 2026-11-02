@@ -18,8 +18,23 @@ gates execute the approved copy read from git (`approved_payload`), never
 the working copy.
 
 `verify_approval` returns a typed `ApprovalState` — MISSING, UNCOMMITTED,
-STALE, BAD_SIG, UNKNOWN_SIGNER, DOWNGRADED, UNVERIFIED, VERIFIED. Callers
-match the enum, never reason substrings. `do_approved` records
+STALE, BAD_SIG, UNKNOWN_SIGNER, DOWNGRADED, UNVERIFIED, CONFIRMED, VERIFIED.
+Callers match the enum, never reason substrings.
+
+Two human methods are first-class (`HUMAN_STATES`), accepted at every tier
+including PUBLISH:
+
+- VERIFIED: the commit is signed by an approver key (desktop: the key
+  passphrase or FIDO touch is the proof of presence).
+- CONFIRMED: Brad confirmed the exact digest from his signed-in Telegram
+  account (`dda approve <kind> --telegram USER_ID MESSAGE_ID`). The account
+  is the proof of presence; no passphrase. The record carries the Telegram
+  user id, the message id verbatim (auditable against the chat), the
+  confirmation time, the kind, and the digest, and the user id must be a
+  configured approver's `telegram_user_id`.
+
+UNVERIFIED (`--no-sign`) stays the agent's own claim: disclosed below
+PUBLISH, refused at PUBLISH. `do_approved` records
 (kind, digest, commit, state) in `approvals.index.jsonl`, which the footer
 reads.
 """
@@ -52,7 +67,47 @@ class ApprovalState(str, enum.Enum):
     UNKNOWN_SIGNER = "unknown_signer"  # signer matches no approver
     DOWNGRADED = "downgraded"      # doctor key checks fail right now
     UNVERIFIED = "unverified"      # unsigned (agent could have produced it)
+    CONFIRMED = "confirmed"        # confirmed by an approver's Telegram account, covers current state
     VERIFIED = "verified"          # signed by an approver, covers current state
+
+
+# States that carry a human's own approval. Both are accepted at every
+# tier, PUBLISH included (Brad's call: a signed-in Telegram account counts
+# the same as the key passphrase at the desktop).
+HUMAN_STATES = frozenset({ApprovalState.VERIFIED.value, ApprovalState.CONFIRMED.value})
+
+METHOD_SIGNED = "signed"
+METHOD_TELEGRAM = "telegram"
+METHOD_UNSIGNED = "unsigned"
+_TG_ID_RE = re.compile(r"^[1-9][0-9]{0,19}$")
+
+
+def is_human(state) -> bool:
+    """True for a state that carries a human's own approval (VERIFIED/CONFIRMED)."""
+    return getattr(state, "value", state) in HUMAN_STATES
+
+
+def telegram_approver(approvers: list, user_id) -> str | None:
+    """Approver name whose `telegram_user_id` EQUALS `user_id` (exact), else None."""
+    uid = str(user_id or "").strip()
+    if not _TG_ID_RE.match(uid):
+        return None
+    for a in approvers or []:
+        if isinstance(a, dict) and str(a.get("telegram_user_id") or "").strip() == uid:
+            return a.get("name")
+    return None
+
+
+def method_label(verdict: dict) -> str:
+    """How an approval was made, for `dda approved` and the index record."""
+    tg = verdict.get("telegram") if isinstance(verdict.get("telegram"), dict) else None
+    if verdict.get("method") == METHOD_TELEGRAM and tg:
+        return f"Telegram user {tg.get('user_id')}, message {tg.get('message_id')}"
+    if verdict.get("method") == METHOD_SIGNED:
+        return f"signed by {verdict.get('signer') or 'an unmatched key'}"
+    if verdict.get("method") == METHOD_UNSIGNED:
+        return "unsigned (--no-sign: no signature, no Telegram confirmation)"
+    return "no approval method on record"
 
 
 def approvals_dir(wd: Workdir) -> Path:
@@ -445,14 +500,31 @@ def fingerprints_of(approvers: list) -> list[str]:
 # ---------- dda approve ----------
 
 def do_approve(wd: Workdir, kind: str, artifact: str | None = None,
-               key: str | None = None, sign: bool = True, message: str | None = None) -> dict:
+               key: str | None = None, sign: bool = True, message: str | None = None,
+               telegram: tuple[str, str] | None = None) -> dict:
     """Compute the content digest, embed the canonical payload, commit it.
 
     `artifact`, when given, is a selector (correction case id, definition
     name) or must equal the computed digest — free-form tokens are rejected.
+
+    `telegram=(user_id, message_id)` records a Telegram confirmation: the
+    commit is not signed (no passphrase on this path) and the record carries
+    the method, user id, message id verbatim, timestamp, kind, and digest.
+    The user id must be a configured approver's `telegram_user_id`.
     """
     wd.require_initialized()
     check_kind_artifact(kind, artifact)
+    tg_block = None
+    if telegram is not None:
+        if not sign or key:
+            raise DdaError("--telegram cannot be combined with --no-sign or --key: a Telegram "
+                           "confirmation is its own method, never a signed or unsigned commit")
+        tg_user, tg_msg = (str(telegram[0]).strip(), str(telegram[1]).strip())
+        if not _TG_ID_RE.match(tg_user):
+            raise DdaError(f"--telegram user id must be a numeric Telegram user id, got {tg_user!r}")
+        if not _TG_ID_RE.match(tg_msg):
+            raise DdaError(f"--telegram message id must be the numeric id of Brad's confirming "
+                           f"message, got {tg_msg!r}")
     selector = artifact if kind in ("correction", "definition") else None
     digest, payload = canonical_payload(wd, kind, selector)
     if artifact is not None and kind not in ("correction", "definition"):
@@ -466,6 +538,15 @@ def do_approve(wd: Workdir, kind: str, artifact: str | None = None,
     short = digest[:16]
     rel = approval_rel(kind, short)
     path = approval_path(wd, kind, short)
+    if telegram is not None:
+        who = telegram_approver(cfg.get("approvers") or [], tg_user)
+        if not who:
+            raise DdaError(f"Telegram user {tg_user} is not a configured approver: add "
+                           f"`telegram_user_id: \"{tg_user}\"` to an approver in config.yaml "
+                           "(and approve that config) before confirming over Telegram")
+        tg_block = {"user_id": tg_user, "message_id": tg_msg, "approver": who,
+                    "confirmed_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                    "kind": kind, "digest": digest}
     record = {
         "format": FORMAT,
         "kind": kind,
@@ -479,7 +560,10 @@ def do_approve(wd: Workdir, kind: str, artifact: str | None = None,
         "approvers": cfg.get("approvers") or [],
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "note": message or "",
+        "method": METHOD_TELEGRAM if tg_block else (METHOD_SIGNED if sign else METHOD_UNSIGNED),
     }
+    if tg_block:
+        record["telegram"] = tg_block
     if path.is_file():
         try:
             if json.loads(path.read_text(encoding="utf-8")).get("digest") == digest:
@@ -498,16 +582,23 @@ def do_approve(wd: Workdir, kind: str, artifact: str | None = None,
     from . import ledger as _ledger
     trailers = _ledger.chain_head_trailers(wd)  # M7: pin chain lengths in the commit message
     msg = message or f"dda approve {kind} {short}"
+    if tg_block:
+        # Verbatim, so the commit itself names the chat message to audit.
+        trailers = [f"Dda-Approval-Method: {METHOD_TELEGRAM}",
+                    f"Dda-Telegram-User: {tg_block['user_id']}",
+                    f"Dda-Telegram-Message: {tg_block['message_id']}"] + list(trailers or [])
     if trailers:
         msg = msg + "\n\n" + "\n".join(trailers)
     _git(wd, "add", "--", rel)
     pre: list[str] = []
     cmd = ["commit"]
-    if sign:
+    if sign and not tg_block:
         cmd.append("-S")
         if key:
             cmd.append(f"--gpg-sign={key}")
     else:
+        pre += ["-c", "commit.gpgsign=false", "-c", "tag.gpgSign=false"]
+    if tg_block:
         pre += ["-c", "commit.gpgsign=false", "-c", "tag.gpgSign=false"]
     if not _git(wd, "config", "--get", "user.email").stdout.strip():
         pre += ["-c", "user.name=dda", "-c", "user.email=dda@localhost"]
@@ -515,7 +606,7 @@ def do_approve(wd: Workdir, kind: str, artifact: str | None = None,
     r = _git(wd, *pre, *cmd)
     if r.returncode != 0:
         err = (r.stderr or r.stdout).strip()[-400:]
-        if sign:
+        if sign and not tg_block:
             raise DdaError(f"signing the approval commit failed ({err}); configure the approver key "
                            f"or re-run with --no-sign to record an unverified approval")
         raise DdaError(f"committing the approval failed ({err})")
@@ -526,7 +617,8 @@ def do_approve(wd: Workdir, kind: str, artifact: str | None = None,
         raise DdaError(f"approval commit {sha[:12]} touches more than {rel}; "
                        "an approval commit must add exactly one approval file (§4.5)")
     return {"kind": kind, "artifact": digest, "digest": digest, "file": rel,
-            "commit": sha, "signed": sign}
+            "commit": sha, "signed": sign and not tg_block, "method": record["method"],
+            "telegram": tg_block}
 
 
 def _only_added_file(wd: Workdir, sha: str, prefix: str | None = None) -> str | None:
@@ -583,6 +675,39 @@ def _signer_fields(wd: Workdir, sha: str) -> tuple[bool, list[str]]:
     return sig_ok, fields
 
 
+def _commit_trailers(wd: Workdir, sha: str) -> dict[str, str]:
+    body = _git(wd, "log", "-1", "--format=%B", sha).stdout
+    out: dict[str, str] = {}
+    for ln in body.splitlines():
+        m = re.match(r"^(Dda-[A-Za-z-]+):\s*(.*?)\s*$", ln)
+        if m and m.group(1) not in out:
+            out[m.group(1)] = m.group(2)
+    return out
+
+
+def _telegram_problem(wd: Workdir, rec: dict, sha: str, digest: str | None) -> str | None:
+    """Why a telegram-method record is malformed, else None.
+
+    The record block must bind this exact kind and digest, both ids must be
+    numeric, and the commit trailers must repeat the ids verbatim.
+    """
+    tg = rec.get("telegram")
+    if not isinstance(tg, dict):
+        return "telegram method but no telegram block"
+    uid, mid = str(tg.get("user_id") or ""), str(tg.get("message_id") or "")
+    if not _TG_ID_RE.match(uid) or not _TG_ID_RE.match(mid):
+        return "telegram user/message ids are not numeric"
+    if tg.get("kind") != rec.get("kind") or tg.get("digest") != digest:
+        return "telegram confirmation does not bind this kind and digest"
+    if not tg.get("confirmed_at"):
+        return "telegram confirmation has no timestamp"
+    t = _commit_trailers(wd, sha)
+    if (t.get("Dda-Approval-Method") != METHOD_TELEGRAM or t.get("Dda-Telegram-User") != uid
+            or t.get("Dda-Telegram-Message") != mid):
+        return "commit trailers do not repeat the telegram user and message ids"
+    return None
+
+
 def _config_chain(wd: Workdir) -> tuple[dict[str, dict], list[str]]:
     """Walk every config approval commit oldest-first.
 
@@ -612,12 +737,29 @@ def _config_chain(wd: Workdir) -> tuple[dict[str, dict], list[str]]:
         if not digest:
             continue
         sig_ok, fields = _signer_fields(wd, sha)
-        entries.append({"sha": sha, "digest": digest,
+        tg_uid = None
+        if rec.get("method") == METHOD_TELEGRAM and _telegram_problem(wd, rec, sha, digest) is None:
+            tg_uid = rec["telegram"]["user_id"]
+        entries.append({"sha": sha, "digest": digest, "tg_uid": tg_uid,
                         "approvers": rec.get("approvers") or [], "sig_ok": sig_ok, "fields": fields})
     by_digest: dict[str, dict] = {}
     problems: list[str] = []
     prev_approvers: list | None = None
     for e in entries:
+        if e["tg_uid"]:
+            # Telegram confirmation: the account stands in for the key. Same
+            # chain rule — TOFU against its own snapshot, then the previous set.
+            ref = e["approvers"] if prev_approvers is None else prev_approvers
+            name = telegram_approver(ref, e["tg_uid"])
+            ok = bool(name)
+            if not ok:
+                problems.append(f"{e['sha'][:12]}: Telegram user {e['tg_uid']} not in the "
+                                + ("approval's own approver snapshot" if prev_approvers is None
+                                   else "previous approved approver set"))
+            by_digest[e["digest"]] = {"commit": e["sha"], "signer": name, "sig_ok": False,
+                                      "verified": ok}
+            prev_approvers = e["approvers"]
+            continue
         name = approver_matches(e["approvers"], *e["fields"])
         if not e["sig_ok"] and not e["fields"]:
             problems.append(f"{e['sha'][:12]}: unsigned (agent could have produced it)")
@@ -686,8 +828,8 @@ def _resolve_record(wd: Workdir, kind: str, ref: str | None) -> tuple[dict | Non
 def verify_approval(wd: Workdir, kind: str, artifact: str | None = None) -> dict:
     """Check an approval without recording. Returns a typed verdict dict.
 
-    `state` is an `ApprovalState` value; `verified` is True only for
-    VERIFIED. Payload/digest comparison uses the committed copy read from
+    `state` is an `ApprovalState` value; `verified` is True only for the
+    human states (VERIFIED, CONFIRMED). `method` says how it was approved. Payload/digest comparison uses the committed copy read from
     git, never the worktree file.
     """
     from . import doctor as _doctor
@@ -792,6 +934,35 @@ def verify_approval(wd: Workdir, kind: str, artifact: str | None = None) -> dict
                     commit=sha, digest=digest, sig_ok=sig_ok)
     signer = approver_matches(approvers, *fields)
     chain_note = ""
+    if rec.get("method") == METHOD_TELEGRAM:
+        problem = _telegram_problem(wd, rec, sha, digest)
+        tg = rec.get("telegram") if isinstance(rec.get("telegram"), dict) else {}
+        extra = {"commit": sha, "digest": digest, "sig_ok": sig_ok,
+                 "method": METHOD_TELEGRAM, "telegram": tg or None}
+        if problem:
+            return fail(ApprovalState.BAD_SIG, f"{rel}: malformed Telegram confirmation ({problem})",
+                        **extra)
+        uid, mid = tg["user_id"], tg["message_id"]
+        if kind == "config":
+            by_digest, problems = _config_chain(wd)
+            entry = by_digest.get(digest or "")
+            if entry is None or not entry["verified"]:
+                detail = "; ".join(problems[-2:]) if problems else "chain walk failed"
+                return fail(ApprovalState.UNKNOWN_SIGNER,
+                            f"config approver chain does not verify ({detail})", **extra)
+            who = entry["signer"]
+        else:
+            who = telegram_approver(approvers, uid)
+        if not who:
+            return fail(ApprovalState.UNKNOWN_SIGNER,
+                        f"Telegram user {uid} matches no approver telegram_user_id in config.yaml",
+                        **extra)
+        # No doctor key checks: they guard keys an agent could borrow, and
+        # this path uses no key (the signed-in account is the proof).
+        return {**base, **extra, "state": ApprovalState.CONFIRMED.value, "verified": True,
+                "signer": who,
+                "reason": (f"confirmed: {kind} {(digest or '')[:12]} by {who} via Telegram user "
+                           f"{uid}, message {mid} at {tg.get('confirmed_at')}")}
     if unsigned:
         # SPEC §4.5: an unsigned approval file is recorded as unverified,
         # whether or not the config names approvers — the agent could have
@@ -799,8 +970,9 @@ def verify_approval(wd: Workdir, kind: str, artifact: str | None = None) -> dict
         # cryptographic claim to evaluate.
         return fail(ApprovalState.UNVERIFIED,
                     f"commit {sha[:12]} is unsigned (agent could have produced it); "
-                    f"a human must sign from a trusted key (§4.5)",
-                    commit=sha, digest=digest, signer=signer, sig_ok=sig_ok)
+                    f"a human must sign from a trusted key or confirm over Telegram (§4.5)",
+                    commit=sha, digest=digest, signer=signer, sig_ok=sig_ok,
+                    method=METHOD_UNSIGNED)
     if kind == "config":
         by_digest, problems = _config_chain(wd)
         entry = by_digest.get(digest or "")
@@ -832,7 +1004,7 @@ def verify_approval(wd: Workdir, kind: str, artifact: str | None = None) -> dict
                     commit=sha, digest=digest, signer=signer, sig_ok=sig_ok)
     short = (digest or "")[:12]
     return {**base, "state": ApprovalState.VERIFIED.value, "verified": True, "commit": sha,
-            "digest": digest, "signer": signer, "sig_ok": sig_ok,
+            "digest": digest, "signer": signer, "sig_ok": sig_ok, "method": METHOD_SIGNED,
             "reason": f"verified: {kind} {short} signed by {signer or 'an approver'}{chain_note}"}
 
 
@@ -900,6 +1072,7 @@ def do_approved(wd: Workdir, kind: str, artifact: str | None = None) -> dict:
         "digest": verdict.get("digest"), "commit": verdict.get("commit"),
         "signer": verdict.get("signer"), "sig_ok": verdict.get("sig_ok"),
         "verified": verdict["verified"], "state": verdict["state"],
+        "method": verdict.get("method"), "telegram": verdict.get("telegram"),
         "reason": verdict["reason"],
     }
     # N7: embed the canonical payload so a later history rewrite (`git
@@ -962,9 +1135,9 @@ def config_status(wd: Workdir) -> dict:
     base = {"config_hash": ch, "approvers": approvers, "fingerprints": fps}
     verdict = verify_approval(wd, "config", ch)
     state = verdict["state"]
-    if state == ApprovalState.VERIFIED.value:
+    if state in HUMAN_STATES:
         return {**base, "state": state,
-                "detail": f"commit {str(verdict.get('commit') or '')[:12]}",
+                "detail": f"commit {str(verdict.get('commit') or '')[:12]}; {method_label(verdict)}",
                 "record": latest_record(wd, "config", ch)}
     if state == ApprovalState.MISSING.value:
         return {**base, "state": state, "detail": "no config approval for this config hash"}
@@ -972,7 +1145,7 @@ def config_status(wd: Workdir) -> dict:
             "record": latest_record(wd, "config", ch)}
 
 
-__all__ = ["KINDS", "ApprovalState", "approvals_dir", "approval_rel", "approval_path",
+__all__ = ["KINDS", "ApprovalState", "HUMAN_STATES", "is_human", "method_label", "telegram_approver", "approvals_dir", "approval_rel", "approval_path",
            "check_kind_artifact", "current_artifact", "current_digest", "canonical_payload",
            "canonical_case", "release_reports", "approved_payload", "list_approvals",
            "do_approve", "do_approved", "verify_approval", "latest_record",

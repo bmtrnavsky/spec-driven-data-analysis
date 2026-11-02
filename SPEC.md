@@ -160,7 +160,7 @@ judgment), G (goldfish), H (human artifact, §4.5), K (hook).
 | 0 | Intake | `intake` | intake block | G0: question stated as one sentence; decision it informs named (or "none — EXPLORE") | A |
 | 1 | Define | `define`, `definitions` | `.analysis/spec.md` | G1: every Metrics line matches the pins-only grammar (one registry pin `name@version#hash`, hash recomputes, optional alias reference and formula-free prose); sources named by config alias; hypotheses, "what would change the answer", exclusions, and prior exposure stated; prose formulas elsewhere warn, never fail | S, K |
 | 2 | Economy+Tier | `define` | two sentences in spec | G2: rung and tier declared; overrides and tier triggers applied (§2.2); human tier confirmation present when required | S, H |
-| 3 | Teardown (pre-data) | `goldfish-review` | `.analysis/reviews/goldfish/teardown.md` | G3: tier-scaled rounds recorded from `dda review run` calls (§5.0); at DECIDE, a human spec approval for this spec hash (verified, or unverified and disclosed); at PUBLISH, verified only (§4.5) | S, G, H |
+| 3 | Teardown (pre-data) | `goldfish-review` | `.analysis/reviews/goldfish/teardown.md` | G3: tier-scaled rounds recorded from `dda review run` calls (§5.0); at DECIDE, a human spec approval for this spec hash (verified, or unverified and disclosed); at PUBLISH, verified or Telegram-confirmed only (§4.5) | S, G, H |
 | 4 | Lock | `lock` | `specs/vN.md`, `spec.lock`, ledger entry, git commit | G4: lock hash recomputes (spec + definition pins + config hash + source aliases); a `config` approval exists for this config hash, signed through the approver chain (§4.5; verified required at DECIDE+, unapproved config disclosed at EXPLORE); evidence chains verify; `runs.log`, the audit log, and the unbound-access log (§6.0) show no non-metadata reads of these aliases before this lock, otherwise the lock is labelled post-data | S, K, H |
 | 5 | Profile (first data contact) | `profile` | `.analysis/profile.md` | G5: snapshot or fingerprint recorded per source (§10.3); schema compared with declared expectations; mismatch filed as amendment | S, A |
 | 6 | Analyze | `analyze` | variant scripts, outputs, `runs.log`, `specs-tried.jsonl` | G6: every data-touching run maps to a variant id (no orphan runs); every kernel record is IPC-imported with a policy hash bound to the run's lock hash and pairs with a parent-appended `kernel-start`; every variant beyond the locked one has a ledger entry with a reason; hook heartbeat complete (§6.8) | S, K |
@@ -209,6 +209,8 @@ editing the spec is not.
 8. An evidence chain fails to verify (§4.4) or a hook fault is detected
    (§6.8).
 9. A PUBLISH gate (G3 or G8) has only an unverified approval (§4.5).
+   Signed (VERIFIED) and Telegram-confirmed (CONFIRMED) approvals both
+   satisfy it.
 10. The approver chain fails to verify, or `dda doctor` downgrades
     approvals because a signing key is reachable from the agent (§4.5).
 
@@ -384,12 +386,53 @@ An approval must be something the agent cannot produce.
 
 - **Format.** An approval is a git commit, made by an approver in their
   own terminal with `dda approve <kind> <artifact>`, that adds exactly one
-  file, `.analysis/approvals/<kind>-<artifact-hash>.json`, and is
-  **signed**. Kinds: `tier`, `spec`, `amendment`, `signoff`,
+  file, `.analysis/approvals/<kind>-<artifact-hash>.json`, and carries a
+  human proof of presence: a **signature** (desktop) or a **Telegram
+  confirmation** (phone), see "Two approval methods" below. Kinds: `tier`, `spec`, `amendment`, `signoff`,
   `definition`, `correction`, `config`. These files are not a hash chain.
   When `dda approved` verifies one, it appends the commit sha, signer
   fingerprint, kind, and artifact hash to the chained
   `approvals.index.jsonl` (§4.4), so a later deletion is visible.
+- **Two approval methods.** Both are a human's own approval and count the
+  same at every tier, PUBLISH included. `dda approved` always prints which
+  one was used, so the record says how it was approved.
+
+  | Where Brad is | Command | Proof of presence | State |
+  |---|---|---|---|
+  | Desktop | `dda approve <kind> [--key K]` | the key passphrase (or FIDO touch) for a signed commit | **VERIFIED** — `VERIFIED - signed by brad` |
+  | Telegram | `dda approve <kind> --telegram <user_id> <message_id>` | his signed-in Telegram account; no passphrase | **CONFIRMED** — `CONFIRMED - Telegram user 8919091876, message 8441` |
+
+  - The Telegram path never asks for a passphrase. Brad sees the kind and
+    digest in the chat and replies to confirm; `--telegram` records the
+    approval with his Telegram user id, the confirming message id
+    **verbatim** (so it can be checked against the chat afterwards), the
+    confirmation timestamp, the kind, and the exact digest confirmed. The
+    commit repeats the ids as `Dda-Approval-Method`, `Dda-Telegram-User`
+    and `Dda-Telegram-Message` trailers.
+  - The user id must equal an approver's `telegram_user_id` in
+    `config.yaml` (Brad: `8919091876`), so a Telegram approver is added the
+    same way as a key: through an approved config (approver chain below).
+    An unknown id is refused at `dda approve` and reads UNKNOWN_SIGNER at
+    `dda approved`. A record claiming the Telegram method without matching
+    ids, kind, digest, timestamp and commit trailers is BAD_SIG.
+  - `dda doctor`'s key checks guard keys an agent could borrow; they do
+    not downgrade a CONFIRMED approval, which uses no key.
+  - `--telegram` is not `--no-sign`. The two cannot be combined, and
+    `--no-sign` remains the agent's own claim (see "Unverified approvals").
+    The agent never runs `dda approve` either way (`lockguard` blocks it);
+    the Telegram path is run by whatever relays Brad's confirmation, with
+    the message id taken from Brad's own message. The message id is the
+    audit handle: a CONFIRMED record whose message does not exist in the
+    chat, or is not Brad's confirmation of that digest, is a forgery.
+  - Config: approvers take `telegram_user_id` alongside (or instead of)
+    `fingerprint`/`key`/`key_id`:
+
+    ```yaml
+    approvers:
+      - name: brad
+        fingerprint: SHA256:...
+        telegram_user_id: "8919091876"
+    ```
 - **Approver chain (root of trust).** Approver keys live in
   `config.yaml` under `approvers`, which only a string-match hook guards,
   so the key list is never trusted on its own:
@@ -433,20 +476,24 @@ An approval must be something the agent cannot produce.
   `git -c commit.gpgsign=false -c tag.gpgSign=false commit …`, so they
   never prompt, never hang under cron, and never borrow an approver key.
 - `dda approved <kind> <artifact>` checks: the signature
-  (`git verify-commit`); the signer against the approver chain; that the
+  (`git verify-commit`) — or, for a Telegram confirmation, the recorded
+  user id, message id, kind, digest and trailers; the signer (or Telegram
+  user) against the approver chain; that the
   commit adds only that one approval file; that it is reachable from the
   current branch; that the artifact hash matches the current artifact
   (an approval of spec v2 does not cover v3); and that `dda doctor`'s
-  key checks pass now.
+  key checks pass now (signed approvals only).
 - `lockguard` blocks agent runs of `git commit -S`, `git tag -s`,
   `git -c commit.gpgsign=true`, and `dda approve`, and `evidenceguard`
   blocks agent writes to `approvals/` and `approvals.index.jsonl`.
 - **Unverified approvals.** With no key, or after a doctor downgrade,
-  an approval file can be committed unsigned. It is recorded as
-  **unverified** and the footer says "human approval unverified (agent
-  could have produced it)". Unverified satisfies G3 and G4 at DECIDE,
-  with that disclosure. It **never** satisfies any gate at PUBLISH: a
-  PUBLISH analysis with only unverified approvals parks (§3.2, case 9).
+  an approval file can be committed unsigned (`--no-sign`, no Telegram
+  confirmation). It is recorded as **unverified** and the footer says
+  "human approval unverified (agent could have produced it)". Unverified
+  satisfies G3 and G4 at DECIDE, with that disclosure. It **never**
+  satisfies any gate at PUBLISH: a PUBLISH analysis with only unverified
+  approvals parks (§3.2, case 9). A CONFIRMED (Telegram) approval is not
+  unverified and does satisfy PUBLISH.
 
 ## 5. Review rounds (elephant / goldfish)
 

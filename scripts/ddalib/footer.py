@@ -302,7 +302,7 @@ def skeleton(wd: Workdir, short: bool = False) -> str:
                    f"approver fingerprints: {', '.join(exp['fingerprints']) or 'none configured'}; "
                    f"goldfish: {review_summary(wd)}"),
         "approvals": (f"config {(exp['config_hash'] or '')[:12]}: {exp['config_approval'] or 'unknown'}; "
-                      "other kinds verified or unverified per approvals.index.jsonl"),
+                      "other kinds verified (signed), confirmed (Telegram), or unverified per approvals.index.jsonl"),
         # Author-filled fields: fillable non-empty defaults so a fresh skeleton
         # verifies; the author replaces them with the report's real content.
         "question": _skeleton_question(wd),

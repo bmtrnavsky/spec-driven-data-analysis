@@ -157,12 +157,31 @@ python scripts/dda.py report .
 python scripts/dda.py approve report answer.md .   # signed, in your own terminal
 ```
 
+### Approving: desktop or Telegram
+
+Every approval is yours, made one of two ways. Both count the same at every
+tier, PUBLISH included:
+
+- **At the desktop**, `dda approve <kind>` signs the commit, so git asks for your
+  key passphrase (or a FIDO touch). `dda approved` prints
+  `VERIFIED - signed by brad`.
+- **On Telegram**, your signed-in account is the proof, and there is no
+  passphrase. You confirm the kind and digest in the chat, and the approval is
+  recorded with `dda approve <kind> --telegram <your_user_id> <message_id>`.
+  `dda approved` prints `CONFIRMED - Telegram user 8919091876, message 8441`.
+  The message id is stored verbatim so you can check it against the chat later.
+  Your user id must be listed as `telegram_user_id` on an approver in
+  `config.yaml`.
+
+`--no-sign` is neither. It records an UNVERIFIED approval, which is the agent's
+own claim: shown as a disclosure below PUBLISH, and refused at PUBLISH.
+
 Every command and every gate is documented in [SPEC.md](SPEC.md).
 
 ## Tests
 
 ```bash
-DDA_TEST_MODE=1 python -m unittest discover -s tests   # full suite; 369 tests
+DDA_TEST_MODE=1 python -m unittest discover -s tests   # full suite
 python redteam/run.py [--json out.json]                # red-team; exit 0 = GREEN
 python -m tests.revert validate --matrix               # certify probe/anchor bindings
 python -m tests.revert selfcheck                       # repair a tree left by a killed run

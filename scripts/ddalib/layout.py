@@ -217,21 +217,26 @@ def load_config(wd: Workdir) -> dict:
     if approvers is None:
         approvers = []
     if not isinstance(approvers, list):
-        errors.append("approvers must be a list of {name, fingerprint|key|key_id}")
+        errors.append("approvers must be a list of {name, fingerprint|key|key_id|telegram_user_id}")
         approvers = []
     else:
         for i, a in enumerate(approvers):
             if not isinstance(a, dict):
                 errors.append(f"approvers[{i}]: must be a mapping")
                 continue
-            unknown = set(a) - {"name", "fingerprint", "key", "key_id"}
+            unknown = set(a) - {"name", "fingerprint", "key", "key_id", "telegram_user_id"}
             if unknown:
                 errors.append(f"approvers[{i}]: unknown keys {sorted(unknown)}")
             name = a.get("name")
             if not isinstance(name, str) or not re.match(r"^[A-Za-z0-9_.\-]{1,64}$", name):
                 errors.append(f"approvers[{i}].name: must be a non-empty handle (letters, digits, _.-)")
-            if not any(isinstance(a.get(k), str) and a.get(k).strip() for k in ("fingerprint", "key", "key_id")):
-                errors.append(f"approvers[{i}] ({name!r}): needs at least one of fingerprint, key, key_id")
+            if not any(isinstance(a.get(k), str) and a.get(k).strip() for k in ("fingerprint", "key", "key_id")) \
+                    and a.get("telegram_user_id") in (None, ""):
+                errors.append(f"approvers[{i}] ({name!r}): needs at least one of fingerprint, key, key_id, "
+                              "telegram_user_id")
+            tg = a.get("telegram_user_id")
+            if tg is not None and not re.fullmatch(r"[1-9][0-9]{0,19}", str(tg).strip()):
+                errors.append(f"approvers[{i}].telegram_user_id: must be a numeric Telegram user id")
     cap = cfg.get("goldfish_max_tokens", 150000)
     if isinstance(cap, bool) or not isinstance(cap, int) or cap <= 0:
         errors.append("goldfish_max_tokens must be a positive integer")

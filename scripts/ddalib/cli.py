@@ -342,10 +342,18 @@ def _kind_artifact_workdir(args) -> tuple:
 def cmd_approve(args) -> int:
     kind, artifact, workdir = _kind_artifact_workdir(args)
     wd = Workdir.at(workdir or os.getcwd(), args.milestone)
+    tg = tuple(args.telegram) if args.telegram else None
+    if tg and args.no_sign:
+        raise DdaError("--telegram and --no-sign are different methods; pass one")
     res = approvals.do_approve(wd, kind, artifact=artifact, key=args.key,
-                               sign=not args.no_sign, message=args.message)
+                               sign=not args.no_sign, message=args.message, telegram=tg)
+    if res.get("telegram"):
+        how = (f"CONFIRMED via Telegram user {res['telegram']['user_id']}, "
+               f"message {res['telegram']['message_id']}")
+    else:
+        how = "signed" if res["signed"] else "UNSIGNED (unverified)"
     print(f"approved {res['kind']} {res['digest'][:16]} — commit {res['commit'][:12]} "
-          f"({'signed' if res['signed'] else 'UNSIGNED (unverified)'}); "
+          f"({how}); "
           f"run `dda approved {res['kind']} {res['digest'][:16]}` to record the verification")
     return 0
 
@@ -356,7 +364,10 @@ def cmd_approved(args) -> int:
     verdict = approvals.do_approved(wd, kind, artifact=artifact)
     shown = (verdict.get("digest") or artifact or kind)[:16]
     # Typed state, uppercase for visibility (MISSING, STALE, UNVERIFIED, ...).
-    print(f"{args.kind} {shown}: {verdict['state'].upper()} — {verdict['reason']}")
+    # The method always prints, so the record says how it was approved:
+    # "VERIFIED - signed by brad" vs "CONFIRMED - Telegram user N, message M".
+    print(f"{args.kind} {shown}: {verdict['state'].upper()} - {approvals.method_label(verdict)}")
+    print(f"  {verdict['reason']}")
     return 0
 
 
@@ -723,7 +734,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("workdir", nargs="?")
     s.add_argument("--milestone")
     s.add_argument("--key", help="signing key id passed to git (default: the key's own default)")
-    s.add_argument("--no-sign", action="store_true", help="commit unsigned: recorded as UNVERIFIED")
+    s.add_argument("--no-sign", action="store_true",
+                   help="commit unsigned: recorded as UNVERIFIED (the agent's own claim; refused at PUBLISH)")
+    s.add_argument("--telegram", nargs=2, metavar=("TELEGRAM_USER_ID", "MESSAGE_ID"),
+                   help="record Brad's Telegram confirmation of this exact digest: recorded as CONFIRMED, "
+                        "accepted like a signature at every tier. The user id must be an approver's "
+                        "telegram_user_id; MESSAGE_ID is his confirming message, kept verbatim for audit")
     s.add_argument("-m", "--message", help="approval note recorded in the approval file")
     s.set_defaults(func=cmd_approve)
 

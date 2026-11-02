@@ -1259,8 +1259,9 @@ def gate_g4(wd: Workdir) -> tuple[bool, str, dict]:
     status = _approvals.config_status(wd)
     st = status.get("state")
     V = _approvals.ApprovalState
-    if st == V.VERIFIED.value:
-        notes.append(f"config approval verified ({status.get('detail')})")
+    if st in _approvals.HUMAN_STATES:
+        notes.append(f"config approval {st} ({status.get('detail')})")
+        st = V.VERIFIED.value  # CONFIRMED counts the same as a signature (§4.5)
     elif st == V.DOWNGRADED.value:
         notes.append(f"config approval DOWNGRADED to unverified: {status.get('detail')}")
         st = V.UNVERIFIED.value
