@@ -81,6 +81,20 @@ The agent does not get to set its own tier downward to skip the reviewer. Settin
 it too low is the cheat that matters most, so it is the one the gates check
 hardest.
 
+## You approve it, not the machine
+
+The pipeline stops at every point where a person should be on the hook: the
+spec, the tier, the config, the report. Nothing passes those gates on the
+agent's say-so.
+
+At the machine, your key signs the approval, so the record shows a human was
+present. Away from it, a confirmation from your phone is enough, taken on the
+authenticated account and recorded against the exact thing approved. Either way
+the record says which.
+
+Until you approve, the run parks and waits rather than guessing, and resumes
+from the exact point it stopped.
+
 ## Ways to use this
 
 The plugin is bot-agnostic: same tools, different seat. Pick the seat that
@@ -181,7 +195,14 @@ Every command and every gate is documented in [SPEC.md](SPEC.md).
 ## Tests
 
 ```bash
-DDA_TEST_MODE=1 python -m unittest discover -s tests   # full suite
+python scripts/test.py fast    # routine product tier (~40 min, 319 tests)
+python scripts/test.py check   # premise-staleness gate (seconds): FRESH means fast is enough
+python scripts/test.py full    # certification + product (~2 hours; before a handoff)
+```
+
+See [docs/TESTING.md](docs/TESTING.md) for what each tier answers and when to run it. Quick reference of the older commands:
+
+```bash
 python redteam/run.py [--json out.json]                # red-team; exit 0 = GREEN
 python -m tests.revert validate --matrix               # certify probe/anchor bindings
 python -m tests.revert selfcheck                       # repair a tree left by a killed run
