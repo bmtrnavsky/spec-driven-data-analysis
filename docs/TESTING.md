@@ -35,6 +35,10 @@ every drifted component instead of stopping at the first one.
 
 - `DDA_TEST_MODE=1` is set automatically. Extra arguments after `fast`/`full` go
   to unittest (`-v`, `-f`, `-k pattern`).
+- `fast` runs one module per process, in parallel (default 4 jobs — measured
+  sweet spot on a 12-CPU box; `DDA_TEST_JOBS=N` overrides). Modules share
+  nothing (own temp workdir and `DDA_HOME`), so parallelism changes timing
+  only. Biggest modules start first so the tail does not stretch the wall.
 - New `tests/test_*.py` files join the `fast` tier automatically. To make a new
   module certification-only, add it to `CERT_MODULES` in `scripts/test.py`.
 - `check` covers probe/anchor drift only. A `fast` pass plus a FRESH `check` does

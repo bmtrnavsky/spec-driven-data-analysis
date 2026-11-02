@@ -38,8 +38,10 @@ See docs/TESTING.md.
 """
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -78,15 +80,95 @@ def _run_unittest(args: list[str]) -> int:
     return subprocess.call(cmd, cwd=str(REPO), env=env)
 
 
+def _run_module(mod: str, extra: list[str]) -> tuple[str, int, float, str]:
+    """One product module in its own process (same layout as _run_unittest).
+
+    Separate processes share nothing: each test already builds its own temp
+    workdir + DDA_HOME, so module-level parallelism changes timing only.
+    Returns (module, exit code, wall seconds, combined output)."""
+    env = _env()
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(TESTS)] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
+    t0 = time.monotonic()
+    p = subprocess.run([sys.executable, "-m", "unittest", *extra, mod],
+                       cwd=str(REPO), env=env,
+                       capture_output=True, text=True)
+    dt = time.monotonic() - t0
+    return mod, p.returncode, dt, p.stdout + p.stderr
+
+
+def _test_count(output: str) -> int:
+    m = re.search(r"^Ran (\d+) tests? in ", output, re.M)
+    return int(m.group(1)) if m else 0
+
+
+def _default_jobs() -> int:
+    try:
+        n = int(os.environ.get("DDA_TEST_JOBS", "") or 0)
+        if n > 0:
+            return n
+    except ValueError:
+        pass
+    # Measured on a 12-CPU box: 12 jobs oversubscribe (each module spawns
+    # git/python children) and per-module times inflate 2-6x; 4 jobs keeps
+    # per-module times near serial and minimizes wall time.
+    return 4
+
+
+# Idle-machine serial seconds per product module (measured 2026-11-01;
+# phase8 split 2026-11-02: ~374s/27 tests became ~200s/14 + ~175s/13 halves).
+# Submission order only (longest-first packs workers best): correctness
+# never depends on these numbers, so staleness only costs packing quality.
+_KNOWN_SECONDS = {
+    "test_telegram_approval": 120.0, "test_phase8": 200.0,
+    "test_phase7_round2": 192.4, "test_phase8b": 175.0,
+    "test_phase2": 159.4, "test_telegram_approvalb": 115.0,
+    "test_phase4": 135.9, "test_kernel": 132.9,
+    "test_phase9": 113.6, "test_phase7": 112.1,
+    "test_f1f4_holes": 108.9, "test_phase5_round4": 76.8,
+    "test_phase5_holes": 72.4, "test_phase5_round2": 72.1,
+    "test_phase5_round3": 51.8, "test_phase5_round5": 48.7,
+    "test_phase6_round2": 21.7, "test_phase5": 16.7,
+    "test_phase3": 15.1, "test_nested_workdir": 13.7,
+    "test_phase6": 12.6, "test_phase1": 5.5,
+}
+
+
+def _submit_order(mods: list[str]) -> list[str]:
+    """Longest-first (unknown modules first: assume slow, start early)."""
+    return sorted(mods, key=lambda m: (m in _KNOWN_SECONDS,
+                                       -_KNOWN_SECONDS.get(m, 0)))
+
+
 def cmd_fast(extra: list[str]) -> int:
     mods = product_modules()
     leaked = [m for m in mods if m in CERT_MODULES or m.split(".")[0] in CERT_PACKAGES]
     assert not leaked, f"certification modules leaked into fast tier: {leaked}"
+    jobs = _default_jobs()
+    verbose = "-v" in extra
     print(f"[fast] product tier: {len(mods)} modules "
-          f"(excluding {', '.join(sorted(CERT_MODULES))}, tests/revert/**)", flush=True)
+          f"(excluding {', '.join(sorted(CERT_MODULES))}, tests/revert/**), "
+          f"{jobs} parallel jobs (DDA_TEST_JOBS overrides)", flush=True)
     t0 = time.monotonic()
-    rc = _run_unittest([*extra, *mods])
-    print(f"[fast] {'PASS' if rc == 0 else 'FAIL'} in {time.monotonic() - t0:.1f}s", flush=True)
+    results: dict[str, tuple[int, float, str]] = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(jobs, len(mods))) as ex:
+        futs = {ex.submit(_run_module, m, extra): m for m in _submit_order(mods)}
+        for fut in concurrent.futures.as_completed(futs):
+            mod, rc, dt, out = fut.result()
+            if rc != 0 and "NO TESTS RAN" in out and "FAILED" not in out:
+                rc = 0  # -k matched nothing in this module: skip, not failure
+            results[mod] = (rc, dt, out)
+            print(f"[fast] {mod}: {'PASS' if rc == 0 else 'FAIL'} in {dt:.1f}s "
+                  f"({_test_count(out)} tests)", flush=True)
+            if verbose or rc != 0:
+                print(out, flush=True)
+    total = sum(_test_count(r[2]) for r in results.values())
+    failed = sorted(m for m, r in results.items() if r[0] != 0)
+    rc = 1 if failed else 0
+    if failed:
+        print(f"[fast] FAILURES in: {', '.join(failed)}", flush=True)
+    print(f"[fast] {'PASS' if rc == 0 else 'FAIL'} "
+          f"{total} tests in {time.monotonic() - t0:.1f}s", flush=True)
     return rc
 
 
