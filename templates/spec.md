@@ -2,7 +2,11 @@
 
 Fill every section. Metrics cite registry pins only (name@version#hash),
 one pin per line, never formulas. Data sources cite config aliases only,
-one per bullet, for example "- `alias` — why it is needed".
+one per bullet, for example "- `alias` — why it is needed". Audience,
+Destination, and Topics each take exactly one fixed choice (SPEC §4.1
+lists them); leave the section blank when unconstrained. Pattern tags:
+one `- tag: yes|no` line per tag (closed vocabulary, SPEC §4.1; matching
+fires only on yes, §9), or blank when none apply.
 
 ## Question
 
@@ -18,18 +22,9 @@ State the economy rung in one sentence (SPEC §2.1).
 
 ## Audience
 
-Fixed choice (one): internal team, data team, company, external,
-regulator, public. Leave blank when unconstrained.
-
 ## Destination
 
-Fixed choice (one): none, internal, vault, wordpress, email,
-external. Leave blank when unconstrained.
-
 ## Topics
-
-Fixed choice (one): none, money, health, trading, pii,
-safety. Leave blank when unconstrained.
 
 ## Population and time window
 
@@ -58,8 +53,3 @@ safety. Leave blank when unconstrained.
 ## Out of scope
 
 ## Pattern tags
-
-Answer every tag you mention `yes` or `no`, one per line
-(e.g. `- join: yes`). Correction evals match only against tags
-answered yes (§9). Closed vocabulary — see skills/correct/SKILL.md.
-Leave empty when none apply.

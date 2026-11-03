@@ -181,6 +181,31 @@ class TestLockHash(Base):
         rc, out, _ = self.run_cli("hash", str(self.wd.root))
         self.assertEqual((rc, out.strip()), (0, self.h()))
 
+    def test_template_seed_hashes_with_minimal_fills(self):
+        # Regression: the shipped template's instructional prose must not
+        # trip the strict fixed-choice / pattern-tag parsers. A fresh
+        # `dda init` plus content fills (no Audience/Topics/Pattern-tags
+        # declarations) hashes cleanly — the redteam setup is the canary.
+        tmp = Path(tempfile.mkdtemp(prefix="dda-template-"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        rc, _, _ = self.run_cli("init", str(tmp / "wd"))
+        self.assertEqual(rc, 0)
+        wd = Workdir.at(tmp / "wd")
+        wd.config_path.write_text(
+            'version: 1\ndefault_tier: DECIDE\ndata_roots:\n  sales:\n    paths: ["D:/data/sales"]\n',
+            encoding="utf-8", newline="\n")
+        spec = wd.spec_path.read_text(encoding="utf-8")
+        spec = spec.replace("## Data sources\n", "## Data sources\n\n- `sales` — orders\n")
+        spec = spec.replace("State the risk tier in one sentence (SPEC §2.2).", "This is an EXPLORE analysis.")
+        spec = spec.replace("State the economy rung in one sentence (SPEC §2.1).", "quick-cut")
+        spec = spec.replace("## Prior exposure\n", "## Prior exposure\n\nnone known\n")
+        wd.spec_path.write_text(spec, encoding="utf-8", newline="\n")
+        comp = lockhash.compute(wd)
+        self.assertEqual(len(comp.lock_hash), 64)
+        self.assertIsNone(comp.audience)
+        self.assertIsNone(comp.destination)
+        self.assertIsNone(comp.topics)
+
 
 class TestBindingAndCli(Base):
     def test_start_release_status(self):

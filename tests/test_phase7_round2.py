@@ -24,6 +24,8 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "scripts"))
 
+from ddalib import review as _review  # noqa: E402
+
 SPEC = """# Analysis spec
 
 ## Question
@@ -316,6 +318,21 @@ class TestFooterPerRoundIds(P7R2Setup):
         problems = _footer.check(self.wd, "# R\n\nbody\n\n" + partial)
         self.assertTrue(any(ids[1] in p for p in problems),
                         f"footer passed while round id {ids[1]} is unnamed: {problems}")
+
+
+class TestEpochBrief(unittest.TestCase):
+    # M2 epoch rounds (1@N) ask the same review questions as their base
+    # round: `review run --round 1@2` must brief, not crash (KeyError).
+    def test_brief_resolves_epoch_rounds(self):
+        brief = _review.build_brief("teardown", ["1@2", "3@2"])
+        self.assertIn("ROUND 1@2:", brief)
+        self.assertIn("ROUND 3@2:", brief)
+        self.assertIn(_review.TEARDOWN_ROUNDS["1"], brief)
+        self.assertIn(_review.TEARDOWN_ROUNDS["3"], brief)
+
+    def test_brief_still_resolves_base_rounds(self):
+        brief = _review.build_brief("teardown", ["1", "3"])
+        self.assertIn(_review.TEARDOWN_ROUNDS["1"], brief)
 
 
 if __name__ == "__main__":

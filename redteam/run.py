@@ -129,6 +129,8 @@ class Harness:
         spec = self.wd / ".analysis" / "spec.md"
         text = spec.read_text(encoding="utf-8")
         text = text.replace("## Data sources\n", "## Data sources\n\n- `sales` — orders\n")
+        text = text.replace("## Question\n", "## Question\n\nDid orders rise in May?\n")
+        text = text.replace("## Decision it informs\n", "## Decision it informs\n\nnone — EXPLORE\n")
         text = text.replace("State the risk tier in one sentence (SPEC §2.2).", "This is an EXPLORE analysis.")
         text = text.replace("State the economy rung in one sentence (SPEC §2.1).", "quick-cut")
         text = text.replace("## Prior exposure\n", "## Prior exposure\n\nnone known\n")
@@ -411,11 +413,15 @@ class Harness:
                     "prevented", vdup.stderr.strip()[:150],
                     "a change to any header field is a new variant id (§4.3)")
         # 3. The kernel does not start without the full baseline stack (§10.1a).
+        #    A profiled snapshot predates this (SPEC §10.3: `dda profile`
+        #    before `dda run`), so the run reaches the startup check instead
+        #    of the profile-first refusal.
         #    Host-independent: a stub dir whose duckdb raises on import is
         #    read by the PARENT from DDA_BASELINE_DIR, frozen into the
         #    policy, and stripped from the child env — so the refusal
         #    reproduces on every host (with or without the stack installed),
         #    and the child never honours the variable itself.
+        self.dda("profile", str(self.wd))
         (self.wd / ".analysis" / "variants" / "v1.py").write_text(
             "open(r'" + rawf + "').read()\n", encoding="utf-8")
         broken = self.scratch / "broken-baseline"
@@ -856,6 +862,9 @@ class Harness:
         valid = _fill(valid, "## Thresholds that would change the decision", "a 1pt drop kills v2.\n")
         valid = _fill(valid, "## Exclusion and outlier rules", "exclude staff orders.\n")
         spec.write_text(valid, encoding="utf-8", newline="")
+        # Define completed after the early phase-2 lock: re-lock as an
+        # amendment (§3.1) so G2+ gate a lock matching the current spec.
+        self.dda("lock", "--amend", "redteam: complete Define sections after early lock", str(wd))
         try:
             # EXPLORE self path: G3 needs self re-reads for rounds 1 and 3.
             g = self.dda("gate", "G3", str(wd), check=False)
@@ -938,35 +947,21 @@ class Harness:
                 spec.write_text(decide, encoding="utf-8", newline="")
                 _lr = self.dda("lock", str(wd), check=False)
                 assert _lr.returncode == 0, "decide-wd lock failed: " + (_lr.stdout + _lr.stderr)[-200:]
-                r = self.dda("packet", "teardown", str(wd), check=False)
-                r = self.dda("review", "run", "teardown", str(wd), check=False)
-                recs = sorted((wd / ".analysis" / "reviews" / "goldfish").glob("teardown-*.json"))
-                tools_empty = False
-                brief_ok = False
-                if r.returncode == 0 and recs:
-                    try:
-                        rec = json.loads(recs[0].read_text(encoding="utf-8"))
-                        cfgm = json.loads((wd / ".analysis" / "packets" / rec["packet_hash"] / "manifest.json").read_text(encoding="utf-8"))
-                        tools_empty = (rec.get("request", {}).get("tools") == [] and
-                                       sorted(f["path"] for f in rec["request"].get("user_files", [])) ==
-                                       sorted(f["path"] for f in cfgm["files"]))
-                        import hashlib as _hl
-                        brief_ok = rec.get("brief_hash") == _hl.sha256(
-                            rec["request"]["system"].encode()).hexdigest()
-                    except (ValueError, KeyError, OSError):
-                        pass
-                self.record("goldfish.empty-tools", "review",
-                            "goldfish request carries no tools and only packet files; brief hash matches bytes sent",
-                            "prevented" if (tools_empty and brief_ok) else "missed", "prevented",
-                            (r.stdout or r.stderr).strip()[:150],
-                            "one-shot call: tools empty, no memory/context (§5.0 Call)")
                 # Re-roll is counted: tweak the spec (new hash), fail a full
-                # run, then pass each round once — both calls recorded;
-                # G3 needs the earlier objections answered.
+                # run, then pass each failed round once — the SPEC §5.3
+                # allowance (one re-run per failed round). Every call is
+                # recorded; G3 needs the earlier objections answered. The
+                # fail comes first: a passing run first would spend the
+                # lineage-wide re-run cap (M2 goldfish-shopping guard), so
+                # the empty-tools assertions below read the passing re-run
+                # record instead of an initial passing run.
                 decide2 = decide.replace("v2 raises conversion.",
                                          "v2 raises conversion by shortening checkout.")
                 spec.write_text(decide2, encoding="utf-8", newline="")
                 r = self.dda("packet", "teardown", str(wd), check=False)
+                # Pre-data spec fix: re-lock as an amendment (§3.1) so G2+
+                # gate the reviewed spec, not the pre-tweak lock.
+                self.dda("lock", "--amend", "redteam: pre-data spec fix before review re-run", str(wd))
                 gdir = wd / ".analysis" / "reviews" / "goldfish"
                 before = set(p.name for p in gdir.glob("teardown-*.json")) if gdir.is_dir() else set()
                 self.env["DDA_GOLDFISH_STUB"] = "fail"
@@ -975,12 +970,15 @@ class Harness:
                 r2a = self.dda("review", "run", "teardown", "--round", "1", str(wd), check=False)
                 r2b = self.dda("review", "run", "teardown", "--round", "3", str(wd), check=False)
                 new = sorted(set(p.name for p in gdir.glob("teardown-*.json")) - before)
+                pass1 = None
                 fail_ids = {}
                 for name in new:
                     try:
                         rec = json.loads((gdir / name).read_text(encoding="utf-8"))
                         if rec.get("verdict") == "fail":
                             fail_ids.setdefault(str(rec.get("round")), rec.get("provider_request_id", ""))
+                        elif str(rec.get("round")) == "1" and rec.get("verdict") == "pass" and pass1 is None:
+                            pass1 = rec
                     except ValueError:
                         pass
                 counted = (r.returncode == 0 and r1.returncode != 0 and r2a.returncode == 0
@@ -990,6 +988,34 @@ class Harness:
                             "detected" if counted else "missed", "detected",
                             (r2b.stdout or r2b.stderr).strip()[:150],
                             "every call for the packet/stage counted, no re-roll (§5.0 Recording)")
+                tools_empty = False
+                brief_ok = False
+                if pass1 is not None:
+                    try:
+                        cfgm = json.loads((wd / ".analysis" / "packets" / pass1["packet_hash"] / "manifest.json").read_text(encoding="utf-8"))
+                        tools_empty = (pass1.get("request", {}).get("tools") == [] and
+                                       sorted(f["path"] for f in pass1["request"].get("user_files", [])) ==
+                                       sorted(f["path"] for f in cfgm["files"]))
+                        import hashlib as _hl
+                        brief_ok = pass1.get("brief_hash") == _hl.sha256(
+                            pass1["request"]["system"].encode()).hexdigest()
+                    except (ValueError, KeyError, OSError):
+                        pass
+                self.record("goldfish.empty-tools", "review",
+                            "goldfish request carries no tools and only packet files; brief hash matches bytes sent",
+                            "prevented" if (tools_empty and brief_ok) else "missed", "prevented",
+                            (r2a.stdout or r2a.stderr).strip()[:150],
+                            "one-shot call: tools empty, no memory/context (§5.0 Call)")
+                # Epoch re-due (M2): the amendment re-due rounds 1 and 3 as
+                # 1@2/3@2, and G3 gates those — plain-round passes do not
+                # satisfy it. One passing call per epoch round.
+                r3a = self.dda("review", "run", "teardown", "--round", "1@2", str(wd), check=False)
+                r3b = self.dda("review", "run", "teardown", "--round", "3@2", str(wd), check=False)
+                self.record("goldfish.epoch-rerun-passes", "review",
+                            "amendment re-dues rounds 1,3 as 1@2/3@2; one passing call each",
+                            "detected" if (r3a.returncode == 0 and r3b.returncode == 0) else "missed", "detected",
+                            (r3b.stdout or r3b.stderr).strip()[:150],
+                            "post-data amendment re-dues teardown rounds (M2 lineage)")
                 # DECIDE needs the human spec approval.
                 g = self.dda("gate", "G3", str(wd), check=False)
                 self.record("g3.decide-no-approval-fails", "gates",
@@ -1004,12 +1030,12 @@ class Harness:
                             "prevented" if g.returncode != 0 else "missed", "prevented",
                             g.stdout.strip()[:150], "earlier objections answered in the review file (§5.0)")
                 if fail_ids.get("1"):
-                    (selfd / "teardown-round1.md").write_text(
-                        "# response round 1\n\nAnswered %s: trimmed the cut as asked.\n" % fail_ids["1"],
+                    (selfd / "teardown-round1@2.md").write_text(
+                        "# response round 1@2\n\nAnswered %s: trimmed the cut as asked.\n" % fail_ids["1"],
                         encoding="utf-8")
                 if fail_ids.get("3"):
-                    (selfd / "teardown-round3.md").write_text(
-                        "# response round 3\n\nAnswered %s: base rate added to the spec.\n" % fail_ids["3"],
+                    (selfd / "teardown-round3@2.md").write_text(
+                        "# response round 3@2\n\nAnswered %s: base rate added to the spec.\n" % fail_ids["3"],
                         encoding="utf-8")
                 g = self.dda("gate", "G3", str(wd), check=False)
                 ok = (a.returncode == 0 and v.returncode == 0 and g.returncode == 0
@@ -1019,6 +1045,18 @@ class Harness:
                             "allowed" if ok else "missed", "allowed",
                             g.stdout.strip()[:150],
                             "verified, or unverified and disclosed (§3.2 case 2)")
+                # G4 on the shared workdir: the Define-complete spec, the
+                # amendment lock, the self reviews, and the phase-4 config
+                # approval are all in place only now (gating in phase 4
+                # meets a skeleton spec and a pre-fill lock, which G1/G2
+                # rightly refuse). EXPLORE discloses the unverified config
+                # approval and passes.
+                g = self.dda("gate", "G4", str(self.wd), check=False)
+                ok3 = g.returncode == 0 and "config approval" in g.stdout
+                self.record("g4.config-approval-surfaced", "approvals/doctor",
+                            "G4 names the config-approval state (EXPLORE discloses; verified required at DECIDE+)",
+                            "detected" if ok3 else "missed", "detected",
+                            g.stdout.strip()[:150], "config-status lookup in approvals.index.jsonl (phase 4)")
             finally:
                 self.env.pop("DDA_GOLDFISH_STUB", None)
         finally:
@@ -1173,12 +1211,9 @@ class Harness:
                     "detected" if ok2 else "missed", "detected",
                     (v.stdout.strip()[:150] if ok2 else (v.stderr or v.stdout or a.stderr or a.stdout).strip()[-200:]),
                     "approvals.index.jsonl hash chain; G4 reads the latest verdict (§4.5)")
-        g = self.dda("gate", "G4", str(self.wd), check=False)
-        ok3 = g.returncode == 0 and "config approval" in g.stdout
-        self.record("g4.config-approval-surfaced", "approvals/doctor",
-                    "G4 names the config-approval state (EXPLORE discloses; verified required at DECIDE+)",
-                    "detected" if ok3 else "missed", "detected",
-                    g.stdout.strip()[:150], "config-status lookup in approvals.index.jsonl (phase 4)")
+        # NOTE: the G4 gate itself runs at the end of phase7: it needs the
+        # Define-complete spec, the amendment lock, and the self reviews,
+        # which only exist after phase7's fixture fills.
 
     def key_borrowing(self):
         """Phase 4 key-borrowing probes (SPEC §4.5): an agent that can drive

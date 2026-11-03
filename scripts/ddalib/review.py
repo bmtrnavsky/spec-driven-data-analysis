@@ -363,12 +363,14 @@ def build_brief(stage: str, rounds: list[str]) -> str:
     """Fill the template with ONLY the stage and round list. The elephant
     cannot add prose: this is the whole system prompt (§5.0)."""
     table = TEARDOWN_ROUNDS if stage == "teardown" else POST_RESULT_ROUNDS
+    from .lineage import base_round as _base_round  # local: lineage imports review lazily
     lines = []
     for r in rounds:
         if r == SECOND_GOLDFISH_ROUND:
             lines.append(f"ROUND 3 (second goldfish, independent re-read): {TEARDOWN_ROUNDS['3'] if stage == 'teardown' else POST_RESULT_ROUNDS['3']}")
         else:
-            lines.append(f"ROUND {r}: {table[r]}")
+            # Epoch rounds (1@N) ask their base round's questions (§5.1/5.2).
+            lines.append(f"ROUND {r}: {table[_base_round(r)]}")
     tmpl = load_brief_template()
     brief = tmpl.replace("{{STAGE}}", stage).replace("{{ROUNDS}}", "\n".join(lines) + "\n")
     if "{{" in brief and re.search(r"{{[A-Z_]+}}", brief):
