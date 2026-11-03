@@ -6,6 +6,8 @@
 [![Hermes Plugin](https://img.shields.io/badge/Hermes-Plugin-teal.svg)](https://hermes-agent.nousresearch.com/docs)
 [![Version](https://img.shields.io/badge/version-0.9.1--phase9-orange.svg)](SPEC.md)
 
+## What it does
+
 A lean plugin for any data agent (built for Hermes; portable to any agent that
 can load skills). For someone who has to hand a number to another human and
 defend it, without being a data engineer.
@@ -23,35 +25,11 @@ Sibling project:
 applies the same discipline to code: define before building, test before
 shipping, verify before claiming done.
 
-## Status
+## How it works
 
-Current build: `0.9.1-phase9` (`python scripts/dda.py version`).
-All ten build phases (SPEC §14) are implemented; anything else fails closed.
-
-| Phase | Scope | State |
-|-------|-------|-------|
-| 0 | Red-team harness (`redteam/run.py`; GREEN = every prevention held) | built |
-| 1 | Templates, config, `init` / `start` / `release`, hook entry | built |
-| 2 | `lock`, chained evidence logs, `runlog`, `lockguard` / `evidenceguard` | built |
-| 3 | Kernel runner, `meta` / `variant` / `run`, gate G6 | built |
-| 4 | Approvals (`approve` / `approved`), `doctor`, gate G4 | built |
-| 5 | `footercheck`, `footer --check`, `report`, `gitcheck`; gates G0, G8, G9 | built |
-| 6 | `definitions`, `defguard`, content-hashed pins; gate G1 | built |
-| 7 | Goldfish packet, `review run`, gate G3 | built |
-| 8 | `profile` / `verify`, gates G2, G5, G7 | built |
-| 9 | `correct`, `evals` | built |
-
-Last verification (commit `ebe5274`): fast tier 322 tests green, premise
-check FRESH, `redteam/run.py` GREEN (94 prevented, 30 detected, 1 documented
-environmental miss: no hermes-agent checkout on this host), `dda
-verify-chain` reports `chains: ok`.
-
-## The loop
+One loop per question, or per milestone of a bigger analysis:
 
     Intake -> Define -> Economy + Tier -> Teardown -> LOCK -> Profile -> Analyze -> Verify -> Report -> Archive
-
-One loop per question, or per milestone of a bigger analysis. Ten stages, each
-with a gate that has to pass before the next one opens.
 
 **Before the lock** you and the agent work in the open: research, read docs,
 shape the question. Nothing is frozen yet and nothing is at risk.
@@ -75,22 +53,15 @@ in the middle and the chain tells on you.
 
 Full pipeline, gate table, and the reasoning behind each rule: [SPEC.md](SPEC.md).
 
-## What it actually stops you from doing
-
-- Changing the question after seeing the answer. The spec is hashed and
-  committed; amend it and the hash breaks, loudly.
-- Reporting a number whose analysis cannot be re-run. `dda verify` replays the
-  locked script against the snapshot and compares.
-- Letting the same mind that built the work grade it. The reviewer never saw the
-  build and has no tools to fix it.
-- Quietly dropping the two approaches that did not work. Every variant is
-  declared with a reason, and the ledger keeps the ones that failed.
-- Re-running until something looks green and calling that done. Review rounds
-  are capped and recorded.
-- Reusing your approval for a different artifact than the one you approved. Edit
-  the output after signoff and it goes stale.
-- Reading data around the kernel, so "what did you actually run" has no answer.
-- Handing you a chart with no path back to a locked spec and a signed approval.
+Every protection below is proven by a suite, not by reading the code:
+the fast product tier (`python scripts/test.py fast`, 322 tests green at
+commit `ebe5274`), the red-team harness (`python redteam/run.py`, GREEN at
+the same commit), and the probe certifications (`python -m tests.revert
+validate --matrix`). What the loop refuses: no changing the question after
+seeing the answer, no number that cannot be re-run, no self-grading by the
+builder, no dropped failed approaches, no re-running until something looks
+green, no reused approvals, no data reads around the kernel, no chart
+without a path back to a locked spec and a signed approval.
 
 ## Stakes-aware, not one-size-fits-all
 
@@ -113,15 +84,16 @@ agent's say-so.
 At the machine, your key signs the approval, so the record shows a human was
 present. Away from it, a confirmation from your phone is enough, taken on the
 authenticated account and recorded against the exact thing approved. Either way
-the record says which.
+the record says which. (The exact commands and message formats live in
+[SPEC.md](SPEC.md).)
 
 Until you approve, the run parks and waits rather than guessing, and resumes
 from the exact point it stopped.
 
-## Ways to use this
+## How to use it
 
-The plugin is bot-agnostic: same tools, different seat. Pick the seat that
-matches what you are allowed to do.
+Pick the seat that matches what you are allowed to do. The plugin is
+bot-agnostic: same tools, different seat.
 
 1. **Builder mode** runs the pipe. Init, lock, run variants, pass the gates,
    publish the report:
@@ -154,20 +126,7 @@ matches what you are allowed to do.
    relevant gate on the same commit and returns a verdict. A finding goes back to
    the builder as new work; the judge does not fix it inline.
 
-## Layout
-
-    SPEC.md               the design, the gate table, and the reasoning behind each rule
-    scripts/dda.py        the CLI; stdlib-only Python >= 3.11
-    scripts/ddalib/       gates, chains, kernel runner, reviews, approvals
-    scripts/dda.cmd       the same commands on Windows
-    templates/            spec.md, config.yaml, goldfish-packet.md, wayfinder.md, correction case
-    skills/correct/       the correction skill used by evals
-    redteam/              phase-0 harness; GREEN means every prevention held
-    tests/probes/         adversarial probes, each declaring the finding it expects
-    tests/revert/         certifies each probe against the fix it is bound to
-    hooks/                Hermes hook wiring
-
-## Install
+## Install and first run
 
 ```bash
 python scripts/dda.py install            # print the Hermes hooks block
@@ -200,55 +159,40 @@ Every approval is yours, made one of two ways. Both count the same at every
 tier, PUBLISH included:
 
 - **At the desktop**, `dda approve <kind>` signs the commit, so git asks for your
-  key passphrase (or a FIDO touch). `dda approved` prints
-  `VERIFIED - signed by brad`.
+  key passphrase (or a FIDO touch). `dda approved` prints a VERIFIED line
+  naming you as signer.
 - **On Telegram**, your signed-in account is the proof, and there is no
-  passphrase. You confirm the kind and digest in the chat, and the approval is
-  recorded with `dda approve <kind> --telegram <your_user_id> <message_id>`.
-  `dda approved` prints `CONFIRMED - Telegram user 8919091876, message 8441`.
-  The message id is stored verbatim so you can check it against the chat later.
-  Your user id must be listed as `telegram_user_id` on an approver in
-  `config.yaml`.
+  passphrase. You confirm the kind and digest in the chat. The message id is
+  stored verbatim so you can check it against the chat later. Your user id
+  must be listed as `telegram_user_id` on an approver in `config.yaml`.
 
 `--no-sign` is neither. It records an UNVERIFIED approval, which is the agent's
 own claim: shown as a disclosure below PUBLISH, and refused at PUBLISH.
 
 Every command and every gate is documented in [SPEC.md](SPEC.md).
 
-## Tests
+**What good output looks like:** `dda verify-chain` reports `chains: ok`,
+`dda verify` replays the locked script against the snapshot and compares,
+and `dda approved` prints a signed or confirmed line for the exact thing
+you approved. Until you approve, the run parks and waits rather than
+guessing.
 
-```bash
-python scripts/test.py fast    # routine product tier (~40 min, 319 tests)
-python scripts/test.py check   # premise-staleness gate (seconds): FRESH means fast is enough
-python scripts/test.py full    # certification + product (~2 hours; before a handoff)
-```
+## Layout
 
-See [docs/TESTING.md](docs/TESTING.md) for what each tier answers and when to run it. Quick reference of the older commands:
+    SPEC.md               the design, the gate table, and the reasoning behind each rule
+    scripts/dda.py        the CLI; stdlib-only Python >= 3.11
+    scripts/ddalib/       gates, chains, kernel runner, reviews, approvals
+    scripts/dda.cmd       the same commands on Windows
+    templates/            spec.md, config.yaml, goldfish-packet.md, wayfinder.md, correction case
+    skills/correct/       the correction skill used by evals
+    redteam/              phase-0 harness; GREEN means every prevention held
+    tests/probes/         adversarial probes, each declaring the finding it expects
+    tests/revert/         certifies each probe against the fix it is bound to
+    hooks/                Hermes hook wiring
+    docs/TESTING.md       what each test tier answers and when to run it
 
-```bash
-python redteam/run.py [--json out.json]                # red-team; exit 0 = GREEN
-python -m tests.revert validate --matrix               # certify probe/anchor bindings
-python -m tests.revert selfcheck                       # repair a tree left by a killed run
-```
-
-`tests/probes/` holds adversarial probes, and `tests/revert/` certifies each one
-by reverting the fix it is bound to and requiring the probe to flip. A probe that
-would pass either way fails certification instead of quietly proving nothing.
-Reverts run on a temporary copy under a lock, never on your checkout.
-
-The red-team harness never touches a live Hermes profile. It points `DDA_HOME`
-and `HERMES_HOME` at a scratch directory and drives Hermes's own
-`agent.shell_hooks.run_once`. GREEN means every expected prevention held, no
-unbound-session false positive, and every miss is a documented caveat in
-[redteam/threat-model.md](redteam/threat-model.md).
-
-## Before installing the hooks
-
-Phase 3's sanctioned path is real: after lock, data reads go through `dda run`
-(the locked-down kernel, `dda variant` ids, freeze-on-first-run) and declared
-connector tools. `dda meta` is the only metadata peek. Config approval at G4 is
-built and fails closed at DECIDE and PUBLISH without an approval for the exact
-config hash.
+Engineers: gates, build phases, red-team history, and accepted risks live in
+[docs/HARDENING.md](docs/HARDENING.md).
 
 ## License
 
