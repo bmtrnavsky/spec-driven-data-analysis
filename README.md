@@ -4,7 +4,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Hermes Plugin](https://img.shields.io/badge/Hermes-Plugin-teal.svg)](https://hermes-agent.nousresearch.com/docs)
-[![Version](https://img.shields.io/badge/version-0.9.0--phase9-orange.svg)](SPEC.md)
+[![Version](https://img.shields.io/badge/version-0.9.1--phase9-orange.svg)](SPEC.md)
 
 A lean plugin for any data agent (built for Hermes; portable to any agent that
 can load skills). For someone who has to hand a number to another human and
@@ -22,6 +22,29 @@ Sibling project:
 [disciplined-vibe-coding](https://github.com/bmtrnavsky/disciplined-vibe-coding)
 applies the same discipline to code: define before building, test before
 shipping, verify before claiming done.
+
+## Status
+
+Current build: `0.9.1-phase9` (`python scripts/dda.py version`).
+All ten build phases (SPEC §14) are implemented; anything else fails closed.
+
+| Phase | Scope | State |
+|-------|-------|-------|
+| 0 | Red-team harness (`redteam/run.py`; GREEN = every prevention held) | built |
+| 1 | Templates, config, `init` / `start` / `release`, hook entry | built |
+| 2 | `lock`, chained evidence logs, `runlog`, `lockguard` / `evidenceguard` | built |
+| 3 | Kernel runner, `meta` / `variant` / `run`, gate G6 | built |
+| 4 | Approvals (`approve` / `approved`), `doctor`, gate G4 | built |
+| 5 | `footercheck`, `footer --check`, `report`, `gitcheck`; gates G0, G8, G9 | built |
+| 6 | `definitions`, `defguard`, content-hashed pins; gate G1 | built |
+| 7 | Goldfish packet, `review run`, gate G3 | built |
+| 8 | `profile` / `verify`, gates G2, G5, G7 | built |
+| 9 | `correct`, `evals` | built |
+
+Last verification (commit `ebe5274`): fast tier 322 tests green, premise
+check FRESH, `redteam/run.py` GREEN (94 prevented, 30 detected, 1 documented
+environmental miss: no hermes-agent checkout on this host), `dda
+verify-chain` reports `chains: ok`.
 
 ## The loop
 
