@@ -1,5 +1,5 @@
 name: spec-driven-data-analysis
-version: 0.9.1-phase9
+version: 0.9.2
 description: Data analyst that shows its work. Lock the spec before the data, verify every run.
 author: Brad Trnavsky
 license: MIT
