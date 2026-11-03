@@ -1,0 +1,7 @@
+name: spec-driven-data-analysis
+version: 0.9.1-phase9
+description: Data analyst that shows its work. Lock the spec before the data, verify every run.
+author: Brad Trnavsky
+license: MIT
+homepage: https://github.com/bmtrnavsky/spec-driven-data-analysis
+tags: [data, analysis, skill, verification, provenance]
