@@ -1299,12 +1299,24 @@ hook false-positive blocks left unfixed.
    packet inlined and no tools (§5.0). It keeps the intent of the
    original decision (a fresh, context-free reviewer) without the tool
    surface. **Needs Brad's confirmation.**
-7. **Approval mechanism: OPEN.** Proposed: signed git commits through an
-   approver chain, with an `ed25519-sk` touch key (preferred) or a GPG
-   key with signing cache disabled (§4.5). Without a key, DECIDE runs
-   with disclosed unverified approvals and PUBLISH parks.
-8. **Second-goldfish model: OPEN.** Which second model or provider gives
-   PUBLISH-tier independence (§5.0).
+7. **Approval mechanism: DECIDED 2026-11-06 — signed approver commits.**
+   Brad generated an SSH `ed25519` key with a passphrase
+   (`C:\Users\bmtrn\.ssh\dda_signing`, fingerprint
+   `SHA256:4ntXMUfsddmYgfM8kddKrKTq2nTdB3Qy/cSUPR0kJWw`); the private
+   key and passphrase stay with Brad alone. Signing cache is off
+   (`~/.gnupg/gpg-agent.conf`: `ignore-cache-for-signing`,
+   `default-cache-ttl 0`, `max-cache-ttl 0`), no approver key sits in
+   any reachable agent, and `commit.gpgsign` stays unset so `dda`'s own
+   commits are unsigned (§4.5). A Telegram confirmation from Brad's
+   signed-in account counts the same at every tier, PUBLISH included
+   (CONFIRMED vs VERIFIED, the record shows which). Without a key,
+   DECIDE runs with disclosed unverified approvals and PUBLISH parks.
+8. **Second-goldfish model: DECIDED 2026-11-06 — reviewer independence,
+   not a model pick.** The rule is different model families when
+   available, resolved at runtime through config `goldfish_models`
+   (§5.0). The footer records both models behind every review round;
+   a same-model run is disclosed, never silent. No model name is
+   locked in this spec: models change every run.
 9. **Subagents: DECIDED 2026-10-27 — allowed, inherit the parent
    binding.** A linked child shares the parent's lock hash and ledger and
    is hooked as the parent. An unbound child stays unbound, and the gate
