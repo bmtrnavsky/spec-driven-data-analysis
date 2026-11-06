@@ -434,11 +434,19 @@ An approval must be something the agent cannot produce.
       exactly equal the approver's configured id or the relay refuses
       before writing anything; the ids come from Brad's
       platform-authenticated message (Telegram API sender, gateway
-      session user); `lockguard` blocks agent-run relay the same as
+      session user); the relay requires the digest Brad confirmed
+      (`--digest`, 16+ hex) and refuses when it no longer matches the
+      canonical payload — his yes binds that exact state; one confirming
+      message confirms one digest, so a reused message id is refused at
+      `dda approve` and reads BAD_SIG at `dda approved`; approval notes
+      must not contain `Dda-...:` lines (they would forge commit
+      trailers); `lockguard` blocks agent-run relay the same as
       agent-run approve; the relay exits non-zero unless `dda approved`
       walks back human. Same trust as the manual command, minus the
       copying, plus live capture (`fetch` peeks the update stream
-      read-only, without consuming).
+      read-only, without consuming; it polls the same endpoint as the
+      gateway, so a 409 while the gateway polls is polling contention —
+      long term the relay reads from the gateway store).
     - Gateway hook on his authenticated messages (rejected for now): a
       bare "yes" fires on ordinary conversation — safe auto-fire needs a
       pending-prompt correlation (match the yes to the digest just
@@ -448,8 +456,9 @@ An approval must be something the agent cannot produce.
       offset management, desktop build). Built only if approval volume
       justifies it; the script stays the recording path either way.
     The message id is the
-    audit handle: a CONFIRMED record whose message does not exist in the
-    chat, or is not Brad's confirmation of that digest, is a forgery.
+    audit handle: the record carries the user id, the message id
+    verbatim, the kind, the digest, and the confirmation time, so the
+    yes is checkable against the chat afterwards.
   - The regular-chat path mirrors the Telegram path: `--chat` records
     the approval with his chat sender id and the confirming message id
     **verbatim**, the commit repeats the ids as `Dda-Approval-Method:

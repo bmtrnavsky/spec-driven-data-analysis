@@ -383,7 +383,18 @@ def signing_violation(view: ToolView) -> str | None:
 # Keep in sync with hookentry.is_clean_dda_invocation's argv parsing.
 _DDA_NAMES = frozenset({"dda", "dda.cmd", "dda.bat", "dda.exe"})
 _PYTHON_RE = re.compile(r"^(python(3(\.\d+)?)?|py)(\.exe)?$")
-_HUMAN_ONLY_SUBS = frozenset({"release", "abandon"})
+_HUMAN_ONLY_SUBS = frozenset({"release", "abandon", "approve"})
+# `dda_relay relay` (the confirmation relay, §4.5) is human-only the same
+# way `dda approve` is: only Brad runs it, in his own terminal.
+_RELAY_SUB = "relay"
+_RELAY_BASES = frozenset({"dda_relay", "dda_relay.py"})
+# In-process approval calls have no argv to parse (probe-G inputs 6-8,
+# 11-12): `do_approve` used in-process, or the relay module driven
+# directly. Any agent-side use is the human's path, so flag the words.
+_IN_PROCESS_RE = re.compile(r"\bdo_approve\b|\bdda_relay\b")
+# `ddalib.cli.main(['approve', ...])` in-process: the CLI's human-only
+# subcommand as the first list argument (probe-G input 8).
+_IN_PROCESS_MAIN_RE = re.compile(r"\bmain\s*\(\s*\[\s*['\"]?(release|abandon|approve|relay)\b")
 
 # Shell wrappers whose `-c` / `-Command` string argument must be re-parsed
 # as its own command line (§0.1: hooks stop slips, not determined evasion).
@@ -394,8 +405,8 @@ _SHELL_BASES = frozenset({
 _WRAPPER_FLAGS = frozenset({
     "-c", "/c", "/k", "-k", "-command", "/command", "--command",
 })
-# `python -m <mod>` module invocations that run the dda CLI.
-_DDA_MODULES = frozenset({"dda", "ddalib", "ddalib.cli"})
+# `python -m <mod>` module invocations that run the dda CLI (or the relay).
+_DDA_MODULES = frozenset({"dda", "ddalib", "ddalib.cli", "dda_relay"})
 
 # sh-family shells accept bundled short flags (`bash -lc '...'`, `bash -cl '...'` —
 # verified: any bundle containing `c` takes the next argv word as its command).
@@ -428,40 +439,53 @@ def _unquoted_word(tok: str) -> str:
     return tok.replace("'", "").replace('"', "").lower()
 
 
-def _dda_next_words(tokens: list[str]) -> list[str]:
-    """Subcommand-position word after every dda invocation in a token stream.
+def _dda_next_words(tokens: list[str]) -> list[tuple[str, bool]]:
+    """Subcommand-position word after every dda/dda_relay invocation in a stream.
 
     Same recognition as `is_clean_dda_invocation` (bare `dda` / `dda.cmd` /
     ... or `python[.exe] <path/>dda.py`, quotes stripped) but every
     invocation in the stream is inspected, so `dda status && dda release`
-    still hits.
+    still hits. Also recognizes the confirmation relay: a bare
+    `dda_relay[.py]` command, `python <path/>dda_relay.py relay ...`, and
+    `python -m dda_relay relay ...`.
+
+    Returns (word, via_relay) pairs: `via_relay` is True for the relay,
+    whose human-only subcommand is `relay`.
     """
-    out: list[str] = []
+    out: list[tuple[str, bool]] = []
     n = len(tokens)
     for i, tok in enumerate(tokens):
         b = _dda_base(tok)
         if b in _DDA_NAMES:
             if i + 1 < n:
-                out.append(_unquoted_word(tokens[i + 1]))
+                out.append((_unquoted_word(tokens[i + 1]), False))
+        elif b in _RELAY_BASES:
+            if i + 1 < n:
+                out.append((_unquoted_word(tokens[i + 1]), True))
         elif _PYTHON_RE.match(b):
             j = i + 1
             while j < n:
                 bj = _dda_base(tokens[j])
                 if bj == "dda.py" or (bj == "cli.py" and "dda" in tokens[j].lower()):
                     if j + 1 < n:
-                        out.append(_unquoted_word(tokens[j + 1]))
+                        out.append((_unquoted_word(tokens[j + 1]), False))
+                    break
+                if bj in _RELAY_BASES:
+                    if j + 1 < n:
+                        out.append((_unquoted_word(tokens[j + 1]), True))
                     break
                 low = tokens[j].strip("'\"").lower()
                 if low == "-m":
                     if j + 1 < n and tokens[j + 1].strip("'\"").lower() in _DDA_MODULES:
                         if j + 2 < n:
-                            out.append(_unquoted_word(tokens[j + 2]))
+                            out.append((_unquoted_word(tokens[j + 2]),
+                                        tokens[j + 1].strip("'\"").lower() == "dda_relay"))
                     break
                 if low.startswith("-m") and len(low) > 2:
                     # Attached form (`python -mdda ...` runs module `dda`).
                     if low[2:] in _DDA_MODULES:
                         if j + 1 < n:
-                            out.append(_unquoted_word(tokens[j + 1]))
+                            out.append((_unquoted_word(tokens[j + 1]), low[2:] == "dda_relay"))
                     break
                 if low in _PY_OPTS_WITH_ARG:
                     j += 2 if j + 1 < n else 1
@@ -681,19 +705,50 @@ def _word_tokens(text: str) -> list[str]:
     return re.findall(r"[A-Za-z0-9_.:/\\-]+", text.lower())
 
 
+def _python_c_inners(tokens: list[str]) -> list[str]:
+    """Code strings passed via `python -c` inside a token stream.
+
+    Everything after `-c` is the command's own code, never a script, so
+    the argv parse stops there — but an approval call can hide inside the
+    `-c` string (`python -c "... dda_relay.main(['relay', ...])"`, probe-G
+    input 6), so each inner is returned for its own parse.
+    """
+    inners: list[str] = []
+    n = len(tokens)
+    for i, tok in enumerate(tokens):
+        if not _PYTHON_RE.match(_dda_base(tok)):
+            continue
+        j = i + 1
+        while j < n:
+            low = tokens[j].strip("'\"").lower()
+            if low == "-c":
+                if j + 1 < n:
+                    inners.append(_unquote(tokens[j + 1]))
+                break
+            if low in _PY_OPTS_WITH_ARG:
+                j += 2 if j + 1 < n else 1
+                continue
+            if tokens[j].startswith("-") and tokens[j] != "-":
+                j += 1
+                continue
+            break
+    return inners
+
+
 def human_only_violation(view: ToolView) -> str | None:
-    """`dda release` / `dda abandon` are human-only (§6.0): an agent must ask Brad, never run them.
+    """`dda release` / `dda abandon` / `dda approve` / `dda_relay relay` are
+    human-only (§6.0, §4.5): an agent must ask Brad, never run them.
 
     Parses argv like `is_clean_dda_invocation` instead of regexing the blob:
-    `dda "release"` (quoted subcommand) and `dda status && dda release`
+    `dda "approve"` (quoted subcommand) and `dda status && dda release`
     (chained) both hit; `dda lock --amend "release notes"` does not (only
     the subcommand-position word after `dda` counts, not a later flag value).
     Shell wrappers are re-parsed: `-c`/`/c`/`-Command` string arguments
     (including bundled sh flags like `-lc` and `--command`), nested
     wrappers (`bash -c 'sh -c "dda release"'`), quote-spliced names
     (`d''da`), redirect-attached words (`dda release>out.txt`), and
-    `python -m ddalib.cli`, plus unquoted `;`/`&&`/`|`/`>` separators,
-    parens, and `$(...)`/backtick expansions.
+    `python -m dda|ddalib|ddalib.cli|dda_relay`, plus unquoted `;`/`&&`/`|`/`>`
+    separators, parens, and `$(...)`/backtick expansions.
 
     The word-token backstop (for non-shell texts such as
     `subprocess.call(["dda", "release"])`, which never survives shlex as
@@ -701,6 +756,13 @@ def human_only_violation(view: ToolView) -> str | None:
     false-positives on prose that merely mentions the command
     (`git commit -m "prep for dda release"`, `echo "ask Brad to run dda
     release"`), where the argv parse correctly finds no `dda` invocation.
+
+    Two backstops close the relay gaps (probe-G inputs 6-8, 11-12):
+    `python -c` inners are parsed as their own command lines (on both
+    tools), and in-process approval calls — `do_approve` used directly,
+    or the `dda_relay` module driven from code — are flagged by word
+    (whole text for `execute_code`, `-c` inners only for `terminal`, so
+    prose that merely names the relay still passes).
     """
     if view.tool not in CODE_TOOLS:
         return None
@@ -712,9 +774,23 @@ def human_only_violation(view: ToolView) -> str | None:
         token_lists = [_argv_tokens(c) for c in candidates]
         if view.tool == "execute_code":
             token_lists.append(_word_tokens(text))
+        inners: list[str] = []
+        for toks in list(token_lists):
+            inners.extend(_python_c_inners(toks))
+        for inner in inners:
+            token_lists.append(_argv_tokens(inner))
+            if view.tool == "execute_code":
+                token_lists.append(_word_tokens(inner))
+        if view.tool == "execute_code":
+            code_hit = _IN_PROCESS_RE.search(text) or _IN_PROCESS_MAIN_RE.search(text)
+        else:
+            code_hit = next((m for m in (_IN_PROCESS_RE.search(i) or _IN_PROCESS_MAIN_RE.search(i)
+                                        for i in inners) if m), None)
+        if code_hit:
+            return code_hit.group(0)
         for toks in token_lists:
-            for nxt in _dda_next_words(toks):
-                if nxt in _HUMAN_ONLY_SUBS:
+            for nxt, via_relay in _dda_next_words(toks):
+                if nxt in _HUMAN_ONLY_SUBS or (via_relay and nxt == _RELAY_SUB):
                     return nxt
     return None
 

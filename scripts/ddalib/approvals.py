@@ -55,6 +55,12 @@ KINDS = ("tier", "spec", "amendment", "signoff", "definition", "correction", "co
 FORMAT = "dda-approval-v2"
 FORMAT_V1 = "dda-approval-v1"
 _DIGEST_RE = re.compile(r"^[0-9a-f]{4,64}$")
+# Approval writes pin the digest: an explicit artifact must be the 16+
+# hex prefix dda computed, never a bare token (probe-D2: `--artifact d`).
+_DIGEST16_RE = re.compile(r"^[0-9a-f]{16,64}$")
+# Trailer planting (probe-F): the approval note becomes the commit
+# message, so a `Dda-...:` line in the note would forge commit trailers.
+_TRAILER_PLANT_RE = re.compile(r"^Dda-[A-Za-z-]+:", re.M)
 
 
 class ApprovalState(str, enum.Enum):
@@ -532,6 +538,55 @@ def fingerprints_of(approvers: list) -> list[str]:
 
 # ---------- dda approve ----------
 
+# ---------- channel replay (one confirming message confirms one digest) ----------
+
+def _channel_uses(wd: Workdir) -> list[dict]:
+    """Every committed channel confirmation on this branch.
+
+    Each entry: {channel, user_id, message_id, digest, kind, commit}.
+    Both CONFIRMED channels are scanned across all kinds: a message id
+    spent on one kind or digest cannot confirm another (probe-B/C replay).
+    """
+    out: list[dict] = []
+    r = _git(wd, "log", "--reverse", "--topo-order", "--diff-filter=A", "--format=%H", "--",
+             ".analysis/approvals")
+    if r.returncode != 0:
+        return out
+    prefix = _repo_prefix(wd)
+    for sha in [ln.strip() for ln in r.stdout.splitlines() if ln.strip()]:
+        if not _git_ok(wd, "merge-base", "--is-ancestor", sha, "HEAD"):
+            continue
+        only = _only_added_file(wd, sha, prefix)
+        if not only or not only.startswith(".analysis/approvals/"):
+            continue
+        try:
+            rec = json.loads(_show_blob(wd, sha, only).stdout)
+        except (ValueError, subprocess.SubprocessError):
+            continue
+        if not isinstance(rec, dict):
+            continue
+        for block in ("telegram", "chat"):
+            blk = rec.get(block)
+            if not isinstance(blk, dict):
+                continue
+            uid, mid = blk.get("user_id"), blk.get("message_id")
+            d = _record_digest(rec)
+            if uid and mid and d:
+                out.append({"channel": block, "user_id": str(uid), "message_id": str(mid),
+                            "digest": d, "kind": rec.get("kind"), "commit": sha})
+    return out
+
+
+def _channel_spent_on(wd: Workdir, channel: str, user_id: str, message_id: str,
+                      digest: str | None) -> str | None:
+    """The other digest the same (channel, user, message) already confirms, else None."""
+    for use in _channel_uses(wd):
+        if (use["channel"], use["user_id"], use["message_id"]) == (channel, user_id, message_id) \
+                and use["digest"] != digest:
+            return str(use["digest"])
+    return None
+
+
 def do_approve(wd: Workdir, kind: str, artifact: str | None = None,
                key: str | None = None, sign: bool = True, message: str | None = None,
                telegram: tuple[str, str] | None = None,
@@ -550,6 +605,9 @@ def do_approve(wd: Workdir, kind: str, artifact: str | None = None,
     """
     wd.require_initialized()
     check_kind_artifact(kind, artifact)
+    if message and _TRAILER_PLANT_RE.search(message):
+        raise DdaError("approval notes must not contain `Dda-...:` lines: the note becomes the "
+                       "commit message, so such a line would forge commit trailers")
     ch_method: str | None = None
     ch_pair: tuple[str, str] | None = None
     if telegram is not None and chat is not None:
@@ -583,6 +641,10 @@ def do_approve(wd: Workdir, kind: str, artifact: str | None = None,
     selector = artifact if kind in ("correction", "definition") else None
     digest, payload = canonical_payload(wd, kind, selector)
     if artifact is not None and kind not in ("correction", "definition"):
+        if not _DIGEST16_RE.match(artifact):
+            raise DdaError(f"explicit artifact tokens are removed: `dda approve {kind}` computes "
+                           f"the digest from current state (got {artifact[:32]!r}; pass the 16+ hex "
+                           f"digest prefix dda prints, or nothing)")
         if not (artifact == digest or digest.startswith(artifact)):
             raise DdaError(f"explicit artifact tokens are removed: `dda approve {kind}` computes "
                            f"the digest from current state (current {digest[:16]}, got {artifact[:16]})")
@@ -630,6 +692,16 @@ def do_approve(wd: Workdir, kind: str, artifact: str | None = None,
                                        f"verify it with `dda approved {kind}`")
         except (ValueError, OSError):
             pass
+    if chd is not None and tg_block:
+        # Replay: one confirming message confirms one digest. A reused
+        # (channel, user, message id) is Brad's earlier yes, not a new
+        # one — refuse; the relay must capture a fresh confirmation.
+        for use in _channel_uses(wd):
+            if ((use["channel"], use["user_id"], use["message_id"]) ==
+                    (chd["method"], tg_user, tg_msg) and use["digest"] != digest):
+                raise DdaError(f"{chd['label']} message {tg_msg} already confirms "
+                               f"{use['digest'][:16]} (commit {use['commit'][:12]}); a confirming "
+                               f"message confirms one digest — capture a fresh yes from the chat")
     approvals_dir(wd).mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
     if _git(wd, "rev-parse", "--show-toplevel").returncode != 0:
@@ -1014,6 +1086,16 @@ def verify_approval(wd: Workdir, kind: str, artifact: str | None = None) -> dict
             return fail(ApprovalState.BAD_SIG, f"{rel}: malformed {chd['label']} confirmation ({problem})",
                         **extra)
         uid, mid = blk["user_id"], blk["message_id"]
+        # Replay at verify time: the same message id confirming a
+        # different digest is a replayed yes — BAD_SIG, even when the
+        # record and trailers are otherwise well-formed (probe-B shape:
+        # hand-made records bypass do_approve's refusal).
+        spent = _channel_spent_on(wd, chd["method"], uid, mid, digest)
+        if spent is not None:
+            return fail(ApprovalState.BAD_SIG,
+                        f"{rel}: {chd['label']} message {mid} already confirms {spent[:16]} "
+                        f"(one confirming message confirms one digest; a replayed yes is a forgery)",
+                        **extra)
         if kind == "config":
             by_digest, problems = _config_chain(wd)
             entry = by_digest.get(digest or "")
@@ -1180,21 +1262,23 @@ def index_approvals(wd: Workdir, kind: str) -> list[dict]:
 
 
 def confirmed_channels(wd: Workdir) -> list[str]:
-    """Channel labels behind human CONFIRMED verdicts in the approvals index.
+    """Channel labels behind LIVE CONFIRMED verdicts (re-verified now).
 
+    Rebuilt from `verify_approval` per kind, never from the verdict
+    index: a stale CONFIRMED row (approval superseded, state drifted)
+    must not keep rendering as confirmed (probe-E). A kind whose
+    verification errors is skipped — verification truth, honestly read.
     The footer names the channel per approval from this, so a Chat yes
     never renders as Telegram and vice versa (§4.5).
     """
-    from . import ledger
-    try:
-        recs = chain.read_records(ledger.approvals_index(wd))
-    except OSError:
-        return []
     out: list[str] = []
-    for r in recs:
-        if (isinstance(r, dict) and r.get("state") == ApprovalState.CONFIRMED.value
-                and r.get("verified")):
-            chd = _channel_desc(str(r.get("method") or ""))
+    for kind in KINDS:
+        try:
+            v = verify_approval(wd, kind)
+        except (DdaError, OSError):
+            continue
+        if v.get("state") == ApprovalState.CONFIRMED.value and v.get("verified"):
+            chd = _channel_desc(str(v.get("method") or ""))
             if chd and chd["label"] not in out:
                 out.append(chd["label"])
     return out

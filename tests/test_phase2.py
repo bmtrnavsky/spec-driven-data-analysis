@@ -303,6 +303,38 @@ class TestHooks(Base):
         self.assertTrue(b)
         self.assertIn("Re-lock", msg)
 
+    def test_lockguard_approval_relay_coverage(self):
+        # Opus probe-G inputs: every agent-side path to a CONFIRMED
+        # record (direct approve, relay script/module, quoted or chained
+        # forms, python -c, in-process API) blocks in a bound session.
+        cmds = ("dda approve spec --telegram 3080738179 55 /tmp/wd",
+                "python scripts/dda_relay.py relay --channel telegram --user-id 3080738179 --message-id 55 --kind spec /tmp/wd",
+                "python -m dda approve spec --kind spec /tmp/wd",
+                'dda "approve" spec --telegram 3080738179 55 /tmp/wd',
+                "PYTHONPATH=scripts python -m ddalib.cli approve spec --telegram 3080738179 55 /tmp/wd",
+                "python -c \"import sys; sys.path.insert(0, 'scripts'); import dda_relay; dda_relay.main(['relay', '--channel', 'telegram'])\"",
+                "cd scripts && python -m ddalib.cli approve spec --telegram 3080738179 55 /tmp/wd",
+                "dda_relay relay --channel telegram --user-id 3080738179 --message-id 55 --kind spec /tmp/wd")
+        for cmd in cmds:
+            self.assertTrue(self.blocked("lockguard", "terminal", {"command": cmd})[0], cmd)
+        codes = ("from ddalib import approvals; approvals.do_approve(wd, 'spec', telegram=('3080738179', '55'))",
+                 "import sys; sys.path.insert(0, 'scripts'); from ddalib.cli import main; main(['approve', 'spec', '--telegram', '3080738179', '55', '.'])",
+                 "import subprocess, sys; subprocess.run([sys.executable, 'scripts/dda_relay.py', 'relay', '--channel', 'telegram'])",
+                 "import subprocess; subprocess.run(['dda', 'approve', 'spec', '--telegram', '3080738179', '55', '/tmp/wd'])",
+                 "import sys; sys.path.insert(0, 'scripts'); from ddalib import approvals; approvals.do_approve('spec', telegram=('3080738179', '999'))")
+        for code in codes:
+            self.assertTrue(self.blocked("lockguard", "execute_code", {"code": code})[0], code)
+        # Clean neighbors still pass (the signing layer stays strict about
+        # bare `dda approve` / `dda_relay relay` words on terminal — an
+        # agent has no clean reason to utter them to a shell).
+        for cmd in ("dda status", "python scripts/dda.py lock",
+                    "python -c \"print(open('raw.csv').read())\"",
+                    'echo "ask Brad to run dda release after your yes"',
+                    'git commit -m "prep for dda release"'):
+            self.assertFalse(self.blocked("lockguard", "terminal", {"command": cmd})[0], cmd)
+        self.assertFalse(self.blocked("lockguard", "execute_code",
+                                       {"code": "print(open('raw.csv').read())"})[0])
+
     def test_lockguard_signing(self):
         for cmd in ("git commit -S -m x", "git -c commit.gpgsign=true commit -m x", "git tag -s v1 -m x",
                     "dda approve spec", "git config user.signingkey ABC",

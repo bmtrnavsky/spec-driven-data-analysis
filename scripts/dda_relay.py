@@ -8,10 +8,14 @@ the same as agent-run `dda approve`). Stdlib only.
 Two steps, one per subcommand:
 
   fetch  find Brad's confirming message in the Telegram update stream and
-         print its ids (read-only: getUpdates with NO offset, so the
-         gateway's polling is undisturbed and nothing is consumed).
+         print its ids (read-only: getUpdates with NO offset, so nothing
+         is consumed; note it polls the same endpoint as the gateway, so
+         a 409 while the gateway polls is polling contention, not refusal —
+         long term the relay reads from the gateway store).
   relay  record the confirmation: refuse unknown senders before writing
-         anything, run `dda approve`, then walk it with `dda approved`.
+         anything, require the digest Brad confirmed (--digest, 16+ hex,
+         compared against the canonical payload before writing), run
+         `dda approve`, then walk it with `dda approved`.
          Exits 0 only if the walk comes back human (CONFIRMED/VERIFIED) —
          any failure closes the gate instead of passing it.
 
@@ -101,6 +105,24 @@ def cmd_relay(args) -> int:
         return 2
     kw = {"telegram": (args.user_id, args.message_id)} if args.channel == "telegram" \
         else {"chat": (args.user_id, args.message_id)}
+    # Digest pin: Brad confirms a specific digest in the chat. The relay
+    # carries it and refuses to write unless it still matches the
+    # canonical payload — his yes binds this exact state, not a later one.
+    if not args.digest or not approvals._DIGEST16_RE.match(args.digest):
+        print("dda_relay: refusing — --digest (16+ hex) is required: pass the digest Brad confirmed",
+              file=sys.stderr)
+        return 2
+    try:
+        current = approvals.current_digest(wd, args.kind)
+    except Exception as exc:
+        print(f"dda_relay: refusing — cannot compute the current {args.kind} digest ({exc})",
+              file=sys.stderr)
+        return 1
+    if current != args.digest and not current.startswith(args.digest):
+        print(f"dda_relay: refusing — state moved since Brad's yes "
+              f"(confirmed {args.digest[:16]}, current {current[:16]}); capture a fresh yes",
+              file=sys.stderr)
+        return 1
     try:
         res = approvals.do_approve(wd, args.kind, artifact=args.artifact,
                                    message=args.message, **kw)
@@ -141,6 +163,9 @@ def main(argv=None) -> int:
     r.add_argument("--message-id", required=True, help="confirming message id, recorded verbatim")
     r.add_argument("--kind", required=True, help="approval kind: spec, config, ...")
     r.add_argument("--artifact", default=None)
+    r.add_argument("--digest", default=None,
+                   help="the digest Brad confirmed (16+ hex, required): the relay refuses "
+                        "unless it matches the canonical payload")
     r.add_argument("--message", "-m", default=None, help="approval note")
     r.add_argument("workdir", help="the analysis workdir")
     r.set_defaults(func=cmd_relay)

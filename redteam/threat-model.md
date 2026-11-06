@@ -60,26 +60,35 @@ edited record file no longer passes.
   `uv run`, the `py` launcher, `python -m ddalib.cli` (spaced and
   attached `-mddalib.cli`, options-with-args such as `-W ignore` skipped),
   and
-  `python <path/>ddalib/cli.py` via argv. Shell-level obfuscation still
+  `python <path/>ddalib/cli.py` via argv, `dda approve` and the
+  confirmation relay (`dda_relay relay`, `python <path/>dda_relay.py
+  relay`, `python -m dda_relay relay`) as human-only argv forms,
+  `python -c` inner strings re-parsed as their own command lines, and
+  in-process calls (`do_approve` used directly, the `dda_relay` module
+  driven from code, `ddalib.cli.main([...])` with a human-only
+  subcommand first). Shell-level obfuscation still
   gets through (evasion, not slips — §0.1): variable indirection
   (`x=dda; $x release`), runtime-built commands (`eval`, downloaded
-  scripts), and `python -c "...cli.main(['release', ...])"` (the release
-  hides inside a `-c` string, not argv). A runtime-built command is caught
+  scripts). A runtime-built command is caught
   only if it resolves to a blocked tool call at the kernel hook.
 - **human-only.in-process-api** — `execute_code` that calls the Python API
-  directly (`binding.release(...)`, `ddalib.cli.main(["release", ...])`)
-  instead of a `dda` CLI invocation is not flagged: there is no `dda`
-  argv to parse, and the word-token backstop only fires on a `dda`
-  token. The CLI path is the enforced path; in-process calls from agent
-  code are a code-review finding, not a hook finding.
+  directly (`binding.release(...)`) instead of a `dda` CLI invocation is
+  not flagged: there is no `dda` argv to parse, and the word-token
+  backstop only fires on approval/relay words or a `main([...])` call
+  with a human-only subcommand first. `ddalib.cli.main(["release",
+  ...])`, `do_approve`, and the `dda_relay` module ARE flagged. The CLI
+  path is the enforced path; other in-process calls from agent code are
+  a code-review finding, not a hook finding.
 - **human-only.word-token-backstop scope** — the word-token pass runs for
-  `execute_code` only. On `terminal` it false-positived on prose that
+  `execute_code` only, plus `python -c` inner strings on `terminal`
+  (code, not prose — re-parsed as their own command lines). On `terminal`
+  the outer word pass still false-positives on prose that
   merely mentions the command (`git commit -m "prep for dda release"`,
-  `echo "ask Brad to run dda release"`); the argv parse is authoritative
-  there. Cost: a `terminal` command that embeds a second `dda release`
-  inside a single non-argv word (e.g. inside a quoted blob passed to
-  another program) is missed — accepted, that shape is evasion (§0.1),
-  not a slip.
+  `echo "ask Brad to run dda release"`), so the argv parse stays
+  authoritative there. Cost: a `terminal` command that embeds a second
+  `dda release` inside a single non-argv word (e.g. inside a quoted blob
+  passed to another program) is missed — accepted, that shape is evasion
+  (§0.1), not a slip.
 - **blocked-fallback.heuristics** — `extra.status` is authoritative when
   present (`blocked` ⟺ blocked; `error`/`ok` ⟹ ran). Without it (older
   or synthetic payloads) the result-body/error-text fallbacks apply, and

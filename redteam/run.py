@@ -209,7 +209,15 @@ class Harness:
                          ("human-only.module-release", f"python -m ddalib.cli release {self.wd}"),
                          ("human-only.module-attached-release", f"python -mddalib.cli release {self.wd}"),
                          ("human-only.python-optarg-release", f"python -W ignore -m ddalib.cli release {self.wd}"),
-                         ("human-only.module-abandon", f"py -m ddalib.cli abandon {self.wd} --reason x")):
+                         ("human-only.module-abandon", f"py -m ddalib.cli abandon {self.wd} --reason x"),
+                         ("human-only.approve-direct", "dda approve spec --telegram 3080738179 55"),
+                         ("human-only.approve-quoted", 'dda "approve" spec --telegram 3080738179 55'),
+                         ("human-only.approve-module", "python -m dda approve spec --kind spec"),
+                         ("human-only.approve-module-cli", f"python -m ddalib.cli approve spec --telegram 3080738179 55 {self.wd}"),
+                         ("human-only.relay-script", "python scripts/dda_relay.py relay --channel telegram --user-id 3080738179 --message-id 55 --kind spec"),
+                         ("human-only.relay-direct", "dda_relay relay --channel telegram --user-id 3080738179 --message-id 55 --kind spec"),
+                         ("human-only.relay-module", "python -m dda_relay relay --channel telegram --user-id 3080738179 --message-id 55 --kind spec"),
+                         ("human-only.relay-python-c", "python -c \"import dda_relay; dda_relay.main(['relay', '--channel', 'telegram'])\"")):
             blocked, res = self.all_blocking(BOUND, "terminal", {"command": cmd})
             by = [h for h, r in res.items() if r["blocked"]]
             self.record(cid, "bound pre-lock", cmd,

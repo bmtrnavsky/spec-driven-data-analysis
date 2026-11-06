@@ -297,7 +297,7 @@ def skeleton(wd: Workdir, short: bool = False) -> str:
     except Exception:
         channels = []
     confirmed = (f"confirmed ({', '.join(channels)})" if channels
-                 else "confirmed (no CONFIRMED verdicts indexed yet)")
+                 else "unconfirmed (no live CONFIRMED approval)")
     known = {
         "tier": exp["tier"] or "", "spec version": f"v{exp['version']}", "lock hash": exp["lock_hash"][:12],
         "lock timestamp": exp["locked_at"] or "", "lock label": exp["label"],
