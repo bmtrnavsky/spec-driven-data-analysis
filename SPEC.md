@@ -421,7 +421,14 @@ An approval must be something the agent cannot produce.
     `--no-sign` remains the agent's own claim (see "Unverified approvals").
     The agent never runs `dda approve` either way (`lockguard` blocks it);
     the Telegram path is run by whatever relays Brad's confirmation, with
-    the message id taken from Brad's own message. The message id is the
+    the message id taken from Brad's own message. No relay service exists
+    yet: today that step is Brad (or someone beside him) running the
+    command by hand on the workdir host, and only Brad's Telegram account
+    can trigger it (the user id must equal his `telegram_user_id`, and the
+    message id must be his own confirming message, copied verbatim). An
+    automated listener is only built if approval volume justifies it; it
+    would run on the workdir host, accept only his user id, and still
+    record the message id verbatim. The message id is the
     audit handle: a CONFIRMED record whose message does not exist in the
     chat, or is not Brad's confirmation of that digest, is a forgery.
   - Config: approvers take `telegram_user_id` alongside (or instead of)
@@ -1311,6 +1318,9 @@ hook false-positive blocks left unfixed.
    signed-in account counts the same at every tier, PUBLISH included
    (CONFIRMED vs VERIFIED, the record shows which). Without a key,
    DECIDE runs with disclosed unverified approvals and PUBLISH parks.
+   Redirect 2026-11-06 (Brad): no passphrase — Telegram CONFIRMED is the
+   primary path (§4.5; equal at every tier, PUBLISH included). The
+   signed-key path stays wired as optional/reserve; nothing blocks on it.
 8. **Second-goldfish model: DECIDED 2026-11-06 — reviewer independence,
    not a model pick.** The rule is different model families when
    available, resolved at runtime through config `goldfish_models`
