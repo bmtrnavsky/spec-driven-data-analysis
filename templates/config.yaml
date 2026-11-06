@@ -46,3 +46,4 @@ approvers: []
 #     fingerprint: SHA256:4ntXMUfsddmYgfM8kddKrKTq2nTdB3Qy/cSUPR0kJWw
 #     # key: ssh-ed25519 AAAAC3... (full public key also accepted)
 #     telegram_user_id: "8919091876"  # Telegram confirmations (`dda approve --telegram`) count as signed
+#     chat_user_id: "brad"            # regular-chat confirmations (`dda approve --chat`) count as signed

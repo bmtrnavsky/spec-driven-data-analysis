@@ -291,6 +291,13 @@ def skeleton(wd: Workdir, short: bool = False) -> str:
         evals_default = f"{ver.get('evals_matched', 0)} matched, {ver.get('evals_passed', 0)} passed (see verify.md)"
     elif exp.get("n_eval_cases") and not short:
         evals_default = f"{exp['n_eval_cases']} matched (run `dda verify` to execute checks)"
+    try:
+        from . import approvals as _approvals_channels
+        channels = _approvals_channels.confirmed_channels(wd)
+    except Exception:
+        channels = []
+    confirmed = (f"confirmed ({', '.join(channels)})" if channels
+                 else "confirmed (no CONFIRMED verdicts indexed yet)")
     known = {
         "tier": exp["tier"] or "", "spec version": f"v{exp['version']}", "lock hash": exp["lock_hash"][:12],
         "lock timestamp": exp["locked_at"] or "", "lock label": exp["label"],
@@ -302,7 +309,7 @@ def skeleton(wd: Workdir, short: bool = False) -> str:
                    f"approver fingerprints: {', '.join(exp['fingerprints']) or 'none configured'}; "
                    f"goldfish: {review_summary(wd)}"),
         "approvals": (f"config {(exp['config_hash'] or '')[:12]}: {exp['config_approval'] or 'unknown'}; "
-                      "other kinds verified (signed), confirmed (Telegram), or unverified per approvals.index.jsonl"),
+                      f"other kinds verified (signed), {confirmed}, or unverified per approvals.index.jsonl"),
         # Author-filled fields: fillable non-empty defaults so a fresh skeleton
         # verifies; the author replaces them with the report's real content.
         "question": _skeleton_question(wd),

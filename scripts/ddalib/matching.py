@@ -366,6 +366,7 @@ _SIGNING = [
     (re.compile(r"\bgit\b[^\n;&|]*?\bconfig\b[^\n;&|]*?\b(?:user\.signingkey|gpg\.format|gpg\.program|gpg\.ssh\.program)\b",
                 re.IGNORECASE), "git signing config change"),
     (re.compile(r"\bdda(?:\.py|\.cmd|\.bat|\.exe)?['\"]?\s+approve\b"), "dda approve (human-only)"),
+    (re.compile(r"\bdda_relay(?:\.py|\.cmd|\.bat|\.exe)?['\"]?\s+relay\b"), "dda relay (human-only)"),
 ]
 
 

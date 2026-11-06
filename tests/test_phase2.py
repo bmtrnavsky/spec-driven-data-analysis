@@ -305,7 +305,9 @@ class TestHooks(Base):
 
     def test_lockguard_signing(self):
         for cmd in ("git commit -S -m x", "git -c commit.gpgsign=true commit -m x", "git tag -s v1 -m x",
-                    "dda approve spec", "git config user.signingkey ABC"):
+                    "dda approve spec", "git config user.signingkey ABC",
+                    "python scripts/dda_relay.py relay --channel telegram --user-id 3080738179 --message-id 1 spec",
+                    "dda_relay relay --channel chat --user-id brad --message-id 1 spec"):
             self.assertTrue(self.blocked("lockguard", "terminal", {"command": cmd})[0], cmd)
         self.assertFalse(self.blocked("lockguard", "terminal", {"command": "git status"})[0])
 

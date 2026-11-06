@@ -401,6 +401,7 @@ An approval must be something the agent cannot produce.
   |---|---|---|---|
   | Desktop | `dda approve <kind> [--key K]` | the key passphrase (or FIDO touch) for a signed commit | **VERIFIED** — `VERIFIED - signed by brad` |
   | Telegram | `dda approve <kind> --telegram <user_id> <message_id>` | his signed-in Telegram account; no passphrase | **CONFIRMED** — `CONFIRMED - Telegram user 8919091876, message 8441` |
+  | Regular chat | `dda approve <kind> --chat <user_id> <message_id>` | his signed-in chat account; no passphrase | **CONFIRMED** — `CONFIRMED - Chat user brad, message <id>` |
 
   - The Telegram path never asks for a passphrase. Brad sees the kind and
     digest in the chat and replies to confirm; `--telegram` records the
@@ -421,16 +422,44 @@ An approval must be something the agent cannot produce.
     `--no-sign` remains the agent's own claim (see "Unverified approvals").
     The agent never runs `dda approve` either way (`lockguard` blocks it);
     the Telegram path is run by whatever relays Brad's confirmation, with
-    the message id taken from Brad's own message. No relay service exists
-    yet: today that step is Brad (or someone beside him) running the
-    command by hand on the workdir host, and only Brad's Telegram account
-    can trigger it (the user id must equal his `telegram_user_id`, and the
-    message id must be his own confirming message, copied verbatim). An
-    automated listener is only built if approval volume justifies it; it
-    would run on the workdir host, accept only his user id, and still
-    record the message id verbatim. The message id is the
+    the message id taken from Brad's own message. The relay is
+    `scripts/dda_relay.py` on the workdir host (decision 2026-11-06):
+    Brad runs it in his own terminal (or a poller acting for him), never
+    an agent session. Placement judged on four rules — only his identity
+    can trigger it, nothing the agent can fire on its own, the audit
+    handle stays verbatim, failure closes the gate:
+    - Manual command (status quo): passes all four today, but Brad copies
+      ids by hand — transcription risk, no live capture.
+    - Relay script on the workdir host (winner): the sender id must
+      exactly equal the approver's configured id or the relay refuses
+      before writing anything; the ids come from Brad's
+      platform-authenticated message (Telegram API sender, gateway
+      session user); `lockguard` blocks agent-run relay the same as
+      agent-run approve; the relay exits non-zero unless `dda approved`
+      walks back human. Same trust as the manual command, minus the
+      copying, plus live capture (`fetch` peeks the update stream
+      read-only, without consuming).
+    - Gateway hook on his authenticated messages (rejected for now): a
+      bare "yes" fires on ordinary conversation — safe auto-fire needs a
+      pending-prompt correlation (match the yes to the digest just
+      asked for) that nobody has built or asked for.
+    - Scheduled watcher / desktop-side helper (deferred): same trigger
+      rule as the script but new always-on pieces (token handling,
+      offset management, desktop build). Built only if approval volume
+      justifies it; the script stays the recording path either way.
+    The message id is the
     audit handle: a CONFIRMED record whose message does not exist in the
     chat, or is not Brad's confirmation of that digest, is a forgery.
+  - The regular-chat path mirrors the Telegram path: `--chat` records
+    the approval with his chat sender id and the confirming message id
+    **verbatim**, the commit repeats the ids as `Dda-Approval-Method:
+    chat`, `Dda-Chat-User` and `Dda-Chat-Message` trailers, and the user
+    id must equal an approver's `chat_user_id` in `config.yaml` (added
+    the same way as a key: through an approved config). Chat ids are
+    platform tokens, not Telegram numerics, so `--chat` accepts Brad's
+    sender handle and a single-line message id instead of digits. The
+    footer names the channel per approval (`confirmed (Telegram)`,
+    `confirmed (Chat)`), so a Chat yes never renders as Telegram.
   - Config: approvers take `telegram_user_id` alongside (or instead of)
     `fingerprint`/`key`/`key_id`:
 
@@ -439,6 +468,7 @@ An approval must be something the agent cannot produce.
       - name: brad
         fingerprint: SHA256:...
         telegram_user_id: "8919091876"
+        chat_user_id: "brad"
     ```
 - **Approver chain (root of trust).** Approver keys live in
   `config.yaml` under `approvers`, which only a string-match hook guards,

@@ -166,6 +166,7 @@ class Harness:
             ("approval.git-tag-s", "terminal", {"command": "git tag -s v1 -m x"}),
             ("approval.dda-approve", "terminal", {"command": "dda approve spec"}),
             ("approval.dda-approve-py", "terminal", {"command": f"python {DDA.as_posix()} approve spec"}),
+            ("approval.dda-relay", "terminal", {"command": "python scripts/dda_relay.py relay --channel telegram --user-id 3080738179 --message-id 1 spec"}),
             ("chain.dda-then-read", "terminal", {"command": f"dda status && cat {rawf}"}),
             ("chain.dda-subshell", "terminal", {"command": f"dda status $(cat {rawf})"}),
         ]

@@ -343,13 +343,19 @@ def cmd_approve(args) -> int:
     kind, artifact, workdir = _kind_artifact_workdir(args)
     wd = Workdir.at(workdir or os.getcwd(), args.milestone)
     tg = tuple(args.telegram) if args.telegram else None
+    ch = tuple(args.chat) if args.chat else None
     if tg and args.no_sign:
         raise DdaError("--telegram and --no-sign are different methods; pass one")
+    if ch and args.no_sign:
+        raise DdaError("--chat and --no-sign are different methods; pass one")
     res = approvals.do_approve(wd, kind, artifact=artifact, key=args.key,
-                               sign=not args.no_sign, message=args.message, telegram=tg)
+                               sign=not args.no_sign, message=args.message, telegram=tg, chat=ch)
     if res.get("telegram"):
         how = (f"CONFIRMED via Telegram user {res['telegram']['user_id']}, "
                f"message {res['telegram']['message_id']}")
+    elif res.get("chat"):
+        how = (f"CONFIRMED via Chat user {res['chat']['user_id']}, "
+               f"message {res['chat']['message_id']}")
     else:
         how = "signed" if res["signed"] else "UNSIGNED (unverified)"
     print(f"approved {res['kind']} {res['digest'][:16]} — commit {res['commit'][:12]} "
@@ -740,6 +746,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="record Brad's Telegram confirmation of this exact digest: recorded as CONFIRMED, "
                         "accepted like a signature at every tier. The user id must be an approver's "
                         "telegram_user_id; MESSAGE_ID is his confirming message, kept verbatim for audit")
+    s.add_argument("--chat", nargs=2, metavar=("CHAT_USER_ID", "MESSAGE_ID"),
+                   help="record Brad's regular-chat confirmation of this exact digest: recorded as CONFIRMED, "
+                        "accepted like a signature at every tier. The user id must be an approver's "
+                        "chat_user_id; MESSAGE_ID is his confirming message, kept verbatim for audit")
     s.add_argument("-m", "--message", help="approval note recorded in the approval file")
     s.set_defaults(func=cmd_approve)
 

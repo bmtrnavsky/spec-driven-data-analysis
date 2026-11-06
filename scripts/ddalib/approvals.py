@@ -78,8 +78,26 @@ HUMAN_STATES = frozenset({ApprovalState.VERIFIED.value, ApprovalState.CONFIRMED.
 
 METHOD_SIGNED = "signed"
 METHOD_TELEGRAM = "telegram"
+METHOD_CHAT = "chat"
 METHOD_UNSIGNED = "unsigned"
 _TG_ID_RE = re.compile(r"^[1-9][0-9]{0,19}$")
+# Chat ids are platform tokens, not Telegram numerics: Brad's Hermes sender
+# id and the platform message id, recorded verbatim (no whitespace/newlines).
+_CHAT_USER_RE = re.compile(r"^[A-Za-z0-9_.:\-]{1,128}$")
+_CHAT_MSG_RE = re.compile(r"^[^\s]{1,256}$")
+
+
+def _channel_desc(method: str) -> dict | None:
+    """Per-channel record shape for the two CONFIRMED methods (SPEC §4.5)."""
+    if method == METHOD_TELEGRAM:
+        return {"method": METHOD_TELEGRAM, "block": "telegram", "cfg": "telegram_user_id",
+                "label": "Telegram", "user_trailer": "Dda-Telegram-User",
+                "msg_trailer": "Dda-Telegram-Message", "numeric": True}
+    if method == METHOD_CHAT:
+        return {"method": METHOD_CHAT, "block": "chat", "cfg": "chat_user_id",
+                "label": "Chat", "user_trailer": "Dda-Chat-User",
+                "msg_trailer": "Dda-Chat-Message", "numeric": False}
+    return None
 
 
 def is_human(state) -> bool:
@@ -87,22 +105,37 @@ def is_human(state) -> bool:
     return getattr(state, "value", state) in HUMAN_STATES
 
 
-def telegram_approver(approvers: list, user_id) -> str | None:
-    """Approver name whose `telegram_user_id` EQUALS `user_id` (exact), else None."""
+def channel_approver(approvers: list, cfg_key: str, user_id, numeric: bool = True) -> str | None:
+    """Approver name whose `cfg_key` EQUALS `user_id` (exact), else None."""
     uid = str(user_id or "").strip()
-    if not _TG_ID_RE.match(uid):
+    if numeric:
+        if not _TG_ID_RE.match(uid):
+            return None
+    elif not _CHAT_USER_RE.match(uid):
         return None
     for a in approvers or []:
-        if isinstance(a, dict) and str(a.get("telegram_user_id") or "").strip() == uid:
+        if isinstance(a, dict) and str(a.get(cfg_key) or "").strip() == uid:
             return a.get("name")
     return None
 
 
+def telegram_approver(approvers: list, user_id) -> str | None:
+    """Approver name whose `telegram_user_id` EQUALS `user_id` (exact), else None."""
+    return channel_approver(approvers, "telegram_user_id", user_id, numeric=True)
+
+
+def chat_approver(approvers: list, user_id) -> str | None:
+    """Approver name whose `chat_user_id` EQUALS `user_id` (exact), else None."""
+    return channel_approver(approvers, "chat_user_id", user_id, numeric=False)
+
+
 def method_label(verdict: dict) -> str:
     """How an approval was made, for `dda approved` and the index record."""
-    tg = verdict.get("telegram") if isinstance(verdict.get("telegram"), dict) else None
-    if verdict.get("method") == METHOD_TELEGRAM and tg:
-        return f"Telegram user {tg.get('user_id')}, message {tg.get('message_id')}"
+    chd = _channel_desc(str(verdict.get("method") or ""))
+    if chd:
+        blk = verdict.get(chd["block"]) if isinstance(verdict.get(chd["block"]), dict) else None
+        if blk:
+            return f"{chd['label']} user {blk.get('user_id')}, message {blk.get('message_id')}"
     if verdict.get("method") == METHOD_SIGNED:
         return f"signed by {verdict.get('signer') or 'an unmatched key'}"
     if verdict.get("method") == METHOD_UNSIGNED:
@@ -501,7 +534,8 @@ def fingerprints_of(approvers: list) -> list[str]:
 
 def do_approve(wd: Workdir, kind: str, artifact: str | None = None,
                key: str | None = None, sign: bool = True, message: str | None = None,
-               telegram: tuple[str, str] | None = None) -> dict:
+               telegram: tuple[str, str] | None = None,
+               chat: tuple[str, str] | None = None) -> dict:
     """Compute the content digest, embed the canonical payload, commit it.
 
     `artifact`, when given, is a selector (correction case id, definition
@@ -511,20 +545,41 @@ def do_approve(wd: Workdir, kind: str, artifact: str | None = None,
     commit is not signed (no passphrase on this path) and the record carries
     the method, user id, message id verbatim, timestamp, kind, and digest.
     The user id must be a configured approver's `telegram_user_id`.
+    `chat=(user_id, message_id)` is the same shape for a regular-chat yes:
+    the user id must be a configured approver's `chat_user_id`.
     """
     wd.require_initialized()
     check_kind_artifact(kind, artifact)
-    tg_block = None
+    ch_method: str | None = None
+    ch_pair: tuple[str, str] | None = None
+    if telegram is not None and chat is not None:
+        raise DdaError("--telegram and --chat are different methods: a confirmation arrives on one channel")
     if telegram is not None:
+        ch_method, ch_pair = METHOD_TELEGRAM, telegram
+    if chat is not None:
+        ch_method, ch_pair = METHOD_CHAT, chat
+    chd = _channel_desc(ch_method) if ch_method else None
+    tg_block = None
+    tg_user, tg_msg = "", ""
+    if chd is not None and ch_pair is not None:
+        flag = "--telegram" if ch_method == METHOD_TELEGRAM else "--chat"
         if not sign or key:
-            raise DdaError("--telegram cannot be combined with --no-sign or --key: a Telegram "
-                           "confirmation is its own method, never a signed or unsigned commit")
-        tg_user, tg_msg = (str(telegram[0]).strip(), str(telegram[1]).strip())
-        if not _TG_ID_RE.match(tg_user):
-            raise DdaError(f"--telegram user id must be a numeric Telegram user id, got {tg_user!r}")
-        if not _TG_ID_RE.match(tg_msg):
-            raise DdaError(f"--telegram message id must be the numeric id of Brad's confirming "
-                           f"message, got {tg_msg!r}")
+            raise DdaError(f"{flag} cannot be combined with --no-sign or --key: a {chd['label']} "
+                           f"confirmation is its own method, never a signed or unsigned commit")
+        tg_user, tg_msg = (str(ch_pair[0]).strip(), str(ch_pair[1]).strip())
+        if chd["numeric"]:
+            if not _TG_ID_RE.match(tg_user):
+                raise DdaError(f"--telegram user id must be a numeric Telegram user id, got {tg_user!r}")
+            if not _TG_ID_RE.match(tg_msg):
+                raise DdaError(f"--telegram message id must be the numeric id of Brad's confirming "
+                               f"message, got {tg_msg!r}")
+        else:
+            if not _CHAT_USER_RE.match(tg_user):
+                raise DdaError(f"--chat user id must be Brad's chat sender id "
+                               f"(letters, digits, ._: -), got {tg_user!r}")
+            if not _CHAT_MSG_RE.match(tg_msg):
+                raise DdaError("--chat message id must be the single-line id of Brad's confirming "
+                               f"message, got {tg_msg!r}")
     selector = artifact if kind in ("correction", "definition") else None
     digest, payload = canonical_payload(wd, kind, selector)
     if artifact is not None and kind not in ("correction", "definition"):
@@ -538,13 +593,13 @@ def do_approve(wd: Workdir, kind: str, artifact: str | None = None,
     short = digest[:16]
     rel = approval_rel(kind, short)
     path = approval_path(wd, kind, short)
-    if telegram is not None:
-        who = telegram_approver(cfg.get("approvers") or [], tg_user)
+    if chd is not None:
+        who = channel_approver(cfg.get("approvers") or [], chd["cfg"], tg_user, chd["numeric"])
         if not who:
-            raise DdaError(f"Telegram user {tg_user} is not a configured approver: add "
-                           f"`telegram_user_id: \"{tg_user}\"` to an approver in config.yaml "
-                           "(and approve that config) before confirming over Telegram")
-        tg_block = {"user_id": tg_user, "message_id": tg_msg, "approver": who,
+            raise DdaError(f"{chd['label']} user {tg_user} is not a configured approver: add "
+                           f"`{chd['cfg']}: \"{tg_user}\"` to an approver in config.yaml "
+                           f"(and approve that config) before confirming over {chd['label']}")
+        tg_block = {"channel": chd["method"], "user_id": tg_user, "message_id": tg_msg, "approver": who,
                     "confirmed_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
                     "kind": kind, "digest": digest}
     record = {
@@ -560,10 +615,10 @@ def do_approve(wd: Workdir, kind: str, artifact: str | None = None,
         "approvers": cfg.get("approvers") or [],
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "note": message or "",
-        "method": METHOD_TELEGRAM if tg_block else (METHOD_SIGNED if sign else METHOD_UNSIGNED),
+        "method": chd["method"] if chd else (METHOD_SIGNED if sign else METHOD_UNSIGNED),
     }
-    if tg_block:
-        record["telegram"] = tg_block
+    if chd is not None and tg_block:
+        record[chd["block"]] = tg_block
     if path.is_file():
         try:
             if json.loads(path.read_text(encoding="utf-8")).get("digest") == digest:
@@ -582,11 +637,11 @@ def do_approve(wd: Workdir, kind: str, artifact: str | None = None,
     from . import ledger as _ledger
     trailers = _ledger.chain_head_trailers(wd)  # M7: pin chain lengths in the commit message
     msg = message or f"dda approve {kind} {short}"
-    if tg_block:
+    if tg_block and chd is not None:
         # Verbatim, so the commit itself names the chat message to audit.
-        trailers = [f"Dda-Approval-Method: {METHOD_TELEGRAM}",
-                    f"Dda-Telegram-User: {tg_block['user_id']}",
-                    f"Dda-Telegram-Message: {tg_block['message_id']}"] + list(trailers or [])
+        trailers = [f"Dda-Approval-Method: {chd['method']}",
+                    f"{chd['user_trailer']}: {tg_block['user_id']}",
+                    f"{chd['msg_trailer']}: {tg_block['message_id']}"] + list(trailers or [])
     if trailers:
         msg = msg + "\n\n" + "\n".join(trailers)
     _git(wd, "add", "--", rel)
@@ -618,7 +673,7 @@ def do_approve(wd: Workdir, kind: str, artifact: str | None = None,
                        "an approval commit must add exactly one approval file (§4.5)")
     return {"kind": kind, "artifact": digest, "digest": digest, "file": rel,
             "commit": sha, "signed": sign and not tg_block, "method": record["method"],
-            "telegram": tg_block}
+            "telegram": record.get("telegram"), "chat": record.get("chat")}
 
 
 def _only_added_file(wd: Workdir, sha: str, prefix: str | None = None) -> str | None:
@@ -685,27 +740,38 @@ def _commit_trailers(wd: Workdir, sha: str) -> dict[str, str]:
     return out
 
 
-def _telegram_problem(wd: Workdir, rec: dict, sha: str, digest: str | None) -> str | None:
-    """Why a telegram-method record is malformed, else None.
+def _channel_problem(wd: Workdir, rec: dict, sha: str, digest: str | None, chd: dict) -> str | None:
+    """Why a channel-CONFIRMED record does NOT verify, else None.
 
     The record block must bind this exact kind and digest, both ids must be
-    numeric, and the commit trailers must repeat the ids verbatim.
+    well-formed for the channel, and the commit trailers must repeat the ids
+    verbatim.
     """
-    tg = rec.get("telegram")
-    if not isinstance(tg, dict):
-        return "telegram method but no telegram block"
-    uid, mid = str(tg.get("user_id") or ""), str(tg.get("message_id") or "")
-    if not _TG_ID_RE.match(uid) or not _TG_ID_RE.match(mid):
-        return "telegram user/message ids are not numeric"
-    if tg.get("kind") != rec.get("kind") or tg.get("digest") != digest:
-        return "telegram confirmation does not bind this kind and digest"
-    if not tg.get("confirmed_at"):
-        return "telegram confirmation has no timestamp"
+    blk = rec.get(chd["block"])
+    if not isinstance(blk, dict):
+        return f"{chd['label']} method but no {chd['block']} block"
+    uid, mid = str(blk.get("user_id") or ""), str(blk.get("message_id") or "")
+    if chd["numeric"]:
+        ok_ids = _TG_ID_RE.match(uid) and _TG_ID_RE.match(mid)
+    else:
+        ok_ids = _CHAT_USER_RE.match(uid) and _CHAT_MSG_RE.match(mid)
+    if not ok_ids:
+        return f"{chd['label']} user/message ids are not well-formed"
+    if blk.get("kind") != rec.get("kind") or blk.get("digest") != digest:
+        return f"{chd['label']} confirmation does not bind this kind and digest"
+    if not blk.get("confirmed_at"):
+        return f"{chd['label']} confirmation has no timestamp"
     t = _commit_trailers(wd, sha)
-    if (t.get("Dda-Approval-Method") != METHOD_TELEGRAM or t.get("Dda-Telegram-User") != uid
-            or t.get("Dda-Telegram-Message") != mid):
-        return "commit trailers do not repeat the telegram user and message ids"
+    if (t.get("Dda-Approval-Method") != chd["method"] or t.get(chd["user_trailer"]) != uid
+            or t.get(chd["msg_trailer"]) != mid):
+        return f"commit trailers do not repeat the {chd['label']} user and message ids"
     return None
+
+
+def _telegram_problem(wd: Workdir, rec: dict, sha: str, digest: str | None) -> str | None:
+    chd = _channel_desc(METHOD_TELEGRAM)
+    assert chd is not None  # METHOD_TELEGRAM always has a channel descriptor
+    return _channel_problem(wd, rec, sha, digest, chd)
 
 
 def _config_chain(wd: Workdir) -> tuple[dict[str, dict], list[str]]:
@@ -737,23 +803,26 @@ def _config_chain(wd: Workdir) -> tuple[dict[str, dict], list[str]]:
         if not digest:
             continue
         sig_ok, fields = _signer_fields(wd, sha)
-        tg_uid = None
-        if rec.get("method") == METHOD_TELEGRAM and _telegram_problem(wd, rec, sha, digest) is None:
-            tg_uid = rec["telegram"]["user_id"]
-        entries.append({"sha": sha, "digest": digest, "tg_uid": tg_uid,
+        ch_uid, ch_method = None, None
+        chd = _channel_desc(str(rec.get("method") or ""))
+        if chd is not None and _channel_problem(wd, rec, sha, digest, chd) is None:
+            ch_uid, ch_method = rec[chd["block"]]["user_id"], chd["method"]
+        entries.append({"sha": sha, "digest": digest, "ch_uid": ch_uid, "ch_method": ch_method,
                         "approvers": rec.get("approvers") or [], "sig_ok": sig_ok, "fields": fields})
     by_digest: dict[str, dict] = {}
     problems: list[str] = []
     prev_approvers: list | None = None
     for e in entries:
-        if e["tg_uid"]:
-            # Telegram confirmation: the account stands in for the key. Same
+        if e["ch_uid"]:
+            # Channel confirmation: the account stands in for the key. Same
             # chain rule — TOFU against its own snapshot, then the previous set.
+            chd = _channel_desc(e["ch_method"])
             ref = e["approvers"] if prev_approvers is None else prev_approvers
-            name = telegram_approver(ref, e["tg_uid"])
+            name = channel_approver(ref, chd["cfg"], e["ch_uid"], chd["numeric"]) if chd else None
             ok = bool(name)
             if not ok:
-                problems.append(f"{e['sha'][:12]}: Telegram user {e['tg_uid']} not in the "
+                label = chd["label"] if chd else e["ch_method"]
+                problems.append(f"{e['sha'][:12]}: {label} user {e['ch_uid']} not in the "
                                 + ("approval's own approver snapshot" if prev_approvers is None
                                    else "previous approved approver set"))
             by_digest[e["digest"]] = {"commit": e["sha"], "signer": name, "sig_ok": False,
@@ -934,15 +1003,17 @@ def verify_approval(wd: Workdir, kind: str, artifact: str | None = None) -> dict
                     commit=sha, digest=digest, sig_ok=sig_ok)
     signer = approver_matches(approvers, *fields)
     chain_note = ""
-    if rec.get("method") == METHOD_TELEGRAM:
-        problem = _telegram_problem(wd, rec, sha, digest)
-        tg = rec.get("telegram") if isinstance(rec.get("telegram"), dict) else {}
+    chd = _channel_desc(str(rec.get("method") or ""))
+    if chd:
+        problem = _channel_problem(wd, rec, sha, digest, chd)
+        blk_raw = rec.get(chd["block"])
+        blk = blk_raw if isinstance(blk_raw, dict) else {}
         extra = {"commit": sha, "digest": digest, "sig_ok": sig_ok,
-                 "method": METHOD_TELEGRAM, "telegram": tg or None}
+                 "method": chd["method"], chd["block"]: blk_raw if isinstance(blk_raw, dict) else None}
         if problem:
-            return fail(ApprovalState.BAD_SIG, f"{rel}: malformed Telegram confirmation ({problem})",
+            return fail(ApprovalState.BAD_SIG, f"{rel}: malformed {chd['label']} confirmation ({problem})",
                         **extra)
-        uid, mid = tg["user_id"], tg["message_id"]
+        uid, mid = blk["user_id"], blk["message_id"]
         if kind == "config":
             by_digest, problems = _config_chain(wd)
             entry = by_digest.get(digest or "")
@@ -952,17 +1023,17 @@ def verify_approval(wd: Workdir, kind: str, artifact: str | None = None) -> dict
                             f"config approver chain does not verify ({detail})", **extra)
             who = entry["signer"]
         else:
-            who = telegram_approver(approvers, uid)
+            who = channel_approver(approvers, chd["cfg"], uid, chd["numeric"])
         if not who:
             return fail(ApprovalState.UNKNOWN_SIGNER,
-                        f"Telegram user {uid} matches no approver telegram_user_id in config.yaml",
+                        f"{chd['label']} user {uid} matches no approver {chd['cfg']} in config.yaml",
                         **extra)
         # No doctor key checks: they guard keys an agent could borrow, and
         # this path uses no key (the signed-in account is the proof).
         return {**base, **extra, "state": ApprovalState.CONFIRMED.value, "verified": True,
                 "signer": who,
-                "reason": (f"confirmed: {kind} {(digest or '')[:12]} by {who} via Telegram user "
-                           f"{uid}, message {mid} at {tg.get('confirmed_at')}")}
+                "reason": (f"confirmed: {kind} {(digest or '')[:12]} by {who} via {chd['label']} user "
+                           f"{uid}, message {mid} at {blk.get('confirmed_at')}")}
     if unsigned:
         # SPEC §4.5: an unsigned approval file is recorded as unverified,
         # whether or not the config names approvers — the agent could have
@@ -970,7 +1041,7 @@ def verify_approval(wd: Workdir, kind: str, artifact: str | None = None) -> dict
         # cryptographic claim to evaluate.
         return fail(ApprovalState.UNVERIFIED,
                     f"commit {sha[:12]} is unsigned (agent could have produced it); "
-                    f"a human must sign from a trusted key or confirm over Telegram (§4.5)",
+                    f"a human must sign from a trusted key or confirm over Telegram or chat (§4.5)",
                     commit=sha, digest=digest, signer=signer, sig_ok=sig_ok,
                     method=METHOD_UNSIGNED)
     if kind == "config":
@@ -1073,6 +1144,7 @@ def do_approved(wd: Workdir, kind: str, artifact: str | None = None) -> dict:
         "signer": verdict.get("signer"), "sig_ok": verdict.get("sig_ok"),
         "verified": verdict["verified"], "state": verdict["state"],
         "method": verdict.get("method"), "telegram": verdict.get("telegram"),
+        "chat": verdict.get("chat"),
         "reason": verdict["reason"],
     }
     # N7: embed the canonical payload so a later history rewrite (`git
@@ -1105,6 +1177,27 @@ def index_approvals(wd: Workdir, kind: str) -> list[dict]:
         return []
     return [r for r in recs
             if isinstance(r, dict) and r.get("type") == "approval" and r.get("kind") == kind]
+
+
+def confirmed_channels(wd: Workdir) -> list[str]:
+    """Channel labels behind human CONFIRMED verdicts in the approvals index.
+
+    The footer names the channel per approval from this, so a Chat yes
+    never renders as Telegram and vice versa (§4.5).
+    """
+    from . import ledger
+    try:
+        recs = chain.read_records(ledger.approvals_index(wd))
+    except OSError:
+        return []
+    out: list[str] = []
+    for r in recs:
+        if (isinstance(r, dict) and r.get("state") == ApprovalState.CONFIRMED.value
+                and r.get("verified")):
+            chd = _channel_desc(str(r.get("method") or ""))
+            if chd and chd["label"] not in out:
+                out.append(chd["label"])
+    return out
 
 
 def latest_record(wd: Workdir, kind: str, artifact: str) -> dict | None:
@@ -1145,8 +1238,9 @@ def config_status(wd: Workdir) -> dict:
             "record": latest_record(wd, "config", ch)}
 
 
-__all__ = ["KINDS", "ApprovalState", "HUMAN_STATES", "is_human", "method_label", "telegram_approver", "approvals_dir", "approval_rel", "approval_path",
+__all__ = ["KINDS", "ApprovalState", "HUMAN_STATES", "is_human", "method_label", "telegram_approver", "chat_approver",
+           "channel_approver", "METHOD_CHAT", "approvals_dir", "approval_rel", "approval_path",
            "check_kind_artifact", "current_artifact", "current_digest", "canonical_payload",
            "canonical_case", "release_reports", "approved_payload", "list_approvals",
            "do_approve", "do_approved", "verify_approval", "latest_record",
-           "config_status", "approver_matches", "fingerprints_of"]
+           "config_status", "approver_matches", "fingerprints_of", "confirmed_channels"]
