@@ -355,6 +355,12 @@ class TestHooks(Base):
                    ("execute_code", {"code": f"open(r'{a / 'audit.log'}', 'a').write('x')"}),
                    ("write_file", {"path": str(self.tmp / "home" / "sessions" / "b-1.json"), "content": "{}"}),
                    ("terminal", {"command": "git add .analysis/approvals/x.md && git commit -m a",
+                                 "workdir": str(self.wd.root)}),
+                   # A shell wrapper must not hide the git op (hostile re-review,
+                   # 2026-11-19: `bash -c 'git clean -fdx'` sailed through).
+                   ("terminal", {"command": "bash -c 'git clean -fdx'",
+                                 "workdir": str(self.wd.root)}),
+                   ("terminal", {"command": "sudo git clean -fdx",
                                  "workdir": str(self.wd.root)})]
         for tool, args in blocked:
             self.assertTrue(self.blocked("evidenceguard", tool, args)[0], (tool, args))

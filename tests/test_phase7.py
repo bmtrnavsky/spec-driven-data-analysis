@@ -197,7 +197,10 @@ class TestReviewRun(P7Setup):
                          sorted(f["path"] for f in manifest["files"]),
                          "the request carries only the packet files — no chat, memory, or context")
         self.assertEqual(rec["brief_hash"], _lh.sha256_hex(rec["request"]["system"].encode()))
-        self.assertEqual(rec["model"], "default")
+        # A stub run is recorded as a stub, not as the configured model: the
+        # provider identity is what a gate and a reader must be able to trust.
+        self.assertEqual(rec["model"], "stub")
+        self.assertEqual(rec["provider"], "stub")
         self.assertTrue((rec["provider_request_id"] or "").startswith("stub-"))
         runs = (self.wd.analysis / "runs.log").read_text(encoding="utf-8")
         self.assertIn('"type":"review"', runs)

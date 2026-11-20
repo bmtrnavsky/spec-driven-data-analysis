@@ -320,7 +320,7 @@
       },
       "hashes": {
         "fixed_units": {
-          "hooks.no-N10-gitop-verdict": "d2fe4f112337373c49f67183bd2b6cd4cfa653bae8a579bde5be6152a8107121"
+          "hooks.no-N10-gitop-verdict": "601274caaeab60be82e7957f11b0eb5baf943ed3d22e9b7f29af8ebce9225874"
         },
         "probelib": "e1564672c1ebfb332cad4b4b40497dd54967fe473a4c85f793ad0b6f180efe8c",
         "revert_units": {
@@ -334,13 +334,13 @@
       },
       "matrix": true,
       "probe": "n_hook_gitops.py",
-      "probe_hash": "b92ab95ce0dc0a5323c818054ee0bde25585e882efe48e2ae61f68744c9b62e9",
+      "probe_hash": "cc337cda70974628736b67a306e79400692931f8b01d35d3604e92dc255610e6",
       "reverted": {
         "rc": 0,
         "token": "HOOK-GITOPS-VULNERABLE"
       },
       "scenario": "pre-N10 no git-op verdict",
-      "validated_at": "34478d155577d48bc6780bf0af8587566e9d260c"
+      "validated_at": "35c0bfdeb703201cc96ccd5ee009e80ef25a7f43"
     },
     {
       "cross_flips": [],

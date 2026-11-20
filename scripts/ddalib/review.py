@@ -59,6 +59,22 @@ def _stub_verdict() -> str | None:
     stub = os.environ.get(STUB_ENV)
     return stub if stub in ("pass", "fail") else None
 
+
+def is_stub_call(call: dict) -> bool:
+    """A recorded call produced by the stub transport, not a provider."""
+    return (str(call.get("provider") or "") == "stub"
+            or str(call.get("provider_request_id") or "").startswith("stub-"))
+
+
+def stub_call_allowed(call: dict) -> bool:
+    """A stub call counts only inside a test run (SPEC §4.5).
+
+    Gate-side check: a session can export DDA_TEST_MODE=1 itself, so the
+    verifier's environment — not the writer's — decides whether fabricated
+    rounds satisfy a gate.
+    """
+    return not is_stub_call(call) or _stub_allowed()
+
 STAGE_ALIASES = {
     "teardown": "teardown", "pre-data": "teardown", "predata": "teardown",
     "3": "teardown", "stage3": "teardown", "stage-3": "teardown",
@@ -605,10 +621,11 @@ def do_review_run(wd: Workdir, stage: str, round_: str | None = None,
     results = {}
     base = reviews_dir(wd)
     base.mkdir(parents=True, exist_ok=True)
+    is_stub = stub in ("pass", "fail")
     for i, r in enumerate(rounds):
         verdict, objection = verdicts[r]
         call_seq = seq_start + i
-        if stub in ("pass", "fail"):
+        if is_stub:
             rid = f"stub-{call_seq:04d}"
         rec = {"format": FORMAT_CALL, "stage": stage, "round": r, "seq": call_seq,
                "spec_hash": comp.spec_hash, "packet_hash": manifest["packet_hash"],
@@ -616,7 +633,9 @@ def do_review_run(wd: Workdir, stage: str, round_: str | None = None,
                "request": _request_envelope(model, brief, manifest),
                "response": text, "verdict": verdict.lower(),
                "objections": [objection] if verdict == "FAIL" and objection else [],
-               "model": model, "provider_request_id": rid or f"stub-{call_seq:04d}",
+               "model": "stub" if is_stub else model,
+               "provider": "stub" if is_stub else "api",
+               "provider_request_id": rid or f"stub-{call_seq:04d}",
                "tokens_in": tin, "tokens_out": tout,
                "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
         if not rec["provider_request_id"]:

@@ -191,6 +191,23 @@ class TestGitignoredScan(R5Setup):
         self.assertNotEqual(rc, 0, f"gitcheck missed a secret in a gitignored file: {out}")
 
 
+class TestDataOutputDirsNeverCommitted(R5Setup):
+    """SPEC §11: nothing under `derived/` or `outputs/` is committed, whatever
+    its extension. Extension-only checks let `git add -f outputs/orders.txt`
+    reach git and still pass gitcheck (hostile re-review, 2026-11-19)."""
+
+    def test_gitcheck_flags_text_file_under_outputs(self):
+        self.lock()
+        rc, out = self._flagged("outputs/orders.txt", "id,amount\n1,10\n")
+        self.assertEqual(rc, 1, f"gitcheck passed a force-added outputs/ text file: {out}")
+        self.assertIn("outputs/orders.txt", out)
+
+    def test_gitcheck_flags_text_file_under_derived(self):
+        self.lock()
+        rc, out = self._flagged("derived/rows.log", "id,amount\n1,10\n")
+        self.assertEqual(rc, 1, f"gitcheck passed a force-added derived/ text file: {out}")
+
+
 class TestG8ReportScopeFails(R5Setup):
     def _good_report(self):
         self.lock()

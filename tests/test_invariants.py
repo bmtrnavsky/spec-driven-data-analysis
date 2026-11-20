@@ -328,7 +328,10 @@ class InvMixin:
                          "git stash -u did not remove the target")
 
     def mut_git_reset_hard(self):
+        sha = self._git("rev-parse", "HEAD").stdout.strip()
         self._git("reset", "--hard", "-q", "HEAD~1")
+        self.assertNotEqual(self._git("rev-parse", "HEAD").stdout.strip(), sha,
+                            "git reset --hard did not move HEAD (mutation was a no-op)")
 
     def mut_git_rebase(self):
         sha = self._git("rev-parse", "HEAD").stdout.strip()

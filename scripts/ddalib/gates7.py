@@ -14,6 +14,7 @@ from .review import (
     provider_available,
     rounds_for,
     self_response_path,
+    stub_call_allowed,
 )
 
 STAGE = "teardown"
@@ -115,6 +116,15 @@ def goldfish_calls_gate(wd: Workdir, stage: str,
                             f"(`dda review run {stage} --round {r}`, §5.0)")
             continue
         for c in rs:
+            # The stub transport fakes a provider response. Outside a test run
+            # it is a fabricated review and cannot satisfy a goldfish round:
+            # DDA_TEST_MODE is an env var any session can export, so the gate
+            # must refuse the stub itself, not merely record it (§4.5).
+            if not stub_call_allowed(c):
+                problems.append(f"round {r}: call {c.get('provider_request_id')} is the "
+                                f"test stub, not an independent review — it cannot "
+                                f"satisfy a goldfish round (§5.0)")
+                continue
             if not _bound(c):
                 problems.append(f"round {r}: call seq {c.get('seq')} (req "
                                 f"{c.get('provider_request_id')}) has no matching "

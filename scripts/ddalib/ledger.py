@@ -845,6 +845,10 @@ def _classify_git_path(clean: str, base: str, blob: bytes | None, *,
     if base in ("derived", "outputs") or clean.startswith(("derived/", "outputs/")):
         if ignored:
             return None
+        # SPEC §11: nothing under derived/ or outputs/ is ever committed, so a
+        # force-added `outputs/orders.txt` must fail whatever its extension.
+        if not known and not in_exact:
+            return "file under a data-output dir (derived/ and outputs/ are never committed)"
     if not known and not in_exact:
         if not ignored:
             if base == ".env" or base.startswith(".env."):

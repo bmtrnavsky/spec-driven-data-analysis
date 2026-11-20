@@ -244,7 +244,14 @@ def _git_invocations(code: str) -> list[list[str]]:
         except ValueError:
             toks = seg.split()
         toks = [_clean_tok(t) for t in toks if _clean_tok(t)]
-        base = lambda t: re.split(r"[\\/]", t)[-1].lower()  # noqa: E731
+        # A shell wrapper keeps its quoted argument as one token
+        # ("bash -c 'git clean -fdx'"), so re-parse any token that still holds
+        # a whole command line; otherwise the wrapper hides the git op. No name
+        # sniffing here: `GIT`, `GIT.EXE` and `g""it` are all git.
+        for t in [t for t in toks if " " in t]:
+            invs.extend(_git_invocations(t))
+        # Name match ignores case, path, .exe and empty shell quotes (`g""it`).
+        base = lambda t: re.split(r"[\\/]", t)[-1].lower().replace('"', "").replace("'", "")  # noqa: E731
         idx = next((i for i, t in enumerate(toks) if base(t) in ("git", "git.exe")), None)
         if idx is None:
             continue

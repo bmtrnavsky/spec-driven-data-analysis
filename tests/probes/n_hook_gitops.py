@@ -14,6 +14,12 @@ from probelib import new_fixture, finding, cleanup
 DESTRUCTIVE = [
     "git clean -fdx",
     "git clean -fdx -- .analysis/reviews",
+    # Case variants: Windows ships GIT.EXE, and the shell-wrapper re-parse
+    # must not be a lowercase-only substring test (Opus gate 2026-11-19).
+    "GIT clean -fdx",
+    'bash -c "GIT clean -fdx"',
+    'bash -c "C:/Program Files/Git/cmd/GIT.EXE clean -fdx"',
+    "bash -c 'g\"\"it clean -fdx'",
     "git stash -u -m x",
     "git stash pop",
     "git reset --hard HEAD~1",
@@ -26,7 +32,7 @@ REWRITE = [
     "git update-ref refs/heads/main abc123",
     "git filter-branch --index-filter true -- --all",
 ]
-BENIGN = ["git status", "git log --oneline -3"]
+BENIGN = ["git status", "git log --oneline -3", "GIT status"]
 
 
 def verdict(f, cmd):
