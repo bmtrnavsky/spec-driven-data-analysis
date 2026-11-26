@@ -1,13 +1,12 @@
 """One requirements table (M1): (gate, tier) -> [(kind, digest_fn)].
 
 Gates call `require(wd, gate)` and nothing else — no gate may call
-`verify_approval` or `config_status` directly. `min_state` is `"verified"`
-at PUBLISH and `"unverified_ok"` below it: below PUBLISH an UNVERIFIED or
-DOWNGRADED approval is disclosed and passes; anything else (MISSING,
-UNCOMMITTED, STALE, BAD_SIG, UNKNOWN_SIGNER) fails everywhere, and at
-PUBLISH only a human state passes: VERIFIED (signed) or CONFIRMED
-(Telegram confirmation from an approver's account) — equivalent at every
-tier.
+`verify_approval` or `config_status` directly. There is one human state,
+RECORDED: Brad's chat yes, recorded verbatim with who, when, and the exact
+digest, which satisfies every gate at every tier, PUBLISH included. Every
+other state (MISSING, UNCOMMITTED, STALE, MALFORMED) fails everywhere.
+There is no unverified-but-passes tier any more: an approval either has a
+recorded yes covering this content or it does not.
 """
 from __future__ import annotations
 
@@ -119,14 +118,10 @@ def tier_of(wd: Workdir) -> str:
 
 
 def _acceptable(state: str, tier: str) -> bool:
-    from .approvals import ApprovalState, HUMAN_STATES
-    # VERIFIED (signed) and CONFIRMED (Telegram) are both a human's own
-    # approval and pass at every tier, PUBLISH included.
-    if state in HUMAN_STATES:
-        return True
-    if tier != "PUBLISH" and state in (ApprovalState.UNVERIFIED.value, ApprovalState.DOWNGRADED.value):
-        return True
-    return False
+    from .approvals import HUMAN_STATES
+    # RECORDED (a chat yes for exactly this digest) passes at every tier,
+    # PUBLISH included. Nothing else passes — there is no weaker state.
+    return state in HUMAN_STATES
 
 
 def require(wd: Workdir, gate: str, kinds: tuple[str, ...] | None = None) -> tuple[bool, list[str], dict]:
@@ -165,11 +160,8 @@ def require(wd: Workdir, gate: str, kinds: tuple[str, ...] | None = None) -> tup
         if rep is None:
             continue
         if rep["ok"]:
-            if rep["state"] not in _approvals.HUMAN_STATES:
-                notes.append(f"{rep['kind']} approval {rep['state']} (disclosed at {tier})")
-            else:
-                notes.append(f"{rep['kind']} approval {rep['state']} "
-                             f"({str(rep.get('digest') or '')[:12]}; {rep.get('method_label')})")
+            notes.append(f"{rep['kind']} approval {rep['state']} "
+                         f"({str(rep.get('digest') or '')[:12]}; {rep.get('method_label')})")
         else:
             failed.append(f"{rep['kind']}: {rep['reason']}")
     # EXPLORE G4 discloses a missing config instead of failing (legacy

@@ -157,8 +157,8 @@ def lockguard(ctx: Ctx) -> tuple[dict, int]:
         return hb
     sig = signing_violation(ctx.view)
     if sig:
-        return block(f"dda lockguard: {sig} is human-only (§4.5). Approvals are signed by an approver in their own "
-                     "terminal with `dda approve`; dda's own commits never sign.")
+        return block(f"dda lockguard: {sig} is human-only (§4.5). An approval is Brad's chat yes, recorded "
+                     "with `dda approve --yes` in his own terminal; dda's own commits never sign.")
     if is_clean_dda(ctx):
         return allow()
     if ctx.tool in FILE_WRITERS:
@@ -185,8 +185,8 @@ def lockguard(ctx: Ctx) -> tuple[dict, int]:
                      "`dda verify-chain` shows what changed.")
     if state == "config-changed":
         return block(f"dda lockguard: config.yaml changed since lock v{lock['version']}; data reads stay blocked. "
-                     "Re-lock as an amendment (`dda lock --amend \"<reason>\"`); the new config needs a human "
-                     "config approval (`dda approve config` in your own terminal).")
+                     "Re-lock as an amendment (`dda lock --amend \"<reason>\"`); the new config needs Brad's "
+                     "recorded chat yes (`dda approve config --yes \"...\"` in his own terminal).")
     if state != "valid":
         return block(f"dda lockguard: {detail}. Re-lock after your spec edit "
                      "(`dda lock --amend \"<reason>\"`); data reads require hash(spec.md) == lock hash (§3.1).")
@@ -355,8 +355,8 @@ def evidenceguard(ctx: Ctx) -> tuple[dict, int]:
         return allow()
     if code and re.search(r"\bgit\b[^\n;&|]*\b(?:add|commit)\b", code) and "approvals" in view.blob \
             and any(t.startswith("approvals") for t in analysis_refs(view)):
-        return block("dda evidenceguard: approval files are committed by a human approver with `dda approve` in "
-                     "their own terminal (§4.5); an agent commit of approvals/ would be a forgery.")
+        return block("dda evidenceguard: approval files record Brad's chat yes and are committed by `dda approve` "
+                     "in his own terminal (§4.5); an agent commit of approvals/ would be a forgery.")
     intent, targets = write_targets(view)
     if not intent:
         return allow()

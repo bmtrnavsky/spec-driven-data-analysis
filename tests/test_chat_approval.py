@@ -1,13 +1,14 @@
-"""Chat confirmation is a first-class human approval (§4.5).
+"""The chat yes as a first-class record: fields, labels, footer, config (§4.5).
 
-Mirrors tests/test_telegram_approval.py on the second CONFIRMED channel: a
-regular-chat yes from Brad's sender id records state CONFIRMED and is
-accepted wherever a signed (VERIFIED) approval is, PUBLISH included. The
-user id must exactly equal an approver's `chat_user_id`; chat ids are
-platform tokens (not Telegram numerics) and are kept verbatim for audit.
+The chat yes is the whole model, so this file pins its observable surface:
+who/when/words survive the round trip verbatim, `method_label` never dresses
+up an absent yes, and the footer and `config_status` read the same record.
+This file keeps its historical name (it used to test the Chat channel, now
+deleted).
 
 Run: DDA_TEST_MODE=1 python -m unittest tests.test_chat_approval
 """
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -15,109 +16,137 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "scripts"))
 
-from tests.test_phase7 import P7Setup  # noqa: E402
-
-BRAD_CHAT = "brad"
-CHAT_MSG = "msg-2026-11-06-yes-1"
+from tests.test_approval_relay import ChatYesSetup, WHO, YES  # noqa: E402
 
 
-class _ChatSetup(P7Setup):
-    TIER = "This is a PUBLISH analysis."
-
-    def setUp(self):
-        super().setUp()
-        self.wd.config_path.write_text(
-            self.wd.config_path.read_text(encoding="utf-8")
-            + "approvers:\n  - name: brad\n    chat_user_id: \"brad\"\n",
-            encoding="utf-8")
-        rc, out = self.cli("lock")
+class TestWordsSurvive(ChatYesSetup):
+    def test_words_are_stored_verbatim(self):
+        words = "yes — go ahead, but note the 3pt caveat (Feb data is thin) 🚢"
+        rc, out = self.record(yes=words)
         self.assertEqual(rc, 0, out)
-        self.assertEqual(self.cli("packet", "teardown")[0], 0)
-        rc, out = self.cli("review", "run", "teardown", stub="pass")
-        self.assertEqual(rc, 0, out)
+        rec = json.loads(self.record_file().read_text(encoding="utf-8"))
+        self.assertEqual(rec["approval"]["yes"], words)
+        self.assertEqual(self.verdict()["yes"], words)
 
-    def verdict(self, kind="spec"):
+    def test_surrounding_whitespace_is_trimmed_not_rewritten(self):
+        rc, out = self.record(yes="  yes, ship it  \n")
+        self.assertEqual(rc, 0, out)
+        rec = json.loads(self.record_file().read_text(encoding="utf-8"))
+        self.assertEqual(rec["approval"]["yes"], "yes, ship it")
+
+    def test_note_is_kept_but_is_not_the_approval(self):
+        rc, out = self.record("spec", "-m", "quoted from the thread")
+        self.assertEqual(rc, 0, out)
+        rec = json.loads(self.record_file().read_text(encoding="utf-8"))
+        self.assertEqual(rec["note"], "quoted from the thread")
+        self.assertEqual(rec["approval"]["yes"], YES)
+        self.assertEqual(self.git("log", "-1", "--format=%s").strip(), "quoted from the thread")
+
+
+class TestLegacyRecordsFailClosed(ChatYesSetup):
+    """A record with no `approval` block is MALFORMED, never a chat yes (§4.5)."""
+
+    def _write_legacy_record(self):
         from ddalib import approvals
-        from ddalib.layout import Workdir
-        return approvals.verify_approval(Workdir.at(self.wd.root), kind)
+        digest, payload = approvals.canonical_payload(self.wd, "spec")
+        rel = f".analysis/approvals/spec-{digest[:16]}.json"
+        path = self.wd.root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            "format": "dda-approval-v2", "kind": "spec", "digest": digest,
+            "artifact": digest, "payload": payload,
+            "created_at": "2026-11-01T09:00:00-0600",
+            "approvers": [{"name": WHO}],
+        }, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
+        self.git("add", "--", rel)
+        self.git("-c", "commit.gpgsign=false", "commit", "-q", "--no-verify",
+                 "-m", "hand-written pre chat-yes record", "--", rel)
+        return digest
 
-
-class TestChatAcceptedAtPublish(_ChatSetup):
-    def test_chat_confirmation_passes_publish_gate(self):
-        rc, out = self.cli("approve", "spec", "--chat", BRAD_CHAT, CHAT_MSG)
-        print("\n[chat approve] rc=%d\n%s" % (rc, out.strip()))
-        self.assertEqual(rc, 0, out)
-        self.assertIn(f"CONFIRMED via Chat user {BRAD_CHAT}, message {CHAT_MSG}", out)
-        rc, out = self.cli("approved", "spec")
-        print("[chat approved] rc=%d\n%s" % (rc, out.strip()))
-        self.assertEqual(rc, 0, out)
-        self.assertIn(f"CONFIRMED - Chat user {BRAD_CHAT}, message {CHAT_MSG}", out)
+    def test_legacy_record_is_malformed_not_recorded(self):
+        from ddalib import approvals
+        self._write_legacy_record()
         v = self.verdict()
-        self.assertEqual(v["state"], "confirmed", v)
-        self.assertTrue(v["verified"], v)
-        self.assertEqual(v["method"], "chat", v)
+        self.assertEqual(v["state"], "malformed", v)
+        self.assertFalse(v["recorded"], v)
+        self.assertEqual(approvals.method_label(v), "no chat yes on record for this content")
 
-    def test_footer_names_the_chat_channel(self):
+    def test_legacy_record_never_prints_as_a_chat_yes(self):
+        self._write_legacy_record()
+        rc, out = self.approved()
+        self.assertIn("MALFORMED", out)
+        self.assertNotIn("chat yes from", out)
+        self.assertNotIn("RECORDED", out)
+        self.assertIn("no chat yes on record", out)
+
+    def test_legacy_record_does_not_satisfy_a_publish_gate(self):
+        from ddalib import requirements
+        self._write_legacy_record()
+        ok, _notes, info = requirements.require(self.wd, "G2")
+        self.assertFalse(ok)
+        self.assertIn("malformed", [i.get("state") for i in info["items"]])
+
+    def test_legacy_payload_is_not_executable(self):
+        from ddalib import approvals
+        from ddalib.layout import DdaError
+        with self.assertRaises(DdaError):
+            approvals.approved_payload(self.wd, "spec")
+
+
+class TestLabels(unittest.TestCase):
+    def test_method_label_names_the_yes(self):
+        from ddalib import approvals
+        self.assertEqual(
+            approvals.method_label({"recorded": True, "who": WHO, "when": "2026-11-22"}),
+            "chat yes from brad at 2026-11-22")
+
+    def test_method_label_never_dresses_up_an_absence(self):
+        from ddalib import approvals
+        self.assertEqual(approvals.method_label({}),
+                         "no chat yes on record for this content")
+        self.assertEqual(approvals.method_label({"state": "missing", "recorded": False}),
+                         "no chat yes on record for this content")
+
+    def test_only_recorded_is_human(self):
+        from ddalib import approvals
+        self.assertTrue(approvals.is_human("recorded"))
+        self.assertTrue(approvals.is_human(approvals.ApprovalState.RECORDED))
+        for dead in ("verified", "confirmed", "unverified", "signed", "missing", "stale"):
+            self.assertFalse(approvals.is_human(dead), dead)
+        self.assertEqual(approvals.HUMAN_STATES, frozenset({"recorded"}))
+
+
+class TestFooterAndConfig(ChatYesSetup):
+    def test_footer_names_the_recorded_yes(self):
         from ddalib import approvals, footer
         from ddalib.layout import Workdir
-        rc, out = self.cli("approve", "spec", "--chat", BRAD_CHAT, CHAT_MSG)
-        self.assertEqual(rc, 0, out)
-        rc, out = self.cli("approved", "spec")
-        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.record()[0], 0)
         wd = Workdir.at(self.wd.root)
-        self.assertEqual(approvals.confirmed_channels(wd), ["Chat"])
+        self.assertEqual([v["kind"] for v in approvals.recorded_approvals(wd)], ["spec"])
         skel = footer.skeleton(wd)
-        self.assertIn("confirmed (Chat)", skel)
+        self.assertIn("chat yes on record — spec", skel)
+        self.assertIn("chat yes from brad at", skel)
+        self.assertNotIn("on record — none recorded", skel)
 
-
-class TestChatConfigAndLabels(_ChatSetup):
-    def test_config_approval_confirmed_through_chain(self):
+    def test_config_approval_reads_the_word_block(self):
         from ddalib import approvals
         from ddalib.layout import Workdir
-        rc, out = self.cli("approve", "config", "--chat", BRAD_CHAT, CHAT_MSG)
+        rc, out = self.record("config")
         self.assertEqual(rc, 0, out)
         st = approvals.config_status(Workdir.at(self.wd.root))
-        self.assertEqual(st["state"], "confirmed", st)
-        self.assertIn(f"Chat user {BRAD_CHAT}, message {CHAT_MSG}", st["detail"])
+        self.assertEqual(st["state"], "recorded", st)
+        self.assertIn("chat yes from brad at", st["detail"])
+        self.assertEqual((st["who"], st["yes"]), (WHO, YES))
 
-    def test_method_labels(self):
+    def test_config_approval_is_not_inherited_by_a_config_edit(self):
         from ddalib import approvals
-        self.assertEqual(approvals.method_label(
-            {"method": "chat", "chat": {"user_id": BRAD_CHAT, "message_id": CHAT_MSG}}),
-            f"Chat user {BRAD_CHAT}, message {CHAT_MSG}")
-        self.assertEqual(approvals.chat_approver([{"name": "brad", "chat_user_id": "brad"}],
-                                                 "brad"), "brad")
-        self.assertIsNone(approvals.chat_approver([{"name": "brad", "chat_user_id": "brad"}],
-                                                  "someone-else"))
-        self.assertTrue(approvals.is_human("confirmed") and approvals.is_human("verified"))
-        self.assertFalse(approvals.is_human("unverified"))
-
-
-class TestChatGuards(_ChatSetup):
-    def test_unknown_chat_user_rejected(self):
-        rc, out = self.cli("approve", "spec", "--chat", "mallory", CHAT_MSG)
-        self.assertNotEqual(rc, 0, out)
-        self.assertIn("not a configured approver", out)
-
-    def test_chat_and_no_sign_are_exclusive(self):
-        rc, out = self.cli("approve", "spec", "--chat", BRAD_CHAT, CHAT_MSG, "--no-sign")
-        self.assertNotEqual(rc, 0, out)
-
-    def test_chat_and_telegram_are_exclusive(self):
-        rc, out = self.cli("approve", "spec", "--chat", BRAD_CHAT, CHAT_MSG,
-                           "--telegram", "3080738179", "11203")
-        self.assertNotEqual(rc, 0, out)
-
-    def test_blank_message_id_rejected(self):
-        rc, out = self.cli("approve", "spec", "--chat", BRAD_CHAT, "has space")
-        self.assertNotEqual(rc, 0, out)
-
-    def test_telegram_user_id_does_not_match_chat(self):
-        # Brad's Telegram id must not authenticate the chat channel: the
-        # channels check different config keys.
-        rc, out = self.cli("approve", "spec", "--chat", "3080738179", "11203")
-        self.assertNotEqual(rc, 0, out)
-        self.assertIn("not a configured approver", out)
+        from ddalib.layout import Workdir
+        self.assertEqual(self.record("config")[0], 0)
+        self.wd.config_path.write_text(
+            self.wd.config_path.read_text(encoding="utf-8") + "\ndefault_rung: quick-cut\n",
+            encoding="utf-8")
+        st = approvals.config_status(Workdir.at(self.wd.root))
+        self.assertEqual(st["state"], "missing", st)
 
 
 if __name__ == "__main__":

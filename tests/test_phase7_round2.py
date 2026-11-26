@@ -189,7 +189,7 @@ class TestG3BindsChain(P7R2Setup):
         self.assertEqual(self.cli("packet", "teardown")[0], 0)
         rc, out = self.cli("review", "run", "teardown", stub="pass")
         self.assertEqual(rc, 0, out)
-        self.assertEqual(self.cli("approve", "spec", "--no-sign")[0], 0)
+        self.assertEqual(self.cli("approve", "spec", "--yes", "yes, ship it", "--who", "brad")[0], 0)
         self.assertEqual(self.cli("approved", "spec")[0], 0)
         rc, out = self.cli("gate", "G3")
         self.assertEqual(rc, 0, f"G3 failed a valid goldfish flow: {out}")
@@ -278,10 +278,10 @@ class TestGovernanceJsonCommittable(P7R2Setup):
         kernel.mark_locked(self.wd, "v1")
         self.assertEqual(self.cli("verify")[0], 0)
         # Approvals: spec covers the G2/G3 intermediates, config covers G4
-        # (unsigned approvals are disclosed, not hidden, at DECIDE).
-        self.assertEqual(self.cli("approve", "spec", "--no-sign")[0], 0)
+        # (each is a recorded chat yes for the current digest).
+        self.assertEqual(self.cli("approve", "spec", "--yes", "yes, ship it", "--who", "brad")[0], 0)
         self.assertEqual(self.cli("approved", "spec")[0], 0)
-        self.assertEqual(self.cli("approve", "config", "--no-sign")[0], 0)
+        self.assertEqual(self.cli("approve", "config", "--yes", "yes, ship it", "--who", "brad")[0], 0)
         self.assertEqual(self.cli("approved", "config")[0], 0)
         # Post-result review + self re-reads (G7), then the report (G8).
         self.answer()

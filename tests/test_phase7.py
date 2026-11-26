@@ -1,8 +1,8 @@
 """Phase 7 (SPEC section 14, item 7): goldfish packet + review run + gate G3.
 
-G3: tier-scaled rounds recorded from dda review run calls (§5.0); at DECIDE,
-a human spec approval for this spec hash (verified, or unverified and
-disclosed); at PUBLISH, verified only (§4.5).
+G3: tier-scaled rounds recorded from dda review run calls (§5.0), plus a
+recorded chat yes for this spec digest — at every tier, PUBLISH included
+(§4.5).
 """
 import os
 import shutil
@@ -256,28 +256,32 @@ class TestG3(P7Setup):
         rc, out = self.cli("gate", "G3")
         self.assertNotEqual(rc, 0, f"G3 passed DECIDE with no spec approval: {out}")
         self.assertIn("approv", out.lower())
-        self.assertEqual(self.cli("approve", "spec", "--no-sign")[0], 0)
+        self.assertEqual(self.cli("approve", "spec", "--yes", "yes, ship it", "--who", "brad")[0], 0)
         self.assertEqual(self.cli("approved", "spec")[0], 0)
         rc, out = self.cli("gate", "G3")
         self.assertEqual(rc, 0, f"G3 failed DECIDE with goldfish + approval: {out}")
-        self.assertIn("unverified", out.lower(), "unsigned approval must be disclosed, not hidden")
+        self.assertIn("recorded", out.lower(), "the recorded yes must be named")
+        self.assertIn("chat yes from brad", out, "the gate must say who said yes and when")
 
-    def test_g3_publish_unverified_parks(self):
+    def test_g3_publish_passes_with_a_recorded_yes(self):
         self.write_spec(tier="This is a PUBLISH analysis.", rung="quick-cut")
+        self.assertEqual(self.cli("lock")[0], 0)
         self.assertEqual(self.cli("packet", "teardown")[0], 0)
         rc, out = self.cli("review", "run", "teardown", stub="pass")
         self.assertEqual(rc, 0, out)
-        self.assertEqual(self.cli("approve", "spec", "--no-sign")[0], 0)
+        rc, out = self.cli("gate", "G3")
+        self.assertNotEqual(rc, 0, f"G3 passed PUBLISH with no recorded yes: {out}")
+        self.assertEqual(self.cli("approve", "spec", "--yes", "yes, ship it", "--who", "brad")[0], 0)
         self.assertEqual(self.cli("approved", "spec")[0], 0)
         rc, out = self.cli("gate", "G3")
-        self.assertNotEqual(rc, 0, f"G3 passed PUBLISH with only an unverified approval: {out}")
+        self.assertEqual(rc, 0, f"G3 refused a recorded chat yes at PUBLISH: {out}")
 
     def test_g3_earlier_objection_needs_answer(self):
         self.write_spec(tier="This is a DECIDE analysis.", rung="glance")
         self.assertEqual(self.cli("lock")[0], 0)
         self.assertEqual(self.cli("packet", "teardown")[0], 0)
         self.assertEqual(self.cli("review", "run", "teardown", stub="fail")[0], 1)
-        self.assertEqual(self.cli("approve", "spec", "--no-sign")[0], 0)
+        self.assertEqual(self.cli("approve", "spec", "--yes", "yes, ship it", "--who", "brad")[0], 0)
         self.assertEqual(self.cli("approved", "spec")[0], 0)
         self.assertEqual(self.cli("review", "run", "teardown", stub="pass")[0], 0)
         rc, out = self.cli("gate", "G3")

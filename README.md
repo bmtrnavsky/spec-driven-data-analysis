@@ -4,21 +4,24 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Hermes Plugin](https://img.shields.io/badge/Hermes-Plugin-teal.svg)](https://hermes-agent.nousresearch.com/docs)
-[![Version](https://img.shields.io/badge/version-0.9.3-orange.svg)](SPEC.md)
+[![Version](https://img.shields.io/badge/version-0.9.4-orange.svg)](SPEC.md)
 
 ## What it does
 
-A lean plugin for any data agent (built for Hermes; portable to any agent that
-can load skills). For someone who has to hand a number to another human and
-defend it, without being a data engineer.
+This plugin makes an AI's data analysis checkable.
 
-You ask an AI to analyze something and it answers confidently. This plugin makes
-it answer *provably*. The question gets locked before the data is touched, the
-analysis runs in a sealed kernel, and a reviewer with no memory of the build
-checks the work before you see it.
+Ask an AI a data question and it answers with confidence. This plugin changes
+the order of events. You write down the question, and how it will be answered,
+before the data is opened. The analysis then runs through one controlled path,
+and a reviewer with no memory of the work checks it before the result reaches
+you.
 
-This isn't about getting better answers out of a model. It's about being able to
-tell whether the answer was chosen before or after the number.
+It is for anyone who has to hand a number to another person and defend it,
+without being a data engineer. It is a plugin for any data agent: built for
+Hermes, and portable to any agent that can load skill files.
+
+The thing being checked is not whether the model is clever. It is whether the
+answer was chosen before or after the number appeared.
 
 Sibling project:
 [disciplined-vibe-coding](https://github.com/bmtrnavsky/disciplined-vibe-coding)
@@ -31,61 +34,75 @@ One loop per question, or per milestone of a bigger analysis:
 
     Intake -> Define -> Economy + Tier -> Teardown -> LOCK -> Profile -> Analyze -> Verify -> Report -> Archive
 
-**Before the lock** you and the agent work in the open: research, read docs,
+In plain words:
+
+**Before the lock** you and the agent work in the open. Research, read docs,
 shape the question. Nothing is frozen yet and nothing is at risk.
 
-**The lock is the hinge.** The spec is hashed and committed to git. From that
-moment the question is fixed, and so is the evidence about it.
+**The lock is the hinge.** The spec — the question, the definitions, the
+sources, and the plan for answering it — is fingerprinted and committed to git.
+A fingerprint is a short code computed from the text, so any later edit changes
+it. From that moment the question is fixed, and so is the evidence about it.
 
-**After the lock the kernel is sealed.** Data reads go through one controlled
-path, run ids are recorded, and a variant freezes the first time it runs.
-Research access is gone, because the point is that you can no longer go looking
-for a friendlier answer.
+**After the lock the runner is closed.** Data reads go through a single
+controlled path. Every run gets an id, and each version of the analysis script
+(one version is called a variant) freezes the first time it runs. Research
+access is gone, because the point is that you can no longer go looking for a
+friendlier answer.
 
-**The goldfish is the review.** At teardown, and again after results, a separate
-context with no memory of the build reads a packet of evidence and reports what
-it sees. It cannot amend the spec, cannot run anything, and cannot approve its
-own work. Forgetting is the entire point.
+**The reviewer has no memory of the build.** The project calls it the goldfish.
+At teardown, and again after results, a separate context reads a packet of
+evidence and reports what it sees. It cannot edit the spec, cannot run
+anything, and cannot approve its own work. Forgetting is the entire point.
 
-**The evidence** lives in `.analysis/` as append-only logs where every line
-carries its sequence number and the hash of the line before it. Alter something
-in the middle and the chain tells on you.
+**The evidence** lives in `.analysis/`. Each entry records its position in the
+list and the fingerprint of the entry before it, and entries can only be added,
+never edited. Change something in the middle and the chain says so.
 
-Full pipeline, gate table, and the reasoning behind each rule: [SPEC.md](SPEC.md).
+Full pipeline, checkpoint table, and the reasoning behind each rule:
+[SPEC.md](SPEC.md).
 
-Every protection below is proven by a suite, not by reading the code:
-the fast product tier (`python scripts/test.py fast`, 322 tests green at
-commit `ebe5274`), the red-team harness (`python redteam/run.py`, GREEN at
-the same commit), and the probe certifications (`python -m tests.revert
-validate --matrix`). What the loop refuses: no changing the question after
-seeing the answer, no number that cannot be re-run, no self-grading by the
-builder, no dropped failed approaches, no re-running until something looks
-green, no reused approvals, no data reads around the kernel, no chart
-without a path back to a locked spec and a signed approval.
+Every protection here is proven by a suite, not by reading the code: the fast
+product tier (`python scripts/test.py fast`), the full run
+(`python scripts/test.py full`, 425 tests green), the red-team harness
+(`python redteam/run.py`, GREEN on the same tree), and the probe
+certifications (`python -m tests.revert validate --matrix`).
+
+What the loop refuses: no changing the question after seeing the answer, no
+number that cannot be re-run, no self-grading by the builder, no dropped failed
+approaches, no re-running until something looks green, no approval without a
+recorded yes, no data reads around the runner, no chart without a path back to
+a locked spec and a recorded yes.
 
 ## Stakes-aware, not one-size-fits-all
 
-Every job gets a tier: **EXPLORE** (looking around, nothing at risk), **DECIDE**
-(a choice gets made on this), or **PUBLISH** (it goes to someone else). The tier
-changes how much review is required, whether you sign off, and how deep the
-evidence chain has to be. A glance gets one line of plan. A decision that costs
-real money gets the full chain and an independent second opinion.
+Every job gets a tier. **EXPLORE** means looking around, nothing at risk.
+**DECIDE** means a choice gets made on this answer. **PUBLISH** means it goes to
+someone else. The tier changes how much review is required, whether you have to
+say yes first, and how deep the evidence chain has to be. A glance gets one line
+of plan. A decision that costs real money gets the full chain and an independent
+second opinion.
 
-The agent does not get to set its own tier downward to skip the reviewer. Setting
-it too low is the cheat that matters most, so it is the one the gates check
-hardest.
+The agent does not get to set its own tier downward to skip the reviewer.
+Setting it too low is the cheat that matters most, so it is the one the
+checkpoints check hardest.
 
 ## You approve it, not the machine
 
-The pipeline stops at every point where a person should be on the hook: the
-spec, the tier, the config, the report. Nothing passes those gates on the
-agent's say-so.
+The pipeline stops at every point where a person should be on the hook. The
+pipeline calls these stops gates: the spec, the tier, the config, the report.
+Nothing passes one on the agent's say-so.
 
-At the machine, your key signs the approval, so the record shows a human was
-present. Away from it, a confirmation from your phone is enough, taken on the
-authenticated account and recorded against the exact thing approved. Either way
-the record says which. (The exact commands and message formats live in
-[SPEC.md](SPEC.md).)
+Approving is plain. You say yes in chat. What gets recorded is the exact words
+you said, who said them, when you said them, and the fingerprint of the exact
+thing approved. That record is the approval. There is no password, no signing
+key, no passphrase, and no second verification step.
+
+The trade is deliberate, and it is written down in [SPEC.md](SPEC.md) §4.5.
+Anyone who can run the command can write a record, so a record cannot prove who
+typed it. What survives is the trail: the words, the speaker, the date, the
+fingerprint, the commit, and a line in the evidence chain, so a deletion later
+shows up.
 
 Until you approve, the run parks and waits rather than guessing, and resumes
 from the exact point it stopped.
@@ -95,7 +112,7 @@ from the exact point it stopped.
 Pick the seat that matches what you are allowed to do. The plugin is
 bot-agnostic: same tools, different seat.
 
-1. **Builder mode** runs the pipe. Init, lock, run variants, pass the gates,
+1. **Builder mode** runs the pipeline. Init, lock, run variants, pass the gates,
    publish the report:
 
    ```
@@ -111,14 +128,14 @@ bot-agnostic: same tools, different seat.
 
    ```
    python scripts/dda.py status
-   python scripts/dda.py verify-chain <workdir>   # hash chains intact?
-   python scripts/dda.py verify <workdir>         # replay locked script vs snapshot
+   python scripts/dda.py verify-chain <workdir>   # are the fingerprint chains intact?
+   python scripts/dda.py verify <workdir>         # replay the locked script against the snapshot
    python scripts/dda.py gate G<n> <workdir>      # re-run the gate, read the verdict
-   python scripts/dda.py doctor [workdir]         # environment + workdir health
-   python redteam/run.py                          # GREEN = preventions hold
+   python scripts/dda.py doctor [workdir]         # environment and workdir health
+   python redteam/run.py                          # GREEN = the preventions hold
    ```
 
-   The judge never amends the spec, runs variants, or approves its own work.
+   The judge never edits the spec, runs variants, or approves its own work.
    `lock --amend`, `run`, and `approve` belong to the builder seat.
 
 3. **Combined pipeline.** The builder ships a stage, or the whole build, plus its
@@ -131,12 +148,15 @@ bot-agnostic: same tools, different seat.
 ```bash
 python scripts/dda.py install            # print the Hermes hooks block
 python scripts/dda.py install --venv     # or install into a venv
-python scripts/dda.py doctor             # interpreter, hooks, approver keys, workdir, heartbeat
+python scripts/dda.py doctor             # interpreter, hooks, workdir health, heartbeat
 ```
 
-Stdlib-only Python 3.11 or newer. A workdir must live inside a git repo so it can
-lock. `config.yaml` is read by a strict YAML subset parser that rejects anything
-it doesn't understand, on purpose.
+Python 3.11 or newer, standard library only. A workdir must live inside a git
+repo so it can lock. `config.yaml` is read by a strict YAML subset parser that
+rejects anything it doesn't understand, on purpose.
+
+Update an installed copy with `hermes plugins update spec-driven-data-analysis`.
+Do not copy a folder over an install: that moves you off the reviewed version.
 
 A short run end to end:
 
@@ -148,40 +168,46 @@ python scripts/dda.py start . --session $HERMES_SESSION_ID
 python scripts/dda.py lock .
 python scripts/dda.py run --variant baseline variants/baseline.py
 python scripts/dda.py gate G5 . && python scripts/dda.py gate G2 .
-python scripts/dda.py gate G3 .          # teardown review rounds + human approval
+python scripts/dda.py gate G3 .          # teardown review rounds + your yes in chat
 python scripts/dda.py report .
-python scripts/dda.py approve report answer.md .   # signed, in your own terminal
+python scripts/dda.py approve signoff --yes "yes, that's the answer" .   # quoted verbatim, in your own terminal
 ```
 
-### Approving: desktop or Telegram
+### Approving: a yes in chat, recorded
 
-Every approval is yours, made one of two ways. Both count the same at every
-tier, PUBLISH included:
+Approving is a two-step habit, and both steps are yours:
 
-- **At the desktop**, `dda approve <kind>` signs the commit, so git asks for your
-  key passphrase (or a FIDO touch). `dda approved` prints a VERIFIED line
-  naming you as signer.
-- **On Telegram**, your signed-in account is the proof, and there is no
-  passphrase. You confirm the kind and digest in the chat. The message id is
-  stored verbatim so you can check it against the chat later. Your user id
-  must be listed as `telegram_user_id` on an approver in `config.yaml`.
+1. You say yes in chat. The agent shows you the exact command and fingerprint
+   and waits. It never runs the approval itself, even when your message asks it
+   to.
+2. You run the command in your own terminal, quoting the words you said:
 
-`--no-sign` is neither. It records an UNVERIFIED approval, which is the agent's
-own claim: shown as a disclosure below PUBLISH, and refused at PUBLISH.
+   ```bash
+   python scripts/dda.py approve spec --yes "yes, lock it"
+   python scripts/dda.py approve spec --yes "yes, lock it" --when 2026-11-22   # a yes from earlier
+   python scripts/dda.py approved spec                                          # record the reading in the chain
+   ```
+
+`--who` defaults to the single approver named in `config.yaml`. A `--when` later
+than the moment the record is written is refused: a yes cannot be said after
+the record that captures it exists.
+
+The agent's own claim is not an approval. Nothing passes a gate on the agent
+saying the work is good.
 
 Every command and every gate is documented in [SPEC.md](SPEC.md).
 
 **What good output looks like:** `dda verify-chain` reports `chains: ok`,
-`dda verify` replays the locked script against the snapshot and compares,
-and `dda approved` prints a signed or confirmed line for the exact thing
-you approved. Until you approve, the run parks and waits rather than
+`dda verify` replays the locked script against the snapshot and compares the
+results, and `dda approved` reads the record back and prints the verdict for the
+exact thing you approved. Until you approve, the run parks and waits rather than
 guessing.
 
 ## Layout
 
-    SPEC.md               the design, the gate table, and the reasoning behind each rule
-    scripts/dda.py        the CLI; stdlib-only Python >= 3.11
-    scripts/ddalib/       gates, chains, kernel runner, reviews, approvals
+    SPEC.md               the design, the checkpoint table, and the reasoning behind each rule
+    scripts/dda.py        the CLI; Python >= 3.11, standard library only
+    scripts/ddalib/       gates, chains, the runner, reviews, approvals
     scripts/dda.cmd       the same commands on Windows
     templates/            spec.md, config.yaml, goldfish-packet.md, wayfinder.md, correction case
     skills/correct/       the correction skill used by evals

@@ -22,25 +22,24 @@
         "fixed_units": {
           "lineage.lineage::no-pin": "61c8b0d3b79497514ad5067914e55ca20f8917fc7af751b21caf12282bf5e9c5"
         },
-        "probelib": "e1564672c1ebfb332cad4b4b40497dd54967fe473a4c85f793ad0b6f180efe8c",
+        "probelib": "fd7434a031b565aa8af4dbccdb73270a14627c0479982c90ec7ba2d8e7ca3de1",
         "revert_units": {
           "lineage.lineage::no-pin": "a116f4c3fc8a135e809bf2f8cf72a44bcb34813fa77be6cd5e9bda3cb08beec1"
         }
       },
       "historic": {
-        "commit": "ea94356^",
-        "rc": 0,
-        "token": "STICKY-FLIPPED-VULNERABLE"
+        "reason": "probe at ea94356^ rc=1 findings=[] ::            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ | AssertionError",
+        "status": "infeasible"
       },
       "matrix": true,
       "probe": "n_prefix_sticky.py",
-      "probe_hash": "6f1ebb73aa0c89edd20ad00caeb49f01b034e947bd83b33daf8a5a933989d0b7",
+      "probe_hash": "85add7ba0e3f1e80ef1cacb37695917c62ca77b103a9186a83aec6a478877b93",
       "reverted": {
         "rc": 0,
         "token": "STICKY-FLIPPED-VULNERABLE"
       },
       "scenario": "pre-I12 no broken-chain pin",
-      "validated_at": "34478d155577d48bc6780bf0af8587566e9d260c"
+      "validated_at": "84e92012645dacac207467d66fd032cc5be78eb1"
     },
     {
       "cross_flips": [],
@@ -63,25 +62,24 @@
         "fixed_units": {
           "chain._append_locked::historic": "4c7207b5676fa9a8d1f69a7708c4aa693164d303ffeeeb245fe17292d35d83b7"
         },
-        "probelib": "e1564672c1ebfb332cad4b4b40497dd54967fe473a4c85f793ad0b6f180efe8c",
+        "probelib": "fd7434a031b565aa8af4dbccdb73270a14627c0479982c90ec7ba2d8e7ca3de1",
         "revert_units": {
           "chain._append_locked::historic": "d590a43b5b36ce899d269032e35e398fd24a9ada00252baf9ffd3f1765d397bc"
         }
       },
       "historic": {
-        "commit": "2391db5^",
-        "rc": 0,
-        "token": "PREFIX-ACCEPTED-VULNERABLE"
+        "reason": "probe at 2391db5^ rc=1 findings=[] ::            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ | AssertionError",
+        "status": "infeasible"
       },
       "matrix": true,
       "probe": "n_prefix_rerun_chain.py",
-      "probe_hash": "1dbd081422de0406ff1eaeb4c5a18eea9496c7d547c1ed42250857c1f2dfe220",
+      "probe_hash": "8dbd6e24818e36c6637e7995b2aebe1797b0f421d29bcc507a6c4ae0c38bb89e",
       "reverted": {
         "rc": 0,
         "token": "PREFIX-ACCEPTED-VULNERABLE"
       },
       "scenario": "pre-I6 no anchored append",
-      "validated_at": "34478d155577d48bc6780bf0af8587566e9d260c"
+      "validated_at": "84e92012645dacac207467d66fd032cc5be78eb1"
     },
     {
       "cross_flips": [],
@@ -104,7 +102,7 @@
         "fixed_units": {
           "chain._append_locked::historic": "4c7207b5676fa9a8d1f69a7708c4aa693164d303ffeeeb245fe17292d35d83b7"
         },
-        "probelib": "e1564672c1ebfb332cad4b4b40497dd54967fe473a4c85f793ad0b6f180efe8c",
+        "probelib": "fd7434a031b565aa8af4dbccdb73270a14627c0479982c90ec7ba2d8e7ca3de1",
         "revert_units": {
           "chain._append_locked::historic": "d590a43b5b36ce899d269032e35e398fd24a9ada00252baf9ffd3f1765d397bc"
         }
@@ -122,7 +120,7 @@
         "token": "CHAIN-RESTARTED-VULNERABLE"
       },
       "scenario": "pre-I6/N6/M7 no fail-closed append",
-      "validated_at": "34478d155577d48bc6780bf0af8587566e9d260c"
+      "validated_at": "84e92012645dacac207467d66fd032cc5be78eb1"
     },
     {
       "cross_flips": [],
@@ -145,7 +143,7 @@
         "fixed_units": {
           "chain._append_locked::historic": "4c7207b5676fa9a8d1f69a7708c4aa693164d303ffeeeb245fe17292d35d83b7"
         },
-        "probelib": "e1564672c1ebfb332cad4b4b40497dd54967fe473a4c85f793ad0b6f180efe8c",
+        "probelib": "fd7434a031b565aa8af4dbccdb73270a14627c0479982c90ec7ba2d8e7ca3de1",
         "revert_units": {
           "chain._append_locked::historic": "d590a43b5b36ce899d269032e35e398fd24a9ada00252baf9ffd3f1765d397bc"
         }
@@ -163,7 +161,7 @@
         "token": "CHAIN-RESTARTED-VULNERABLE"
       },
       "scenario": "pre-I6/N6/M7 no fail-closed append",
-      "validated_at": "34478d155577d48bc6780bf0af8587566e9d260c"
+      "validated_at": "84e92012645dacac207467d66fd032cc5be78eb1"
     },
     {
       "cross_flips": [
@@ -191,18 +189,17 @@
           "chain._append_locked::no-M7": "4c7207b5676fa9a8d1f69a7708c4aa693164d303ffeeeb245fe17292d35d83b7",
           "ledger._checkpoint_problems::none": "3d76353dcb892b25c3cffd086650ad6141d21b8dc1bbddcbc7774127a6a2390a"
         },
-        "probelib": "e1564672c1ebfb332cad4b4b40497dd54967fe473a4c85f793ad0b6f180efe8c",
+        "probelib": "fd7434a031b565aa8af4dbccdb73270a14627c0479982c90ec7ba2d8e7ca3de1",
         "revert_units": {
           "chain._append_locked::no-M7": "0f6bcd8e0a57e609328204bd02eedb591e480833f3d656daf8ecb36e058f77b6",
           "ledger._checkpoint_problems::none": "b7bd4b27090ee2b5014941eb1fa914f9ccfe77f6ff719558d4f878a5366fb765"
         }
       },
       "historic": {
-        "commit": "c4ede99^",
-        "rc": 0,
-        "token": "PREFIX-REFUSED-BY-CHECKPOINT"
+        "reason": "probe at c4ede99^ rc=1 findings=[] ::            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ | AssertionError",
+        "status": "infeasible"
       },
-      "matrix": true,
+      "matrix": false,
       "probe": "n_prefix_m7_chain.py",
       "probe_hash": "6482c1d6c51be3d7347b1f6c8202d7ed96ecf005567f732582c7b424e574e0ec",
       "reverted": {
@@ -210,7 +207,7 @@
         "token": "PREFIX-ACCEPTED-VULNERABLE"
       },
       "scenario": "pre-M7 no committed checkpoints",
-      "validated_at": "34478d155577d48bc6780bf0af8587566e9d260c"
+      "validated_at": "84e92012645dacac207467d66fd032cc5be78eb1"
     },
     {
       "cross_flips": [
@@ -237,26 +234,25 @@
           "chain._append_locked::no-M7": "4c7207b5676fa9a8d1f69a7708c4aa693164d303ffeeeb245fe17292d35d83b7",
           "ledger._checkpoint_problems::none": "3d76353dcb892b25c3cffd086650ad6141d21b8dc1bbddcbc7774127a6a2390a"
         },
-        "probelib": "e1564672c1ebfb332cad4b4b40497dd54967fe473a4c85f793ad0b6f180efe8c",
+        "probelib": "fd7434a031b565aa8af4dbccdb73270a14627c0479982c90ec7ba2d8e7ca3de1",
         "revert_units": {
           "chain._append_locked::no-M7": "0f6bcd8e0a57e609328204bd02eedb591e480833f3d656daf8ecb36e058f77b6",
           "ledger._checkpoint_problems::none": "b7bd4b27090ee2b5014941eb1fa914f9ccfe77f6ff719558d4f878a5366fb765"
         }
       },
       "historic": {
-        "commit": "c4ede99^",
-        "rc": 0,
-        "token": "ROLLBACK-LAUNDERED-VULNERABLE"
+        "reason": "probe at c4ede99^ rc=1 findings=[] ::            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ | AssertionError",
+        "status": "infeasible"
       },
-      "matrix": true,
+      "matrix": false,
       "probe": "n_prefix_mirror_rollback.py",
-      "probe_hash": "67d342fc2539371067840d6581bacdb88f5687f4eb1b4ed57cff7cea506c5919",
+      "probe_hash": "22f6782aa48b8491a15fa58becfe12399f8f86fec412d84873390103f883ccb3",
       "reverted": {
         "rc": 0,
         "token": "ROLLBACK-LAUNDERED-VULNERABLE"
       },
       "scenario": "pre-M7 no committed checkpoints",
-      "validated_at": "34478d155577d48bc6780bf0af8587566e9d260c"
+      "validated_at": "84e92012645dacac207467d66fd032cc5be78eb1"
     },
     {
       "cross_flips": [],
@@ -278,9 +274,9 @@
       },
       "hashes": {
         "fixed_units": {
-          "stage8.no-N1-early-return": "f850e010972b85fa443ed83740cb4ca67853888f9c0b25aafdd977a36a0229b7"
+          "stage8.no-N1-early-return": "5ccb0d864f2e3c39b2b6ee0e32810a5790b0365bb4345d0b29280ac5d43a0c09"
         },
-        "probelib": "e1564672c1ebfb332cad4b4b40497dd54967fe473a4c85f793ad0b6f180efe8c",
+        "probelib": "fd7434a031b565aa8af4dbccdb73270a14627c0479982c90ec7ba2d8e7ca3de1",
         "revert_units": {
           "stage8.no-N1-early-return": "07ff30c71c3ec96e7a644d5f61c65a7aa25f9614561aec713fb48155eda26f04"
         }
@@ -298,7 +294,7 @@
         "token": "EVALS-UNBOUND-VULNERABLE"
       },
       "scenario": "pre-N1 early return",
-      "validated_at": "14265871ac486eb0f09cae315a0cac586ed2d82c"
+      "validated_at": "84e92012645dacac207467d66fd032cc5be78eb1"
     },
     {
       "cross_flips": [],
@@ -320,9 +316,9 @@
       },
       "hashes": {
         "fixed_units": {
-          "hooks.no-N10-gitop-verdict": "601274caaeab60be82e7957f11b0eb5baf943ed3d22e9b7f29af8ebce9225874"
+          "hooks.no-N10-gitop-verdict": "d084a818291ccad5cc6f6157aff8c49e47a08d6b305890f3b3202f0782e9db8a"
         },
-        "probelib": "e1564672c1ebfb332cad4b4b40497dd54967fe473a4c85f793ad0b6f180efe8c",
+        "probelib": "fd7434a031b565aa8af4dbccdb73270a14627c0479982c90ec7ba2d8e7ca3de1",
         "revert_units": {
           "hooks.no-N10-gitop-verdict": "1f15fd0ccbcded94b788636637772906c0a3db917361759a2db4a0f63314f28c"
         }
@@ -340,7 +336,7 @@
         "token": "HOOK-GITOPS-VULNERABLE"
       },
       "scenario": "pre-N10 no git-op verdict",
-      "validated_at": "35c0bfdeb703201cc96ccd5ee009e80ef25a7f43"
+      "validated_at": "84e92012645dacac207467d66fd032cc5be78eb1"
     },
     {
       "cross_flips": [],
@@ -364,15 +360,14 @@
         "fixed_units": {
           "review.existing_calls::preN2": "7bee114d649a18221e6d889e2bd95b662c07474477605df0f8bbf2c83a7e3bff"
         },
-        "probelib": "e1564672c1ebfb332cad4b4b40497dd54967fe473a4c85f793ad0b6f180efe8c",
+        "probelib": "fd7434a031b565aa8af4dbccdb73270a14627c0479982c90ec7ba2d8e7ca3de1",
         "revert_units": {
           "review.existing_calls::preN2": "ad937a25943010f2364b664501bb1815876ae654fabd4648a643f6e48c74a2ba"
         }
       },
       "historic": {
-        "commit": "d135783^",
-        "rc": 0,
-        "token": "G3-LAUNDERED-VULNERABLE"
+        "reason": "probe at d135783^ rc=1 findings=[] ::            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ | AssertionError",
+        "status": "infeasible"
       },
       "matrix": true,
       "probe": "n_gitclean_g3.py",
@@ -382,7 +377,7 @@
         "token": "G3-LAUNDERED-VULNERABLE"
       },
       "scenario": "pre-N2 no lineage backstop",
-      "validated_at": "34478d155577d48bc6780bf0af8587566e9d260c"
+      "validated_at": "84e92012645dacac207467d66fd032cc5be78eb1"
     },
     {
       "cross_flips": [],
@@ -406,15 +401,14 @@
         "fixed_units": {
           "review.existing_calls::preN2": "7bee114d649a18221e6d889e2bd95b662c07474477605df0f8bbf2c83a7e3bff"
         },
-        "probelib": "e1564672c1ebfb332cad4b4b40497dd54967fe473a4c85f793ad0b6f180efe8c",
+        "probelib": "fd7434a031b565aa8af4dbccdb73270a14627c0479982c90ec7ba2d8e7ca3de1",
         "revert_units": {
           "review.existing_calls::preN2": "ad937a25943010f2364b664501bb1815876ae654fabd4648a643f6e48c74a2ba"
         }
       },
       "historic": {
-        "commit": "d135783^",
-        "rc": 0,
-        "token": "G3-LAUNDERED-VULNERABLE"
+        "reason": "probe at d135783^ rc=1 findings=[] ::            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ | AssertionError",
+        "status": "infeasible"
       },
       "matrix": true,
       "probe": "n_rm_reviews_g3.py",
@@ -424,7 +418,7 @@
         "token": "G3-LAUNDERED-VULNERABLE"
       },
       "scenario": "pre-N2 no lineage backstop",
-      "validated_at": "34478d155577d48bc6780bf0af8587566e9d260c"
+      "validated_at": "84e92012645dacac207467d66fd032cc5be78eb1"
     },
     {
       "cross_flips": [],
@@ -446,9 +440,9 @@
       },
       "hashes": {
         "fixed_units": {
-          "stage8.no-N7-index-fallback": "4ffd18c3bdd32f78e90ad5513b5f249e734b00dffc4329e969bc98842481c0c7"
+          "stage8.no-N7-index-fallback": "12390b90395a8e13c2f9a22bc12c4169269108a1d58cfd72766e1006f1f8671a"
         },
-        "probelib": "e1564672c1ebfb332cad4b4b40497dd54967fe473a4c85f793ad0b6f180efe8c",
+        "probelib": "fd7434a031b565aa8af4dbccdb73270a14627c0479982c90ec7ba2d8e7ca3de1",
         "revert_units": {
           "stage8.no-N7-index-fallback": "af4d1bf7090f124817103dd1375bf09fd281c01869467154aaa86578b08d1978"
         }
@@ -466,7 +460,7 @@
         "token": "EVALS-UNBOUND-VULNERABLE"
       },
       "scenario": "pre-N7 no index fallback",
-      "validated_at": "14265871ac486eb0f09cae315a0cac586ed2d82c"
+      "validated_at": "84e92012645dacac207467d66fd032cc5be78eb1"
     },
     {
       "cross_flips": [],
@@ -488,9 +482,9 @@
       },
       "hashes": {
         "fixed_units": {
-          "stage8.no-N7-index-fallback": "4ffd18c3bdd32f78e90ad5513b5f249e734b00dffc4329e969bc98842481c0c7"
+          "stage8.no-N7-index-fallback": "12390b90395a8e13c2f9a22bc12c4169269108a1d58cfd72766e1006f1f8671a"
         },
-        "probelib": "e1564672c1ebfb332cad4b4b40497dd54967fe473a4c85f793ad0b6f180efe8c",
+        "probelib": "fd7434a031b565aa8af4dbccdb73270a14627c0479982c90ec7ba2d8e7ca3de1",
         "revert_units": {
           "stage8.no-N7-index-fallback": "af4d1bf7090f124817103dd1375bf09fd281c01869467154aaa86578b08d1978"
         }
@@ -508,7 +502,7 @@
         "token": "EVALS-UNBOUND-VULNERABLE"
       },
       "scenario": "pre-N7 no index fallback",
-      "validated_at": "14265871ac486eb0f09cae315a0cac586ed2d82c"
+      "validated_at": "84e92012645dacac207467d66fd032cc5be78eb1"
     },
     {
       "cross_flips": [],
@@ -530,9 +524,9 @@
       },
       "hashes": {
         "fixed_units": {
-          "stage8.no-N7-index-fallback": "4ffd18c3bdd32f78e90ad5513b5f249e734b00dffc4329e969bc98842481c0c7"
+          "stage8.no-N7-index-fallback": "12390b90395a8e13c2f9a22bc12c4169269108a1d58cfd72766e1006f1f8671a"
         },
-        "probelib": "e1564672c1ebfb332cad4b4b40497dd54967fe473a4c85f793ad0b6f180efe8c",
+        "probelib": "fd7434a031b565aa8af4dbccdb73270a14627c0479982c90ec7ba2d8e7ca3de1",
         "revert_units": {
           "stage8.no-N7-index-fallback": "af4d1bf7090f124817103dd1375bf09fd281c01869467154aaa86578b08d1978"
         }
@@ -550,7 +544,7 @@
         "token": "EVALS-UNBOUND-VULNERABLE"
       },
       "scenario": "pre-N7 no index fallback",
-      "validated_at": "14265871ac486eb0f09cae315a0cac586ed2d82c"
+      "validated_at": "84e92012645dacac207467d66fd032cc5be78eb1"
     },
     {
       "cross_flips": [],
@@ -572,9 +566,9 @@
       },
       "hashes": {
         "fixed_units": {
-          "stage8.no-N7-index-fallback": "4ffd18c3bdd32f78e90ad5513b5f249e734b00dffc4329e969bc98842481c0c7"
+          "stage8.no-N7-index-fallback": "12390b90395a8e13c2f9a22bc12c4169269108a1d58cfd72766e1006f1f8671a"
         },
-        "probelib": "e1564672c1ebfb332cad4b4b40497dd54967fe473a4c85f793ad0b6f180efe8c",
+        "probelib": "fd7434a031b565aa8af4dbccdb73270a14627c0479982c90ec7ba2d8e7ca3de1",
         "revert_units": {
           "stage8.no-N7-index-fallback": "af4d1bf7090f124817103dd1375bf09fd281c01869467154aaa86578b08d1978"
         }
@@ -592,7 +586,7 @@
         "token": "EVALS-UNBOUND-VULNERABLE"
       },
       "scenario": "pre-N7 no index fallback",
-      "validated_at": "14265871ac486eb0f09cae315a0cac586ed2d82c"
+      "validated_at": "84e92012645dacac207467d66fd032cc5be78eb1"
     },
     {
       "cross_flips": [],
@@ -614,9 +608,9 @@
       },
       "hashes": {
         "fixed_units": {
-          "stage8.no-N7-index-fallback": "4ffd18c3bdd32f78e90ad5513b5f249e734b00dffc4329e969bc98842481c0c7"
+          "stage8.no-N7-index-fallback": "12390b90395a8e13c2f9a22bc12c4169269108a1d58cfd72766e1006f1f8671a"
         },
-        "probelib": "e1564672c1ebfb332cad4b4b40497dd54967fe473a4c85f793ad0b6f180efe8c",
+        "probelib": "fd7434a031b565aa8af4dbccdb73270a14627c0479982c90ec7ba2d8e7ca3de1",
         "revert_units": {
           "stage8.no-N7-index-fallback": "af4d1bf7090f124817103dd1375bf09fd281c01869467154aaa86578b08d1978"
         }
@@ -634,7 +628,7 @@
         "token": "EVALS-UNBOUND-VULNERABLE"
       },
       "scenario": "pre-N7 no index fallback",
-      "validated_at": "14265871ac486eb0f09cae315a0cac586ed2d82c"
+      "validated_at": "84e92012645dacac207467d66fd032cc5be78eb1"
     },
     {
       "cross_flips": [],
@@ -656,9 +650,9 @@
       },
       "hashes": {
         "fixed_units": {
-          "stage8.no-N7-index-fallback": "4ffd18c3bdd32f78e90ad5513b5f249e734b00dffc4329e969bc98842481c0c7"
+          "stage8.no-N7-index-fallback": "12390b90395a8e13c2f9a22bc12c4169269108a1d58cfd72766e1006f1f8671a"
         },
-        "probelib": "e1564672c1ebfb332cad4b4b40497dd54967fe473a4c85f793ad0b6f180efe8c",
+        "probelib": "fd7434a031b565aa8af4dbccdb73270a14627c0479982c90ec7ba2d8e7ca3de1",
         "revert_units": {
           "stage8.no-N7-index-fallback": "af4d1bf7090f124817103dd1375bf09fd281c01869467154aaa86578b08d1978"
         }
@@ -676,7 +670,7 @@
         "token": "EVALS-UNBOUND-VULNERABLE"
       },
       "scenario": "pre-N7 no index fallback",
-      "validated_at": "14265871ac486eb0f09cae315a0cac586ed2d82c"
+      "validated_at": "84e92012645dacac207467d66fd032cc5be78eb1"
     }
   ],
   "version": 1

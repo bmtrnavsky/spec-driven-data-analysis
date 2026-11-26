@@ -7,7 +7,7 @@ try:
     assert f.cli("lock")[0] == 0
     assert f.cli("packet", "teardown")[0] == 0
     assert f.cli("review", "run", "teardown", stub="pass")[0] == 0
-    assert f.cli("approve", "spec", "--no-sign")[0] == 0
+    assert f.cli("approve", "spec", "--yes", "yes, ship it", "--who", "brad")[0] == 0
     assert f.cli("approved", "spec")[0] == 0
     rc, out = f.cli("gate", "G3")
     print("G3", "PASS" if rc == 0 else "FAIL", out.strip()[:300])

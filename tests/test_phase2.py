@@ -118,9 +118,10 @@ class Base(unittest.TestCase):
     def decide_ready(self):
         """Satisfy the cascade intermediates at DECIDE (G2 tier confirmation,
         G3 teardown review + spec approval, G5 profile) so `gate G4`/`gate G6`
-        report their own verdicts. Stubbed goldfish; unsigned approvals are
-        disclosed, not hidden, below PUBLISH."""
-        rc, out, _ = self.cli("approve", "tier", "--no-sign", str(self.wd.root))
+        report their own verdicts. Stubbed goldfish; each approval records a
+        chat yes for the current digest."""
+        rc, out, _ = self.cli("approve", "tier", "--yes", "yes, DECIDE is right",
+                              "--who", "brad", str(self.wd.root))
         self.assertEqual(rc, 0, out)
         rc, out, _ = self.cli("approved", "tier", str(self.wd.root))
         self.assertEqual(rc, 0, out)
@@ -138,7 +139,8 @@ class Base(unittest.TestCase):
             else:
                 os.environ["DDA_GOLDFISH_STUB"] = old_stub
         self.assertEqual(rc, 0, out)
-        rc, out, _ = self.cli("approve", "spec", "--no-sign", str(self.wd.root))
+        rc, out, _ = self.cli("approve", "spec", "--yes", "yes, the spec is right",
+                              "--who", "brad", str(self.wd.root))
         self.assertEqual(rc, 0, out)
         rc, out, _ = self.cli("approved", "spec", str(self.wd.root))
         self.assertEqual(rc, 0, out)
@@ -304,31 +306,30 @@ class TestHooks(Base):
         self.assertIn("Re-lock", msg)
 
     def test_lockguard_approval_relay_coverage(self):
-        # Opus probe-G inputs: every agent-side path to a CONFIRMED
-        # record (direct approve, relay script/module, quoted or chained
-        # forms, python -c, in-process API) blocks in a bound session.
-        cmds = ("dda approve spec --telegram 3080738179 55 /tmp/wd",
-                "python scripts/dda_relay.py relay --channel telegram --user-id 3080738179 --message-id 55 --kind spec /tmp/wd",
-                "python -m dda approve spec --kind spec /tmp/wd",
-                'dda "approve" spec --telegram 3080738179 55 /tmp/wd',
-                "PYTHONPATH=scripts python -m ddalib.cli approve spec --telegram 3080738179 55 /tmp/wd",
-                "python -c \"import sys; sys.path.insert(0, 'scripts'); import dda_relay; dda_relay.main(['relay', '--channel', 'telegram'])\"",
-                "cd scripts && python -m ddalib.cli approve spec --telegram 3080738179 55 /tmp/wd",
-                "dda_relay relay --channel telegram --user-id 3080738179 --message-id 55 --kind spec /tmp/wd")
+        # Opus probe-G inputs: every agent-side path to a recorded yes
+        # (direct approve, quoted or chained forms, python -m, python -c,
+        # in-process API) blocks in a bound session. The relay script is
+        # deleted, so its forms are gone with it.
+        cmds = ('dda approve spec --yes "yes, ship it" /tmp/wd',
+                "python -m dda approve spec --yes yes /tmp/wd",
+                'dda "approve" spec --yes "yes" /tmp/wd',
+                "PYTHONPATH=scripts python -m ddalib.cli approve spec --yes yes /tmp/wd",
+                "python -c \"import sys; sys.path.insert(0, 'scripts'); from ddalib.cli import main; main(['approve', 'spec', '--yes', 'yes'])\"",
+                "cd scripts && python -m ddalib.cli approve spec --yes yes /tmp/wd")
         for cmd in cmds:
             self.assertTrue(self.blocked("lockguard", "terminal", {"command": cmd})[0], cmd)
-        codes = ("from ddalib import approvals; approvals.do_approve(wd, 'spec', telegram=('3080738179', '55'))",
-                 "import sys; sys.path.insert(0, 'scripts'); from ddalib.cli import main; main(['approve', 'spec', '--telegram', '3080738179', '55', '.'])",
-                 "import subprocess, sys; subprocess.run([sys.executable, 'scripts/dda_relay.py', 'relay', '--channel', 'telegram'])",
-                 "import subprocess; subprocess.run(['dda', 'approve', 'spec', '--telegram', '3080738179', '55', '/tmp/wd'])",
-                 "import sys; sys.path.insert(0, 'scripts'); from ddalib import approvals; approvals.do_approve('spec', telegram=('3080738179', '999'))")
+        codes = ("from ddalib import approvals; approvals.do_approve(wd, 'spec', yes='yes')",
+                 "import sys; sys.path.insert(0, 'scripts'); from ddalib.cli import main; main(['approve', 'spec', '--yes', 'yes', '.'])",
+                 "import subprocess; subprocess.run(['dda', 'approve', 'spec', '--yes', 'yes', '/tmp/wd'])",
+                 "import sys; sys.path.insert(0, 'scripts'); from ddalib import approvals; approvals.do_approve('spec', yes='yes')")
         for code in codes:
             self.assertTrue(self.blocked("lockguard", "execute_code", {"code": code})[0], code)
-        # Clean neighbors still pass (the signing layer stays strict about
-        # bare `dda approve` / `dda_relay relay` words on terminal — an
-        # agent has no clean reason to utter them to a shell).
+        # Clean neighbors still pass (the approval layer stays strict about
+        # bare `dda approve` words on terminal — an agent has no clean reason
+        # to utter them to a shell).
         for cmd in ("dda status", "python scripts/dda.py lock",
                     "python -c \"print(open('raw.csv').read())\"",
+                    "dda approved spec /tmp/wd",
                     'echo "ask Brad to run dda release after your yes"',
                     'git commit -m "prep for dda release"'):
             self.assertFalse(self.blocked("lockguard", "terminal", {"command": cmd})[0], cmd)
@@ -338,8 +339,7 @@ class TestHooks(Base):
     def test_lockguard_signing(self):
         for cmd in ("git commit -S -m x", "git -c commit.gpgsign=true commit -m x", "git tag -s v1 -m x",
                     "dda approve spec", "git config user.signingkey ABC",
-                    "python scripts/dda_relay.py relay --channel telegram --user-id 3080738179 --message-id 1 spec",
-                    "dda_relay relay --channel chat --user-id brad --message-id 1 spec"):
+                    "dda approve spec --yes \"yes, ship it\" /tmp/wd"):
             self.assertTrue(self.blocked("lockguard", "terminal", {"command": cmd})[0], cmd)
         self.assertFalse(self.blocked("lockguard", "terminal", {"command": "git status"})[0])
 
@@ -470,27 +470,30 @@ class TestUnbound(Base):
         self.assertIn("no config approval", out)
         self.assertIn("dda approve config", out)
         # G6 (phase 3) is built: with the cascade satisfied through G4 (the
-        # config now approved, unverified and disclosed), a fresh lock with
+        # config now approved by a recorded chat yes), a fresh lock with
         # no data runs passes vacuously.
-        rc, out, _ = self.cli("approve", "config", "--no-sign", str(self.wd.root))
+        rc, out, _ = self.cli("approve", "config", "--yes", "yes, the config is right",
+                              "--who", "brad", str(self.wd.root))
         self.assertEqual(rc, 0, out)
         rc, out, _ = self.cli("gate", "G6", str(self.wd.root))
         self.assertEqual(rc, 0, out)
         self.assertIn("G6 pass", out)
 
-    def test_g4_decide_passes_with_unverified_config_approval(self):
+    def test_g4_decide_passes_with_recorded_config_approval(self):
         self.tier = "DECIDE"
         self.write_spec()
         self.lock()
         self.decide_ready()
-        rc, out, _ = self.cli("approve", "config", "--no-sign", str(self.wd.root))
+        rc, out, _ = self.cli("approve", "config", "--yes", "yes, the config is right",
+                              "--who", "brad", str(self.wd.root))
         self.assertEqual(rc, 0, out)
         rc, out, _ = self.cli("approved", "config", str(self.wd.root))
         self.assertEqual(rc, 0, out)
-        self.assertIn("UNVERIFIED", out)
+        self.assertIn("RECORDED", out)
+        self.assertIn("chat yes from brad at", out)
         rc, out, _ = self.cli("gate", "G4", str(self.wd.root))
         self.assertEqual(rc, 0, out)
-        self.assertIn("unverified", out)
+        self.assertIn("recorded", out.lower())
 
 
 if __name__ == "__main__":

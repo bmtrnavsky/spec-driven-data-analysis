@@ -68,7 +68,8 @@ class _Approve(Base):
         top = subprocess.run(["git", "-C", str(self.wd.root), "rev-parse", "--show-toplevel"],
                              capture_output=True, text=True, check=True).stdout.strip()
         self.assertEqual(Path(top).resolve() == self.wd.root.resolve(), not self.nested)
-        rc, out, err = self.cli("approve", "tier", "--no-sign", str(self.wd.root))
+        rc, out, err = self.cli("approve", "tier", "--yes", "yes, lock it",
+                                "--who", "brad", str(self.wd.root))
         self.assertEqual(rc, 0, out + err)
         self.assertNotIn("touches more than", out + err)
         sha = subprocess.run(["git", "-C", str(self.wd.root), "rev-parse", "HEAD"],
@@ -84,11 +85,13 @@ class _Approve(Base):
         rc, out, err = self.cli("approved", "tier", str(self.wd.root))
         self.assertEqual(rc, 0, out + err)
         v = approvals.verify_approval(self.wd, "tier")
-        # --no-sign: the commit is accepted as THE approval for the current
-        # digest and disclosed as unverified (not missing/uncommitted).
-        self.assertEqual(v.get("state"), approvals.ApprovalState.UNVERIFIED, v)
+        # The chat yes is accepted as THE approval for the current digest:
+        # recorded, committed in exactly one file, with the words on file.
+        self.assertEqual(v.get("state"), approvals.ApprovalState.RECORDED, v)
         self.assertEqual(v.get("commit"), sha, v)
-        self.assertIn("unsigned", v.get("reason", ""), v)
+        self.assertEqual(v.get("who"), "brad", v)
+        self.assertEqual(v.get("yes"), "yes, lock it", v)
+        self.assertIn("recorded yes", v.get("reason", ""), v)
         self.assertEqual(len(approvals.list_approvals(self.wd, "tier")), 1)
         rec, _ = approvals.approved_payload(self.wd, "tier")
         self.assertEqual(rec.get("kind"), "tier")

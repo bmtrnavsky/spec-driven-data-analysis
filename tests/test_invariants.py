@@ -65,9 +65,8 @@ from tests.test_phase9 import P9Setup  # noqa: E402
 
 ORDER = ["G0", "G1", "G2", "G3", "G4", "G5", "G6", "G7", "G8", "G9"]
 STICKY_TRUE = ("results_seen_before_profile", "goldfish_mode")
-INVALID_STATES = {"stale", "missing", "uncommitted", "bad_sig",
-                  "unknown_signer", "downgraded"}
-PASSING_STATES = {"verified", "unverified"}
+INVALID_STATES = {"stale", "missing", "uncommitted", "malformed"}
+PASSING_STATES = {"recorded"}
 
 MUTATIONS = ["cosmetic_amend", "reprofile", "rerun", "rename_artifact",
              "delete_artifact", "touch_mtimes", "unset_key",
@@ -204,11 +203,11 @@ class InvMixin:
     def answer_and_signoff(self):
         (self.wd.analysis / "answer.md").write_text(
             "# Answer\n\nConversion rose.\n", encoding="utf-8")
-        rc, out = self.cli("approve", "spec", "--no-sign")
+        rc, out = self.cli("approve", "spec", "--yes", "yes, ship it", "--who", "brad")
         self.assertEqual(rc, 0, "approve spec failed: " + out)
         rc, out = self.cli("approved", "spec")
         self.assertEqual(rc, 0, "approved spec failed: " + out)
-        rc, out = self.cli("approve", "signoff", "--no-sign")
+        rc, out = self.cli("approve", "signoff", "--yes", "yes, ship it", "--who", "brad")
         self.assertEqual(rc, 0, "approve signoff failed: " + out)
         rc, out = self.cli("approved", "signoff")
         self.assertEqual(rc, 0, "approved signoff failed: " + out)

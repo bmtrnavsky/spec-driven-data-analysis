@@ -28,7 +28,7 @@ try:
     for _ in range(2):
         rc, out = f.cli("review", "run", "teardown", stub="fail")
         assert "fail" in out.lower(), f"fail-stub review recorded nothing: {out}"
-    assert f.cli("approve", "spec", "--no-sign")[0] == 0
+    assert f.cli("approve", "spec", "--yes", "yes, ship it", "--who", "brad")[0] == 0
     assert f.cli("approved", "spec")[0] == 0
     assert not g3_verdict(f), "control G3 should fail"
     # Attack: true prefix restore — T0 files back, everything newer gone.

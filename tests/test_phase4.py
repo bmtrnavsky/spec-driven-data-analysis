@@ -415,88 +415,79 @@ class ApprovalsTests(Base):
         self.assertEqual(rc, 0, err)
         return out
 
-    def test_approver_matches_exact_fingerprint_only(self):
-        # §4.5: only exact %GF/%GP-style key material matches. Substrings,
-        # partial fingerprints, full-key fragments, and bare names never do.
-        from ddalib import approvals
-        appr = [{"name": "brad", "fingerprint": "SHA256:ABCDEF123456",
-                 "key_id": "ABCDEF12",
-                 "key": "ssh-ed25519 AAAAC3NzDEMOKEY brad@host"}]
-        self.assertEqual(approvals.approver_matches(appr, "SHA256:ABCDEF123456"), "brad")
-        self.assertEqual(approvals.approver_matches(appr, "sha256:abcdef123456"), "brad")
-        self.assertEqual(approvals.approver_matches(appr, "ABCDEF12"), "brad")
-        self.assertEqual(approvals.approver_matches(
-            appr, "ssh-ed25519 AAAAC3NzDEMOKEY brad@host"), "brad")
-        # Forgeries that must NOT match:
-        self.assertIsNone(approvals.approver_matches(appr, "ABCDEF"))  # partial fp
-        self.assertIsNone(approvals.approver_matches(appr, "SHA256:ABCDEF123456EXTRA"))  # superstring
-        self.assertIsNone(approvals.approver_matches(appr, "AAAAC3NzDEMOKEY"))  # key fragment
-        self.assertIsNone(approvals.approver_matches(appr, "brad"))  # bare name
-        self.assertIsNone(approvals.approver_matches(
-            appr, 'gpg: Good signature from "brad"'))  # %GS-style name text
-        self.assertIsNone(approvals.approver_matches(appr, ""))  # empty
-        self.assertIsNone(approvals.approver_matches([], "SHA256:ABCDEF123456"))
-
-    def test_approver_matches_forged_userid_no_wordsplit(self):
-        # Opus verify deleg_52940ae2: word-splitting let a forged key whose
-        # user ID embeds the victim fingerprint verify. Whole-value-only:
-        # %GS/%GK signer text and verify-commit output never match, even
-        # when they contain the fingerprint as a token/substring.
-        from ddalib import approvals
-        fp = "SHA256:ABCDEF123456"
-        appr = [{"name": "brad", "fingerprint": fp,
-                 "key_id": "ABCDEF12",
-                 "key": "ssh-ed25519 AAAAC3NzDEMOKEY brad@host"}]
-        forgeries = [
-            f"Evil User ({fp})",  # fingerprint embedded in a forged user ID
-            f"gpg: Good signature from \"evil ({fp})\"",
-            f"Good signature from evil <evil@host> [{fp}]",
-            f"256 {fp} evil-key (ED25519)",  # ssh-add -l-style line is NOT key material
-            f"prefix {fp} suffix",  # fingerprint as one whitespace token
-            "SHA256:ABCDEF123456\nbrad",  # multi-line smuggling
-        ]
-        for cand in forgeries:
-            self.assertIsNone(approvals.approver_matches(appr, cand), cand)
-        # Whole %GF/%GP values still match exactly.
-        self.assertEqual(approvals.approver_matches(appr, fp), "brad")
-
-    def test_config_approvers_validation(self):
+    def test_approvers_are_names_only(self):
+        # §4.5 as it now stands: an approver is a name, because the approval
+        # is Brad's chat yes. Legacy key fields from older configs load and
+        # are ignored — nothing here matches key material any more.
+        from ddalib.layout import load_config
         self.wd.config_path.write_text(
-            "version: 1\ndefault_tier: EXPLORE\napprovers:\n  - name: brad\n", encoding="utf-8")
+            "version: 1\ndefault_tier: EXPLORE\napprovers:\n"
+            "  - name: brad\n    fingerprint: SHA256:ABCDEF123456\n"
+            "    key_id: ABCDEF12\n    key: ssh-ed25519 AAAA brad@host\n",
+            encoding="utf-8")
+        cfg = load_config(self.wd)
+        self.assertEqual(cfg["approvers"][0]["name"], "brad")
+        from ddalib import approvals
+        self.assertFalse(hasattr(approvals, "approver_matches"),
+                         "key-fingerprint matching is deleted with the signing model")
+
+    def test_approver_entries_need_a_handle(self):
         from ddalib.layout import DdaError, load_config
+        for bad in ("", "   ", "brad@host", "x" * 65):
+            self.wd.config_path.write_text(
+                "version: 1\ndefault_tier: EXPLORE\napprovers:\n"
+                "  - name: \"" + bad + "\"\n",
+                encoding="utf-8")
+            with self.assertRaises(DdaError, msg=repr(bad)):
+                load_config(self.wd)
+        self.wd.config_path.write_text(
+            "version: 1\ndefault_tier: EXPLORE\napprovers:\n  - fingerprint: SHA256:abc\n",
+            encoding="utf-8")
         with self.assertRaises(DdaError):
             load_config(self.wd)
+
+    def test_config_approvers_validation(self):
+        from ddalib.layout import load_config
+        self.wd.config_path.write_text(
+            "version: 1\ndefault_tier: EXPLORE\napprovers:\n  - name: brad\n", encoding="utf-8")
+        cfg = load_config(self.wd)
+        self.assertEqual(cfg["approvers"], [{"name": "brad"}])
+        # Legacy key material is accepted and ignored, not required.
         self.wd.config_path.write_text(
             "version: 1\ndefault_tier: EXPLORE\napprovers:\n  - name: brad\n    fingerprint: SHA256:abc123\n",
             encoding="utf-8")
         cfg = load_config(self.wd)
         self.assertEqual(cfg["approvers"][0]["name"], "brad")
 
-    def test_approve_records_unverified_and_gates(self):
+    def test_approve_records_a_chat_yes_and_gates(self):
         self.lock()
-        rc, out, err = self.cli("approve", "config", "--no-sign", str(self.wd.root))
+        rc, out, err = self.cli("approve", "config", "--yes", "yes, the config is right",
+                                "--who", "brad", str(self.wd.root))
         self.assertEqual(rc, 0, err)
-        self.assertIn("UNSIGNED (unverified)", out)
+        self.assertIn("recorded config", out)
+        self.assertIn("chat yes from brad", out)
         from ddalib import approvals
         ch = approvals.current_artifact(self.wd, "config")
         self.assertTrue((self.wd.analysis / "approvals" / f"config-{ch[:16]}.json").is_file())
         rc, out, err = self.cli("approved", "config", str(self.wd.root))
         self.assertEqual(rc, 0, err)
-        self.assertIn("UNVERIFIED", out)
+        self.assertIn("RECORDED", out)
         recs = [r for r in chain.read_records(ledger.approvals_index(self.wd))
                 if r.get("type") == "approval"]
         self.assertEqual(len(recs), 1)
-        self.assertFalse(recs[0]["verified"])
-        # EXPLORE gate passes with disclosure.
+        self.assertTrue(recs[0]["recorded"])
+        self.assertEqual(recs[0]["state"], "recorded")
+        # EXPLORE gate passes with the recorded yes named.
         rc, out, _ = self.cli("gate", "G4", str(self.wd.root))
         self.assertEqual(rc, 0, out)
-        self.assertIn("unverified", out)
+        self.assertIn("recorded", out.lower())
 
     def test_approve_rejects_unknown_kind_and_bad_artifact(self):
         self.lock()
-        rc, _, err = self.cli("approve", "bogus", "--no-sign", str(self.wd.root))
+        rc, _, err = self.cli("approve", "bogus", "--yes", "yes", "--who", "brad", str(self.wd.root))
         self.assertNotEqual(rc, 0)
-        rc, _, _ = self.cli("approve", "config", "../evil", "--no-sign", str(self.wd.root))
+        rc, _, _ = self.cli("approve", "config", "../evil", "--yes", "yes", "--who", "brad",
+                            str(self.wd.root))
         self.assertNotEqual(rc, 0)
 
     def test_approved_missing_file_fails(self):
@@ -509,7 +500,7 @@ class ApprovalsTests(Base):
         self.lock()
         from ddalib import approvals
         old = approvals.current_artifact(self.wd, "config")
-        self.assertEqual(self.cli("approve", "config", "--no-sign", str(self.wd.root))[0], 0)
+        self.assertEqual(self.cli("approve", "config", "--yes", "yes, ship it", "--who", "brad", str(self.wd.root))[0], 0)
         self.assertEqual(self.cli("approved", "config", str(self.wd.root))[0], 0)
         # Change the config: the old approval no longer covers the new hash.
         cfg = self.wd.config_path.read_text(encoding="utf-8")
@@ -533,19 +524,19 @@ class DoctorTests(Base):
         self.assertIn(rc, (0, 1), err)
         rep = json.loads(out)
         self.assertIn("sections", rep)
-        self.assertIn("keys", rep["sections"])
+        # Approvals carry no key material (chat yes is the approval), so there
+        # is no key section and no downgrade to report.
+        self.assertNotIn("keys", rep["sections"])
+        self.assertNotIn("key_failures", rep)
         self.assertIn("hooks", rep["sections"])
         self.assertIn("interpreter", rep["sections"])
-        names = [c["name"] for c in rep["sections"]["keys"]]
-        self.assertIn("gpg-agent", names)
-        self.assertIn("ssh-agent", names)
-        self.assertIn("windows-agents", names)
-        self.assertIn("git-signing-config", names)
         for checks in rep["sections"].values():
             for c in checks:
                 self.assertIn(c["status"], ("pass", "fail", "skip"))
 
-    def test_doctor_sees_auto_signing(self):
+    def test_doctor_ignores_git_auto_signing(self):
+        # Signing config no longer downgrades anything: an enabled
+        # commit.gpgsign must add no key check and fail no section.
         # Never touch the operator's real ~/.gitconfig: redirect the
         # global and system scopes at temp files for the duration.
         fake_global = self.tmp / "fake-global-gitconfig"
@@ -556,25 +547,20 @@ class DoctorTests(Base):
         os.environ["GIT_CONFIG_GLOBAL"] = str(fake_global)
         os.environ["GIT_CONFIG_SYSTEM"] = str(fake_system)
         try:
-            rc, out, err = self.cli("doctor", "--json")
-            self.assertIn(rc, (0, 1), err)
-            before = json.loads(out)
             subprocess.run(["git", "config", "--global", "commit.gpgsign", "true"], check=True)
-            try:
-                rc2, out2, _ = self.cli("doctor", "--json")
-            finally:
-                subprocess.run(["git", "config", "--global", "--unset", "commit.gpgsign"], check=True)
+            rc, out, err = self.cli("doctor", "--json")
         finally:
+            subprocess.run(["git", "config", "--global", "--unset", "commit.gpgsign"], check=True)
             for k, v in old.items():
                 if v is None:
                     os.environ.pop(k, None)
                 else:
                     os.environ[k] = v
-        after = json.loads(out2)
-        git_checks = [c for c in after["sections"]["keys"] if c["name"] == "git-signing-config"]
-        self.assertTrue(git_checks and git_checks[0]["status"] == "fail")
-        self.assertEqual(rc2, 1)
-        self.assertIn("git-signing-config", after["key_failures"])
+        self.assertIn(rc, (0, 1), err)
+        after = json.loads(out)
+        self.assertNotIn("keys", after["sections"])
+        self.assertNotIn("key_failures", after)
+        self.assertNotIn("git-signing-config", out)
 
     def test_doctor_workdir_section(self):
         rc, out, _ = self.cli("lock", str(self.wd.root))

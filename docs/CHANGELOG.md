@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.9.4 - 2026-11-26
+
+Approval got simpler by owner decision, and three ways around the checks were
+closed.
+
+- **An approval is now your yes in chat, recorded word for word.** The record
+  holds the words, who said them, when, and a fingerprint of the exact thing
+  approved. Passwords, signing keys, passphrases, Telegram message ids, and the
+  approver chain are gone, along with `scripts/dda_relay.py`, the script that
+  used to carry a Telegram confirmation in. Old signed records are refused as
+  legacy; they are never read as a yes. The trade (a record cannot prove who
+  typed it) is written down in SPEC section 4.5. Owner order, 2026-11-25.
+- **A fake review can no longer pass.** Reviews produced by the test stub were
+  noted and then counted. Now the gate refuses the stub call itself, however the
+  session set its environment.
+- **A shell wrapper can no longer hide a git command.** A command line passed
+  through `bash -c "…"` used to slip past the git guard as one opaque token. It
+  is now re-parsed, and name matching ignores case, path, `.exe`, and empty shell
+  quotes, so `g""it clean -fdx` is still git.
+- **README in plain language.** What it does comes first, jargon is defined where
+  it appears, and the approval section matches the new model.
+- Tests: 425 green on the full run, redteam GREEN, probe certifications
+  re-minted.
+
 ## 0.9.3 - 2026-11-08
 
 Approval relay hardened against the Opus review findings, plus a second approval channel.

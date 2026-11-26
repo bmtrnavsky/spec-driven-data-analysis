@@ -138,7 +138,7 @@ def g3_failed_fixture(f):
     for _ in range(2):
         rc, out = f.cli("review", "run", "teardown", stub="fail")
         assert "fail" in out.lower(), f"fail-stub review run recorded nothing: {out}"
-    assert f.cli("approve", "spec", "--no-sign")[0] == 0
+    assert f.cli("approve", "spec", "--yes", "yes, ship it", "--who", "brad")[0] == 0
     assert f.cli("approved", "spec")[0] == 0
     v = _ev.evaluate(f.wd, "G3")["verdicts"]
     assert v["G3"][0] is False, f"control G3 should fail, got: {v['G3']}"

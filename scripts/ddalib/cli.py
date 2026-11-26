@@ -64,15 +64,13 @@ def cmd_init(args) -> int:
     print(f"workdir id: {wd.id}")
     try:
         from .layout import load_config as _load
-        fps = [f"{a.get('name')}:{str(a.get('fingerprint') or a.get('key_id') or a.get('key') or '')[:64]}"
-               for a in (_load(wd).get("approvers") or [])]
-        if fps:
-            print("approver fingerprints (confirm these are Brad's keys before the first config approval):")
-            for f in fps:
-                print(f"  {f}")
+        names = [str(a.get("name")) for a in (_load(wd).get("approvers") or [])
+                 if isinstance(a, dict) and a.get("name")]
+        if names:
+            print(f"approvers (who may say yes): {', '.join(names)}")
         else:
-            print("approvers: none configured — add Brad's keys under `approvers:` in .analysis/config.yaml, "
-                  "then `dda approve config` (TOFU, §4.5)")
+            print("approvers: none configured — add a display list to .analysis/config.yaml "
+                  "(approvers: then '  - name: brad'); a name is all it holds, §4.5")
     except DdaError as exc:
         print(f"approvers: could not read ({exc})")
     return 0
@@ -342,25 +340,15 @@ def _kind_artifact_workdir(args) -> tuple:
 def cmd_approve(args) -> int:
     kind, artifact, workdir = _kind_artifact_workdir(args)
     wd = Workdir.at(workdir or os.getcwd(), args.milestone)
-    tg = tuple(args.telegram) if args.telegram else None
-    ch = tuple(args.chat) if args.chat else None
-    if tg and args.no_sign:
-        raise DdaError("--telegram and --no-sign are different methods; pass one")
-    if ch and args.no_sign:
-        raise DdaError("--chat and --no-sign are different methods; pass one")
-    res = approvals.do_approve(wd, kind, artifact=artifact, key=args.key,
-                               sign=not args.no_sign, message=args.message, telegram=tg, chat=ch)
-    if res.get("telegram"):
-        how = (f"CONFIRMED via Telegram user {res['telegram']['user_id']}, "
-               f"message {res['telegram']['message_id']}")
-    elif res.get("chat"):
-        how = (f"CONFIRMED via Chat user {res['chat']['user_id']}, "
-               f"message {res['chat']['message_id']}")
-    else:
-        how = "signed" if res["signed"] else "UNSIGNED (unverified)"
-    print(f"approved {res['kind']} {res['digest'][:16]} — commit {res['commit'][:12]} "
-          f"({how}); "
-          f"run `dda approved {res['kind']} {res['digest'][:16]}` to record the verification")
+    if not args.yes:
+        raise DdaError("an approval IS the chat yes: pass the words Brad said, verbatim, "
+                       'with --yes "..." (there is nothing else to record)')
+    res = approvals.do_approve(wd, kind, artifact=artifact, who=args.who,
+                               yes=args.yes, when=args.when, message=args.message)
+    print(f"recorded {res['kind']} {res['digest'][:16]} — commit {res['commit'][:12]} "
+          f"(chat yes from {res['who']} at {res['when']})")
+    print(f"  yes: {res['yes']}")
+    print(f"  run `dda approved {res['kind']}` to record the reading of that yes")
     return 0
 
 
@@ -369,10 +357,13 @@ def cmd_approved(args) -> int:
     wd = Workdir.at(workdir or os.getcwd(), args.milestone)
     verdict = approvals.do_approved(wd, kind, artifact=artifact)
     shown = (verdict.get("digest") or artifact or kind)[:16]
-    # Typed state, uppercase for visibility (MISSING, STALE, UNVERIFIED, ...).
-    # The method always prints, so the record says how it was approved:
-    # "VERIFIED - signed by brad" vs "CONFIRMED - Telegram user N, message M".
+    # Typed state, uppercase for visibility (MISSING, UNCOMMITTED, STALE,
+    # MALFORMED, RECORDED). The record always prints who said yes, when, and
+    # the exact digest (and the words, when the record has them):
+    # "RECORDED - chat yes from brad at 2026-11-22".
     print(f"{args.kind} {shown}: {verdict['state'].upper()} - {approvals.method_label(verdict)}")
+    if verdict.get("yes"):
+        print(f"  yes: \"{verdict['yes']}\"")
     print(f"  {verdict['reason']}")
     return 0
 
@@ -392,11 +383,11 @@ def cmd_doctor(args) -> int:
         for c in checks:
             mark = {"pass": "ok", "fail": "FAIL", "skip": "skip"}[c["status"]]
             print(f"  {mark} {c['name']}" + (f": {c['detail']}" if c.get("detail") else ""))
-    if rep["downgrade"]:
-        print("doctor: FAIL — key checks fail, so every approval downgrades to unverified (§4.5)")
+    if rep["failures"]:
+        print("doctor: FAIL — " + ", ".join(rep["failures"]))
         return 1
-    print("doctor: ok" if rep["ok"] else "doctor: FAIL")
-    return 0 if rep["ok"] else 1
+    print("doctor: ok")
+    return 0
 
 
 def cmd_meta(args) -> int:
@@ -734,26 +725,19 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--milestone")
     s.set_defaults(func=cmd_gitcheck)
 
-    s = sub.add_parser("approve", help="commit a human approval file (signed; run in your own terminal)")
+    s = sub.add_parser("approve", help="record Brad's chat yes for the current content and commit the record")
     s.add_argument("kind", help=f"approval kind: {', '.join(approvals.KINDS)}")
     s.add_argument("artifact", nargs="?", help="case/definition selector, or the digest itself (digests are computed by dda; free-form tokens are rejected)")
     s.add_argument("workdir", nargs="?")
     s.add_argument("--milestone")
-    s.add_argument("--key", help="signing key id passed to git (default: the key's own default)")
-    s.add_argument("--no-sign", action="store_true",
-                   help="commit unsigned: recorded as UNVERIFIED (the agent's own claim; refused at PUBLISH)")
-    s.add_argument("--telegram", nargs=2, metavar=("TELEGRAM_USER_ID", "MESSAGE_ID"),
-                   help="record Brad's Telegram confirmation of this exact digest: recorded as CONFIRMED, "
-                        "accepted like a signature at every tier. The user id must be an approver's "
-                        "telegram_user_id; MESSAGE_ID is his confirming message, kept verbatim for audit")
-    s.add_argument("--chat", nargs=2, metavar=("CHAT_USER_ID", "MESSAGE_ID"),
-                   help="record Brad's regular-chat confirmation of this exact digest: recorded as CONFIRMED, "
-                        "accepted like a signature at every tier. The user id must be an approver's "
-                        "chat_user_id; MESSAGE_ID is his confirming message, kept verbatim for audit")
+    s.add_argument("--yes", required=True,
+                   help="the words Brad said in chat, verbatim: this IS the approval")
+    s.add_argument("--who", help="who said yes (default: the single configured approver)")
+    s.add_argument("--when", help="when the yes was said: a date (2026-11-22), an ISO date-time, or now (default)")
     s.add_argument("-m", "--message", help="approval note recorded in the approval file")
     s.set_defaults(func=cmd_approve)
 
-    s = sub.add_parser("approved", help="verify an approval and record the verdict in approvals.index.jsonl")
+    s = sub.add_parser("approved", help="re-read a recorded yes and record the verdict in approvals.index.jsonl")
     s.add_argument("kind", help=f"approval kind: {', '.join(approvals.KINDS)}")
     s.add_argument("artifact", nargs="?", help="digest, digest prefix, or case/definition selector (defaults to the current digest)")
     s.add_argument("workdir", nargs="?")

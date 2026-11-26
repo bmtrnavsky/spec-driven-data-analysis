@@ -33,7 +33,7 @@ class TestStubReviewCannotSatisfyGate(unittest.TestCase):
         p = subprocess.run([sys.executable, "-m", "ddalib.cli", "review", "run", "teardown"],
                            cwd=str(f.wd.root), env=env, capture_output=True, text=True)
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
-        assert f.cli("approve", "spec", "--no-sign")[0] == 0
+        assert f.cli("approve", "spec", "--yes", "yes, ship it", "--who", "brad")[0] == 0
 
     def tearDown(self):
         cleanup(self.f)

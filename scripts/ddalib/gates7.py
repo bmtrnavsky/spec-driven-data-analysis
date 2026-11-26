@@ -229,8 +229,8 @@ def gate_g3(wd: Workdir) -> tuple[bool, str, dict]:
                     notes.append("second goldfish: same model — correlated blind spots possible (§5.0)")
 
     # Human spec approval at DECIDE+ (§3 row 3, §4.5): the one requirements
-    # table (M1). Below PUBLISH an unverified/downgraded approval is
-    # disclosed; at PUBLISH only a verified approval passes.
+    # table (M1). A recorded chat yes for the exact spec satisfies G3 at
+    # every tier, PUBLISH included; anything else fails everywhere.
     if comp.tier in ("DECIDE", "PUBLISH"):
         from . import requirements as _requirements
         ok, req_notes, _info = _requirements.require(wd, "G3")

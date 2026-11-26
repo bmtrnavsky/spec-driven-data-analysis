@@ -171,7 +171,7 @@ class TestEvals8(P8Setup):
             body += f"## Deterministic check\n\nfile: outputs/summary.csv\nsha256: {check}\n"
         (d / "case.md").write_text(body, encoding="utf-8")
         if signed:
-            self.assertEqual(self.cli("approve", "correction", nnn, "--no-sign")[0], 0)
+            self.assertEqual(self.cli("approve", "correction", nnn, "--yes", "yes, ship it", "--who", "brad")[0], 0)
             self.assertEqual(self.cli("approved", "correction", nnn)[0], 0)
 
     def test_no_cases_passes(self):

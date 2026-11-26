@@ -116,7 +116,7 @@ def expected(wd: Workdir) -> dict | None:
         "amendments": summ["amendments"], "post_data_amendments": summ["post_data_amendments"],
         "n_tried": len(tried) + summ["versions"], "locked_at": lock.get("locked_at"),
         "config_approval": cfg_status.get("state"), "config_hash": cfg_status.get("config_hash") or "",
-        "fingerprints": cfg_status.get("fingerprints") or [],
+        "approver_names": cfg_status.get("approver_names") or [],
     }
     # Phase-8 evidence, when it exists (profile before results, verify after).
     try:
@@ -293,11 +293,12 @@ def skeleton(wd: Workdir, short: bool = False) -> str:
         evals_default = f"{exp['n_eval_cases']} matched (run `dda verify` to execute checks)"
     try:
         from . import approvals as _approvals_channels
-        channels = _approvals_channels.confirmed_channels(wd)
+        recorded = [f"{v['kind']} {(v.get('digest') or '')[:12]}: chat yes from "
+                    f"{v.get('who') or 'unrecorded'} at {v.get('when') or 'time unrecorded'}"
+                    for v in _approvals_channels.recorded_approvals(wd)]
     except Exception:
-        channels = []
-    confirmed = (f"confirmed ({', '.join(channels)})" if channels
-                 else "unconfirmed (no live CONFIRMED approval)")
+        recorded = []
+    yes_summary = "; ".join(recorded) if recorded else "none recorded"
     known = {
         "tier": exp["tier"] or "", "spec version": f"v{exp['version']}", "lock hash": exp["lock_hash"][:12],
         "lock timestamp": exp["locked_at"] or "", "lock label": exp["label"],
@@ -306,10 +307,9 @@ def skeleton(wd: Workdir, short: bool = False) -> str:
         "definitions": ", ".join(exp["pins"]) or "none", "sources": ", ".join(exp["aliases"]),
         "review": (f"config approval: {exp['config_approval'] or 'unknown'} "
                    f"({(exp['config_hash'] or '')[:12]}); "
-                   f"approver fingerprints: {', '.join(exp['fingerprints']) or 'none configured'}; "
                    f"goldfish: {review_summary(wd)}"),
         "approvals": (f"config {(exp['config_hash'] or '')[:12]}: {exp['config_approval'] or 'unknown'}; "
-                      f"other kinds verified (signed), {confirmed}, or unverified per approvals.index.jsonl"),
+                      f"chat yes on record — {yes_summary}"),
         # Author-filled fields: fillable non-empty defaults so a fresh skeleton
         # verifies; the author replaces them with the report's real content.
         "question": _skeleton_question(wd),

@@ -1,12 +1,20 @@
-"""Human approval artifacts (spec §4.5) — M1 one-approval-model.
+"""Human approval records (spec §4.5) — one model: Brad's chat yes.
 
-An approval is a git commit, made by an approver in their own terminal with
-`dda approve <kind>`, that adds exactly one approval file,
-`.analysis/approvals/<kind>-<digest16>.json`. The commit message carries
-machine-written `Dda-Chain-Head: <rel> <seq> <hash>` trailers (M7: git
-history pins chain lengths so an older-prefix restore fails closed). The
-approval file is signed. Kinds:
-tier, spec, amendment, signoff, definition, correction, config.
+An approval is Brad's yes in chat, recorded verbatim. `dda approve <kind>`
+computes the digest of the exact current content, writes one file
+`.analysis/approvals/<kind>-<digest16>.json` holding the canonical payload,
+the words Brad said, who said them, when he said them, and the digest, and
+commits that file. That record is the approval, full stop.
+
+There is no signature, no key, no password, no message id, and no approver
+chain anywhere in DDA. The record shows what was said and when. It cannot
+prove who typed it — that proof was given up by owner decision on
+2026-11-25, and nothing here pretends otherwise. Kinds: tier, spec,
+amendment, signoff, definition, correction, config.
+
+The commit message carries machine-written
+`Dda-Chain-Head: <rel> <seq> <hash>` trailers (M7: git history pins chain
+lengths so an older-prefix restore fails closed).
 
 The digest is content-addressed and computed ONLY by dda
 (`canonical_payload`): a config digest, a normalized-spec digest, an
@@ -18,25 +26,11 @@ gates execute the approved copy read from git (`approved_payload`), never
 the working copy.
 
 `verify_approval` returns a typed `ApprovalState` — MISSING, UNCOMMITTED,
-STALE, BAD_SIG, UNKNOWN_SIGNER, DOWNGRADED, UNVERIFIED, CONFIRMED, VERIFIED.
-Callers match the enum, never reason substrings.
-
-Two human methods are first-class (`HUMAN_STATES`), accepted at every tier
-including PUBLISH:
-
-- VERIFIED: the commit is signed by an approver key (desktop: the key
-  passphrase or FIDO touch is the proof of presence).
-- CONFIRMED: Brad confirmed the exact digest from his signed-in Telegram
-  account (`dda approve <kind> --telegram USER_ID MESSAGE_ID`). The account
-  is the proof of presence; no passphrase. The record carries the Telegram
-  user id, the message id verbatim (auditable against the chat), the
-  confirmation time, the kind, and the digest, and the user id must be a
-  configured approver's `telegram_user_id`.
-
-UNVERIFIED (`--no-sign`) stays the agent's own claim: disclosed below
-PUBLISH, refused at PUBLISH. `do_approved` records
-(kind, digest, commit, state) in `approvals.index.jsonl`, which the footer
-reads.
+STALE, MALFORMED, RECORDED. Callers match the enum, never reason
+substrings. RECORDED (a yes is on record for exactly this content) is the
+only human state and satisfies every gate at every tier, PUBLISH included.
+`do_approved` records (kind, digest, commit, who, when, yes) in
+`approvals.index.jsonl`, which the footer reads.
 """
 from __future__ import annotations
 
@@ -46,13 +40,15 @@ import json
 import re
 import subprocess
 import time
+from datetime import datetime
 from pathlib import Path
 
 from . import chain, lockhash
 from .layout import DdaError, Workdir, load_config, read_text_lf
 
 KINDS = ("tier", "spec", "amendment", "signoff", "definition", "correction", "config")
-FORMAT = "dda-approval-v2"
+FORMAT = "dda-approval-v3"
+FORMAT_V2 = "dda-approval-v2"
 FORMAT_V1 = "dda-approval-v1"
 _DIGEST_RE = re.compile(r"^[0-9a-f]{4,64}$")
 # Approval writes pin the digest: an explicit artifact must be the 16+
@@ -61,6 +57,11 @@ _DIGEST16_RE = re.compile(r"^[0-9a-f]{16,64}$")
 # Trailer planting (probe-F): the approval note becomes the commit
 # message, so a `Dda-...:` line in the note would forge commit trailers.
 _TRAILER_PLANT_RE = re.compile(r"^Dda-[A-Za-z-]+:", re.M)
+# A `when` is either now or a date/date-time the human states. Stored as
+# given (whitespace-normalized), never guessed at.
+_WHEN_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{4})?)?$")
+METHOD_CHAT_YES = "chat-yes"
 
 
 class ApprovalState(str, enum.Enum):
@@ -68,85 +69,31 @@ class ApprovalState(str, enum.Enum):
 
     MISSING = "missing"            # no committed approval for this digest
     UNCOMMITTED = "uncommitted"    # approval file exists but no commit on this branch
-    STALE = "stale"                # approval is authentic but covers older state
-    BAD_SIG = "bad_sig"            # commit signature does not verify
-    UNKNOWN_SIGNER = "unknown_signer"  # signer matches no approver
-    DOWNGRADED = "downgraded"      # doctor key checks fail right now
-    UNVERIFIED = "unverified"      # unsigned (agent could have produced it)
-    CONFIRMED = "confirmed"        # confirmed by an approver's Telegram account, covers current state
-    VERIFIED = "verified"          # signed by an approver, covers current state
+    STALE = "stale"                # record covers older state, or is corrupt
+    MALFORMED = "malformed"        # record/commit does not have the required shape
+    RECORDED = "recorded"          # a chat yes is on record for this exact digest
 
 
-# States that carry a human's own approval. Both are accepted at every
-# tier, PUBLISH included (Brad's call: a signed-in Telegram account counts
-# the same as the key passphrase at the desktop).
-HUMAN_STATES = frozenset({ApprovalState.VERIFIED.value, ApprovalState.CONFIRMED.value})
-
-METHOD_SIGNED = "signed"
-METHOD_TELEGRAM = "telegram"
-METHOD_CHAT = "chat"
-METHOD_UNSIGNED = "unsigned"
-_TG_ID_RE = re.compile(r"^[1-9][0-9]{0,19}$")
-# Chat ids are platform tokens, not Telegram numerics: Brad's Hermes sender
-# id and the platform message id, recorded verbatim (no whitespace/newlines).
-_CHAT_USER_RE = re.compile(r"^[A-Za-z0-9_.:\-]{1,128}$")
-_CHAT_MSG_RE = re.compile(r"^[^\s]{1,256}$")
-
-
-def _channel_desc(method: str) -> dict | None:
-    """Per-channel record shape for the two CONFIRMED methods (SPEC §4.5)."""
-    if method == METHOD_TELEGRAM:
-        return {"method": METHOD_TELEGRAM, "block": "telegram", "cfg": "telegram_user_id",
-                "label": "Telegram", "user_trailer": "Dda-Telegram-User",
-                "msg_trailer": "Dda-Telegram-Message", "numeric": True}
-    if method == METHOD_CHAT:
-        return {"method": METHOD_CHAT, "block": "chat", "cfg": "chat_user_id",
-                "label": "Chat", "user_trailer": "Dda-Chat-User",
-                "msg_trailer": "Dda-Chat-Message", "numeric": False}
-    return None
+# The one human state. A recorded yes needs no further proof (§4.5).
+HUMAN_STATES = frozenset({ApprovalState.RECORDED.value})
 
 
 def is_human(state) -> bool:
-    """True for a state that carries a human's own approval (VERIFIED/CONFIRMED)."""
+    """True for a state that carries a recorded human yes."""
     return getattr(state, "value", state) in HUMAN_STATES
 
 
-def channel_approver(approvers: list, cfg_key: str, user_id, numeric: bool = True) -> str | None:
-    """Approver name whose `cfg_key` EQUALS `user_id` (exact), else None."""
-    uid = str(user_id or "").strip()
-    if numeric:
-        if not _TG_ID_RE.match(uid):
-            return None
-    elif not _CHAT_USER_RE.match(uid):
-        return None
-    for a in approvers or []:
-        if isinstance(a, dict) and str(a.get(cfg_key) or "").strip() == uid:
-            return a.get("name")
-    return None
-
-
-def telegram_approver(approvers: list, user_id) -> str | None:
-    """Approver name whose `telegram_user_id` EQUALS `user_id` (exact), else None."""
-    return channel_approver(approvers, "telegram_user_id", user_id, numeric=True)
-
-
-def chat_approver(approvers: list, user_id) -> str | None:
-    """Approver name whose `chat_user_id` EQUALS `user_id` (exact), else None."""
-    return channel_approver(approvers, "chat_user_id", user_id, numeric=False)
-
-
 def method_label(verdict: dict) -> str:
-    """How an approval was made, for `dda approved` and the index record."""
-    chd = _channel_desc(str(verdict.get("method") or ""))
-    if chd:
-        blk = verdict.get(chd["block"]) if isinstance(verdict.get(chd["block"]), dict) else None
-        if blk:
-            return f"{chd['label']} user {blk.get('user_id')}, message {blk.get('message_id')}"
-    if verdict.get("method") == METHOD_SIGNED:
-        return f"signed by {verdict.get('signer') or 'an unmatched key'}"
-    if verdict.get("method") == METHOD_UNSIGNED:
-        return "unsigned (--no-sign: no signature, no Telegram confirmation)"
-    return "no approval method on record"
+    """How an approval was made, for `dda approved`, the index, and the footer.
+
+    Only a RECORDED verdict describes a yes; anything else says plainly that
+    no record covers the content, rather than dressing up an absence.
+    """
+    if not verdict.get("recorded"):
+        return "no chat yes on record for this content"
+    who = str(verdict.get("who") or "unrecorded")
+    when = str(verdict.get("when") or "time unrecorded")
+    return f"chat yes from {who} at {when}"
 
 
 def approvals_dir(wd: Workdir) -> Path:
@@ -478,166 +425,136 @@ def _show_blob(wd: Workdir, sha: str, rel: str) -> subprocess.CompletedProcess:
     return _git(wd, "show", f"{sha}:./{rel}")
 
 
-def _norm_fp(s: str) -> str:
-    return re.sub(r"[^0-9A-Za-z]", "", s or "").upper()
-
-
-def approver_matches(approvers: list, *candidates: str) -> str | None:
-    """Return the approver name whose key matches a candidate, else None.
-
-    Exact-only (§4.5): a candidate matches when its WHOLE normalized form
-    EQUALS the approver's normalized ``fingerprint``/``key_id``
-    (case/punctuation differences ignored), or its whitespace-normalized
-    WHOLE form EQUALS the approver's full ``key``. Substrings, tokens, and
-    names never match: ``%GS``/``%GK`` signer text and ``git verify-commit``
-    output are self-asserted and forgeable without the key (an attacker can
-    embed a victim fingerprint in a user ID), so only whole ``%GF``/``%GP``
-    values count. Callers holding structured multi-field lines (e.g. the
-    ``ssh-add -l`` ``<bits> <fingerprint> <comment> (<type)>`` columns)
-    must extract the fingerprint column themselves before calling.
-    """
-    normed: set[str] = set()
-    raws: set[str] = set()
-    for c in candidates:
-        if c is None:
-            continue
-        s = str(c)
-        if not s.strip():
-            continue
-        raws.add(" ".join(s.split()))
-        n = _norm_fp(s)
-        if n:
-            normed.add(n)
-    for a in approvers:
-        if not isinstance(a, dict):
-            continue
-        for key in ("fingerprint", "key_id"):
-            v = a.get(key)
-            if isinstance(v, str) and v.strip():
-                nv = _norm_fp(v)
-                if nv and nv in normed:
-                    return a.get("name")
-        k = a.get("key")
-        if isinstance(k, str) and k.strip():
-            if " ".join(k.split()) in raws:
-                return a.get("name")
-    return None
-
-
-def fingerprints_of(approvers: list) -> list[str]:
-    out = []
-    for a in approvers:
-        if isinstance(a, dict):
-            for key in ("fingerprint", "key_id", "key"):
-                v = a.get(key)
-                if isinstance(v, str) and v.strip():
-                    out.append(f"{a.get('name')}:{v.strip()[:64]}")
-                    break
-    return out
-
-
 # ---------- dda approve ----------
 
-# ---------- channel replay (one confirming message confirms one digest) ----------
-
-def _channel_uses(wd: Workdir) -> list[dict]:
-    """Every committed channel confirmation on this branch.
-
-    Each entry: {channel, user_id, message_id, digest, kind, commit}.
-    Both CONFIRMED channels are scanned across all kinds: a message id
-    spent on one kind or digest cannot confirm another (probe-B/C replay).
-    """
-    out: list[dict] = []
-    r = _git(wd, "log", "--reverse", "--topo-order", "--diff-filter=A", "--format=%H", "--",
-             ".analysis/approvals")
-    if r.returncode != 0:
-        return out
-    prefix = _repo_prefix(wd)
-    for sha in [ln.strip() for ln in r.stdout.splitlines() if ln.strip()]:
-        if not _git_ok(wd, "merge-base", "--is-ancestor", sha, "HEAD"):
-            continue
-        only = _only_added_file(wd, sha, prefix)
-        if not only or not only.startswith(".analysis/approvals/"):
-            continue
-        try:
-            rec = json.loads(_show_blob(wd, sha, only).stdout)
-        except (ValueError, subprocess.SubprocessError):
-            continue
-        if not isinstance(rec, dict):
-            continue
-        for block in ("telegram", "chat"):
-            blk = rec.get(block)
-            if not isinstance(blk, dict):
-                continue
-            uid, mid = blk.get("user_id"), blk.get("message_id")
-            d = _record_digest(rec)
-            if uid and mid and d:
-                out.append({"channel": block, "user_id": str(uid), "message_id": str(mid),
-                            "digest": d, "kind": rec.get("kind"), "commit": sha})
+def _approver_names(cfg: dict) -> list[str]:
+    """Configured approver handles (display + `--who` default). No key material."""
+    out: list[str] = []
+    for a in cfg.get("approvers") or []:
+        if isinstance(a, dict):
+            name = str(a.get("name") or "").strip()
+            if name:
+                out.append(name)
     return out
 
 
-def _channel_spent_on(wd: Workdir, channel: str, user_id: str, message_id: str,
-                      digest: str | None) -> str | None:
-    """The other digest the same (channel, user, message) already confirms, else None."""
-    for use in _channel_uses(wd):
-        if (use["channel"], use["user_id"], use["message_id"]) == (channel, user_id, message_id) \
-                and use["digest"] != digest:
-            return str(use["digest"])
-    return None
+def _now() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%S%z")
+
+
+def _normalize_when(value: str | None) -> str:
+    """The time the yes was said: `now`, or a stated date/date-time."""
+    if value is None or not str(value).strip() or str(value).strip().lower() == "now":
+        return _now()
+    when = " ".join(str(value).split())
+    if re.match(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}", when):
+        when = when.replace(" ", "T", 1)
+    if not _WHEN_RE.match(when):
+        raise DdaError(f"--when must be a date (2026-11-22) or an ISO date-time, got {value!r}")
+    return when
+
+
+def _as_instant(value: str) -> tuple[datetime, bool]:
+    """Parse a stored `when`/`recorded_at` value. Naive times are local."""
+    raw = str(value).strip()
+    date_only = bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw))
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        raise DdaError(f"cannot read approval time {value!r}") from None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.now().astimezone().tzinfo)
+    return dt, date_only
+
+
+def _reject_when_after_record(when_said: str, recorded_at: str) -> None:
+    """A yes cannot be said after the record that captures it was written."""
+    said, date_only = _as_instant(when_said)
+    written, _ = _as_instant(recorded_at)
+    late = said.date() > written.date() if date_only else said > written
+    if late:
+        raise DdaError(f"--when {when_said} is later than the record time {recorded_at}; "
+                       "a chat yes cannot be recorded before it was said")
+
+
+def approval_fields(rec: dict) -> dict:
+    """Who said yes, when, and the words — from a record of any format.
+
+    v3 records carry an `approval` block, the only shape that is a chat yes.
+    Older records (signed, unsigned, Telegram, chat) predate the chat-yes
+    format: `legacy` marks them, and `verify_approval` fails them closed as
+    MALFORMED rather than reporting anything they did not say.
+    """
+    blk = rec.get("approval")
+    if isinstance(blk, dict):
+        return {"who": str(blk.get("who") or ""), "when": str(blk.get("when") or ""),
+                "yes": str(blk.get("yes") or ""), "recorded_at": str(blk.get("recorded_at") or ""),
+                "legacy": False}
+    who = ""
+    when = str(rec.get("created_at") or "")
+    for block in ("chat", "telegram"):
+        b = rec.get(block)
+        if isinstance(b, dict) and b.get("approver"):
+            who = str(b.get("approver"))
+            when = str(b.get("confirmed_at") or when)
+            break
+    if not who:
+        names = [str(a.get("name")) for a in (rec.get("approvers") or [])
+                 if isinstance(a, dict) and a.get("name")]
+        who = names[0] if names else ""
+    return {"who": who, "when": when, "yes": "", "recorded_at": str(rec.get("created_at") or ""),
+            "legacy": True}
+
+
+def _commit_user(wd: Workdir) -> list[str]:
+    if not _git(wd, "config", "--get", "user.email").stdout.strip():
+        return ["-c", "user.name=dda", "-c", "user.email=dda@localhost"]
+    return []
+
+
+def _retire_tracked_record(wd: Workdir, rel: str, why: str) -> str | None:
+    """Delete a tracked approval file in its own commit, so the next record
+    can be added cleanly (`_only_added_file` keeps its one-added-file
+    invariant). Returns the commit sha, or None when nothing was tracked."""
+    if not _git(wd, "ls-files", "--", rel).stdout.strip():
+        return None
+    from . import ledger as _ledger
+    msg = f"dda retire approval record {rel}\n\n{why}"
+    trailers = _ledger.chain_head_trailers(wd)
+    if trailers:
+        msg += "\n\n" + "\n".join(trailers)
+    r = _git(wd, "rm", "-q", "--", rel)
+    if r.returncode != 0:
+        raise DdaError(f"cannot remove the old approval file {rel} ({r.stderr.strip()[-200:]})")
+    r = _git(wd, *_commit_user(wd), "-c", "commit.gpgsign=false", "-c", "tag.gpgSign=false",
+             "commit", "--no-verify", "-q", "-m", msg, "--", rel)
+    if r.returncode != 0:
+        raise DdaError(f"committing the retirement of {rel} failed ({r.stderr.strip()[-200:]})")
+    return _git(wd, "rev-parse", "HEAD").stdout.strip()
 
 
 def do_approve(wd: Workdir, kind: str, artifact: str | None = None,
-               key: str | None = None, sign: bool = True, message: str | None = None,
-               telegram: tuple[str, str] | None = None,
-               chat: tuple[str, str] | None = None) -> dict:
-    """Compute the content digest, embed the canonical payload, commit it.
+               who: str | None = None, yes: str | None = None,
+               when: str | None = None, message: str | None = None) -> dict:
+    """Record Brad's chat yes for the current content and commit the record.
+
+    `yes` is the verbatim words he said and is required: it IS the approval.
+    `who` defaults to the single configured approver. `when` is when the yes
+    was said (default now); `recorded_at` is the write time. The record
+    carries no signature, key, or message id.
 
     `artifact`, when given, is a selector (correction case id, definition
     name) or must equal the computed digest — free-form tokens are rejected.
-
-    `telegram=(user_id, message_id)` records a Telegram confirmation: the
-    commit is not signed (no passphrase on this path) and the record carries
-    the method, user id, message id verbatim, timestamp, kind, and digest.
-    The user id must be a configured approver's `telegram_user_id`.
-    `chat=(user_id, message_id)` is the same shape for a regular-chat yes:
-    the user id must be a configured approver's `chat_user_id`.
     """
     wd.require_initialized()
     check_kind_artifact(kind, artifact)
+    words = str(yes or "").strip()
+    if not words:
+        raise DdaError("an approval IS the chat yes: pass the words Brad said, verbatim, "
+                       'with --yes "..." (there is nothing else to record)')
     if message and _TRAILER_PLANT_RE.search(message):
         raise DdaError("approval notes must not contain `Dda-...:` lines: the note becomes the "
                        "commit message, so such a line would forge commit trailers")
-    ch_method: str | None = None
-    ch_pair: tuple[str, str] | None = None
-    if telegram is not None and chat is not None:
-        raise DdaError("--telegram and --chat are different methods: a confirmation arrives on one channel")
-    if telegram is not None:
-        ch_method, ch_pair = METHOD_TELEGRAM, telegram
-    if chat is not None:
-        ch_method, ch_pair = METHOD_CHAT, chat
-    chd = _channel_desc(ch_method) if ch_method else None
-    tg_block = None
-    tg_user, tg_msg = "", ""
-    if chd is not None and ch_pair is not None:
-        flag = "--telegram" if ch_method == METHOD_TELEGRAM else "--chat"
-        if not sign or key:
-            raise DdaError(f"{flag} cannot be combined with --no-sign or --key: a {chd['label']} "
-                           f"confirmation is its own method, never a signed or unsigned commit")
-        tg_user, tg_msg = (str(ch_pair[0]).strip(), str(ch_pair[1]).strip())
-        if chd["numeric"]:
-            if not _TG_ID_RE.match(tg_user):
-                raise DdaError(f"--telegram user id must be a numeric Telegram user id, got {tg_user!r}")
-            if not _TG_ID_RE.match(tg_msg):
-                raise DdaError(f"--telegram message id must be the numeric id of Brad's confirming "
-                               f"message, got {tg_msg!r}")
-        else:
-            if not _CHAT_USER_RE.match(tg_user):
-                raise DdaError(f"--chat user id must be Brad's chat sender id "
-                               f"(letters, digits, ._: -), got {tg_user!r}")
-            if not _CHAT_MSG_RE.match(tg_msg):
-                raise DdaError("--chat message id must be the single-line id of Brad's confirming "
-                               f"message, got {tg_msg!r}")
     selector = artifact if kind in ("correction", "definition") else None
     digest, payload = canonical_payload(wd, kind, selector)
     if artifact is not None and kind not in ("correction", "definition"):
@@ -652,18 +569,49 @@ def do_approve(wd: Workdir, kind: str, artifact: str | None = None,
         cfg = load_config(wd)
     except DdaError as exc:
         raise DdaError(f"cannot approve with an invalid config.yaml: {exc}") from None
+    names = _approver_names(cfg)
+    who_name = " ".join(str(who or "").split()) or (names[0] if len(names) == 1 else "")
+    if not who_name:
+        raise DdaError("say who said yes with --who NAME"
+                       + (f" (configured approvers: {', '.join(names)})" if names else ""))
+    if len(who_name) > 64 or not re.match(r"^[A-Za-z0-9_.\- ]+$", who_name):
+        raise DdaError(f"--who must be a handle (letters, digits, _.- and spaces), got {who_name!r}")
+    if names:
+        # `approvers:` is the list of who may say yes (§4.5). When it is
+        # configured, a name outside it is not an approver, whatever the
+        # record would say. Match case-insensitively, keep the configured
+        # spelling so the footer and index name the configured handle.
+        canonical = {n.casefold(): n for n in names}
+        match = canonical.get(who_name.casefold())
+        if match is None:
+            raise DdaError(f"--who {who_name!r} is not a configured approver "
+                           f"(approvers: {', '.join(names)}); add the name to config.yaml "
+                           "under approvers: if that person may say yes (§4.5)")
+        who_name = match
+    when_said = _normalize_when(when)
+    recorded_at = _now()
+    _reject_when_after_record(when_said, recorded_at)
     short = digest[:16]
     rel = approval_rel(kind, short)
     path = approval_path(wd, kind, short)
-    if chd is not None:
-        who = channel_approver(cfg.get("approvers") or [], chd["cfg"], tg_user, chd["numeric"])
-        if not who:
-            raise DdaError(f"{chd['label']} user {tg_user} is not a configured approver: add "
-                           f"`{chd['cfg']}: \"{tg_user}\"` to an approver in config.yaml "
-                           f"(and approve that config) before confirming over {chd['label']}")
-        tg_block = {"channel": chd["method"], "user_id": tg_user, "message_id": tg_msg, "approver": who,
-                    "confirmed_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-                    "kind": kind, "digest": digest}
+    if _git(wd, "rev-parse", "--show-toplevel").returncode != 0:
+        raise DdaError(f"{wd.root} is not a git repo; approvals must be committable")
+    # A record for this exact digest already committed: a v3 record with the
+    # words is final (refuse a silent second yes); anything older (v1/v2,
+    # signed/unsigned/channel) is retired in its own commit and replaced, so
+    # this exact state ends up with a verbatim chat yes on file.
+    if path.is_file():
+        try:
+            old = json.loads(path.read_text(encoding="utf-8"))
+        except (ValueError, OSError):
+            old = None
+        if isinstance(old, dict) and _record_digest(old) == digest:
+            if old.get("format") == FORMAT and str((old.get("approval") or {}).get("yes") or "").strip():
+                c = _git(wd, "log", "--diff-filter=A", "--format=%H", "--", rel).stdout.strip()
+                raise DdaError(f"{rel} already carries a recorded chat yes"
+                               + (f" (commit {c.splitlines()[0][:12]})" if c else "")
+                               + f"; `dda approved {kind}` shows it")
+            _retire_tracked_record(wd, rel, f"pre chat-yes record for {kind} {short} replaced")
     record = {
         "format": FORMAT,
         "kind": kind,
@@ -674,68 +622,24 @@ def do_approve(wd: Workdir, kind: str, artifact: str | None = None,
         "workdir_id": wd.id,
         "config_hash": lockhash.config_hash(wd),
         "spec_hash": current_artifact(wd, "spec"),
-        "approvers": cfg.get("approvers") or [],
-        "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "approval": {"who": who_name, "when": when_said, "yes": words,
+                     "recorded_at": recorded_at},
+        "method": METHOD_CHAT_YES,
+        "created_at": recorded_at,
         "note": message or "",
-        "method": chd["method"] if chd else (METHOD_SIGNED if sign else METHOD_UNSIGNED),
     }
-    if chd is not None and tg_block:
-        record[chd["block"]] = tg_block
-    if path.is_file():
-        try:
-            if json.loads(path.read_text(encoding="utf-8")).get("digest") == digest:
-                tracked = _git(wd, "ls-files", "--", rel).stdout.strip()
-                if tracked:
-                    log = _git(wd, "log", "--diff-filter=A", "--format=%H", "--", rel).stdout.strip()
-                    if log:
-                        raise DdaError(f"{rel} is already approved (commit {log.split()[0][:12]}); "
-                                       f"verify it with `dda approved {kind}`")
-        except (ValueError, OSError):
-            pass
-    if chd is not None and tg_block:
-        # Replay: one confirming message confirms one digest. A reused
-        # (channel, user, message id) is Brad's earlier yes, not a new
-        # one — refuse; the relay must capture a fresh confirmation.
-        for use in _channel_uses(wd):
-            if ((use["channel"], use["user_id"], use["message_id"]) ==
-                    (chd["method"], tg_user, tg_msg) and use["digest"] != digest):
-                raise DdaError(f"{chd['label']} message {tg_msg} already confirms "
-                               f"{use['digest'][:16]} (commit {use['commit'][:12]}); a confirming "
-                               f"message confirms one digest — capture a fresh yes from the chat")
     approvals_dir(wd).mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
-    if _git(wd, "rev-parse", "--show-toplevel").returncode != 0:
-        raise DdaError(f"{wd.root} is not a git repo; approvals must be committable")
     from . import ledger as _ledger
     trailers = _ledger.chain_head_trailers(wd)  # M7: pin chain lengths in the commit message
-    msg = message or f"dda approve {kind} {short}"
-    if tg_block and chd is not None:
-        # Verbatim, so the commit itself names the chat message to audit.
-        trailers = [f"Dda-Approval-Method: {chd['method']}",
-                    f"{chd['user_trailer']}: {tg_block['user_id']}",
-                    f"{chd['msg_trailer']}: {tg_block['message_id']}"] + list(trailers or [])
+    msg = message or f"dda record approval {kind} {short}: chat yes from {who_name} at {when_said}"
     if trailers:
         msg = msg + "\n\n" + "\n".join(trailers)
     _git(wd, "add", "--", rel)
-    pre: list[str] = []
-    cmd = ["commit"]
-    if sign and not tg_block:
-        cmd.append("-S")
-        if key:
-            cmd.append(f"--gpg-sign={key}")
-    else:
-        pre += ["-c", "commit.gpgsign=false", "-c", "tag.gpgSign=false"]
-    if tg_block:
-        pre += ["-c", "commit.gpgsign=false", "-c", "tag.gpgSign=false"]
-    if not _git(wd, "config", "--get", "user.email").stdout.strip():
-        pre += ["-c", "user.name=dda", "-c", "user.email=dda@localhost"]
-    cmd += ["--no-verify", "-q", "-m", msg, "--", rel]
-    r = _git(wd, *pre, *cmd)
+    r = _git(wd, *_commit_user(wd), "-c", "commit.gpgsign=false", "-c", "tag.gpgSign=false",
+             "commit", "--no-verify", "-q", "-m", msg, "--", rel)
     if r.returncode != 0:
         err = (r.stderr or r.stdout).strip()[-400:]
-        if sign and not tg_block:
-            raise DdaError(f"signing the approval commit failed ({err}); configure the approver key "
-                           f"or re-run with --no-sign to record an unverified approval")
         raise DdaError(f"committing the approval failed ({err})")
     sha = _git(wd, "rev-parse", "HEAD").stdout.strip()
     # The commit must add exactly this one approval file (M7 checkpoints
@@ -744,8 +648,8 @@ def do_approve(wd: Workdir, kind: str, artifact: str | None = None,
         raise DdaError(f"approval commit {sha[:12]} touches more than {rel}; "
                        "an approval commit must add exactly one approval file (§4.5)")
     return {"kind": kind, "artifact": digest, "digest": digest, "file": rel,
-            "commit": sha, "signed": sign and not tg_block, "method": record["method"],
-            "telegram": record.get("telegram"), "chat": record.get("chat")}
+            "commit": sha, "who": who_name, "when": when_said, "yes": words,
+            "recorded_at": recorded_at, "method": METHOD_CHAT_YES}
 
 
 def _only_added_file(wd: Workdir, sha: str, prefix: str | None = None) -> str | None:
@@ -788,138 +692,6 @@ def _adding_commits(wd: Workdir, rel: str) -> list[str]:
     if r.returncode != 0:
         return []
     return [ln.strip() for ln in r.stdout.splitlines() if ln.strip()]
-
-
-def _signer_fields(wd: Workdir, sha: str) -> tuple[bool, list[str]]:
-    v = _git(wd, "verify-commit", sha)
-    sig_ok = v.returncode == 0
-    # Key material only: whole %GF/%GP values. %GS/%GK signer text and
-    # `git verify-commit` output are attacker-influenceable (a forged key
-    # can carry a victim fingerprint in its user ID), so they are never
-    # match candidates — sig_ok carries the cryptographic verdict.
-    f = _git(wd, "log", "-1", "--format=%GF%n%GP", sha)
-    fields = [ln.strip() for ln in f.stdout.splitlines() if ln.strip()]
-    return sig_ok, fields
-
-
-def _commit_trailers(wd: Workdir, sha: str) -> dict[str, str]:
-    body = _git(wd, "log", "-1", "--format=%B", sha).stdout
-    out: dict[str, str] = {}
-    for ln in body.splitlines():
-        m = re.match(r"^(Dda-[A-Za-z-]+):\s*(.*?)\s*$", ln)
-        if m and m.group(1) not in out:
-            out[m.group(1)] = m.group(2)
-    return out
-
-
-def _channel_problem(wd: Workdir, rec: dict, sha: str, digest: str | None, chd: dict) -> str | None:
-    """Why a channel-CONFIRMED record does NOT verify, else None.
-
-    The record block must bind this exact kind and digest, both ids must be
-    well-formed for the channel, and the commit trailers must repeat the ids
-    verbatim.
-    """
-    blk = rec.get(chd["block"])
-    if not isinstance(blk, dict):
-        return f"{chd['label']} method but no {chd['block']} block"
-    uid, mid = str(blk.get("user_id") or ""), str(blk.get("message_id") or "")
-    if chd["numeric"]:
-        ok_ids = _TG_ID_RE.match(uid) and _TG_ID_RE.match(mid)
-    else:
-        ok_ids = _CHAT_USER_RE.match(uid) and _CHAT_MSG_RE.match(mid)
-    if not ok_ids:
-        return f"{chd['label']} user/message ids are not well-formed"
-    if blk.get("kind") != rec.get("kind") or blk.get("digest") != digest:
-        return f"{chd['label']} confirmation does not bind this kind and digest"
-    if not blk.get("confirmed_at"):
-        return f"{chd['label']} confirmation has no timestamp"
-    t = _commit_trailers(wd, sha)
-    if (t.get("Dda-Approval-Method") != chd["method"] or t.get(chd["user_trailer"]) != uid
-            or t.get(chd["msg_trailer"]) != mid):
-        return f"commit trailers do not repeat the {chd['label']} user and message ids"
-    return None
-
-
-def _telegram_problem(wd: Workdir, rec: dict, sha: str, digest: str | None) -> str | None:
-    chd = _channel_desc(METHOD_TELEGRAM)
-    assert chd is not None  # METHOD_TELEGRAM always has a channel descriptor
-    return _channel_problem(wd, rec, sha, digest, chd)
-
-
-def _config_chain(wd: Workdir) -> tuple[dict[str, dict], list[str]]:
-    """Walk every config approval commit oldest-first.
-
-    Returns ({digest: {commit, signer, sig_ok, verified}}, problems).
-    The first config approval is trust-on-first-use (signer in its own
-    approvers snapshot); every later one must be signed by a key from the
-    previous approval's approvers set (§4.5).
-    """
-    r = _git(wd, "log", "--reverse", "--topo-order", "--diff-filter=A", "--format=%H", "--",
-             ".analysis/approvals")
-    if r.returncode != 0:
-        return {}, []
-    entries: list[dict] = []
-    prefix = _repo_prefix(wd)
-    for sha in [ln.strip() for ln in r.stdout.splitlines() if ln.strip()]:
-        only = _only_added_file(wd, sha, prefix)
-        if not only or not only.startswith(".analysis/approvals/config-"):
-            continue
-        try:
-            content = _show_blob(wd, sha, only).stdout
-            rec = json.loads(content)
-        except (ValueError, subprocess.SubprocessError):
-            continue
-        if not isinstance(rec, dict) or rec.get("kind") != "config":
-            continue
-        digest = rec.get("digest") or rec.get("artifact")
-        if not digest:
-            continue
-        sig_ok, fields = _signer_fields(wd, sha)
-        ch_uid, ch_method = None, None
-        chd = _channel_desc(str(rec.get("method") or ""))
-        if chd is not None and _channel_problem(wd, rec, sha, digest, chd) is None:
-            ch_uid, ch_method = rec[chd["block"]]["user_id"], chd["method"]
-        entries.append({"sha": sha, "digest": digest, "ch_uid": ch_uid, "ch_method": ch_method,
-                        "approvers": rec.get("approvers") or [], "sig_ok": sig_ok, "fields": fields})
-    by_digest: dict[str, dict] = {}
-    problems: list[str] = []
-    prev_approvers: list | None = None
-    for e in entries:
-        if e["ch_uid"]:
-            # Channel confirmation: the account stands in for the key. Same
-            # chain rule — TOFU against its own snapshot, then the previous set.
-            chd = _channel_desc(e["ch_method"])
-            ref = e["approvers"] if prev_approvers is None else prev_approvers
-            name = channel_approver(ref, chd["cfg"], e["ch_uid"], chd["numeric"]) if chd else None
-            ok = bool(name)
-            if not ok:
-                label = chd["label"] if chd else e["ch_method"]
-                problems.append(f"{e['sha'][:12]}: {label} user {e['ch_uid']} not in the "
-                                + ("approval's own approver snapshot" if prev_approvers is None
-                                   else "previous approved approver set"))
-            by_digest[e["digest"]] = {"commit": e["sha"], "signer": name, "sig_ok": False,
-                                      "verified": ok}
-            prev_approvers = e["approvers"]
-            continue
-        name = approver_matches(e["approvers"], *e["fields"])
-        if not e["sig_ok"] and not e["fields"]:
-            problems.append(f"{e['sha'][:12]}: unsigned (agent could have produced it)")
-            ok = False
-        elif not e["sig_ok"]:
-            problems.append(f"{e['sha'][:12]}: bad signature")
-            ok = False
-        elif prev_approvers is None:
-            ok = bool(name)  # TOFU: first approval self-consistent with its own approvers
-            if not ok:
-                problems.append(f"{e['sha'][:12]}: TOFU signer matches no approver in its own snapshot")
-        else:
-            ok = approver_matches(prev_approvers, *e["fields"]) is not None
-            if not ok:
-                problems.append(f"{e['sha'][:12]}: signer not in the previous approved approver set")
-        by_digest[e["digest"]] = {"commit": e["sha"], "signer": name, "sig_ok": e["sig_ok"],
-                                  "verified": ok}
-        prev_approvers = e["approvers"]
-    return by_digest, problems
 
 
 def _record_digest(rec: dict) -> str | None:
@@ -967,16 +739,17 @@ def _resolve_record(wd: Workdir, kind: str, ref: str | None) -> tuple[dict | Non
 
 
 def verify_approval(wd: Workdir, kind: str, artifact: str | None = None) -> dict:
-    """Check an approval without recording. Returns a typed verdict dict.
+    """Check whether a recorded yes covers the current state. Typed verdict.
 
-    `state` is an `ApprovalState` value; `verified` is True only for the
-    human states (VERIFIED, CONFIRMED). `method` says how it was approved. Payload/digest comparison uses the committed copy read from
-    git, never the worktree file.
+    `state` is an `ApprovalState` value. `recorded` is True only for
+    RECORDED. `who`, `when`, and `yes` come from the committed record: the
+    record shows what was said and when, and makes no claim about who typed
+    it. Payload/digest comparison uses the committed copy read from git,
+    never the worktree file.
     """
-    from . import doctor as _doctor
     wd.require_initialized()
     check_kind_artifact(kind, artifact)
-    base = {"kind": kind, "artifact": artifact, "verified": False,
+    base = {"kind": kind, "artifact": artifact, "recorded": False,
             "state": ApprovalState.MISSING.value}
 
     def fail(state: ApprovalState, reason: str, **extra) -> dict:
@@ -984,44 +757,53 @@ def verify_approval(wd: Workdir, kind: str, artifact: str | None = None) -> dict
 
     rec, sha, rel = _resolve_record(wd, kind, artifact)
     if rec is None:
-        hint = f"`dda approve {kind}` in your own terminal, then `dda approved {kind}`"
         if kind in ("correction", "definition") and artifact and not _DIGEST_RE.match(artifact):
-            hint = (f"`dda approve {kind} {artifact}` in your own terminal, then "
+            hint = (f'`dda approve {kind} {artifact} --yes "..."`, then '
                     f"`dda approved {kind} {artifact}`")
+        else:
+            hint = f'`dda approve {kind} --yes "..."`, then `dda approved {kind}`'
         return fail(ApprovalState.MISSING,
                     f"no committed {kind} approval covers {artifact or 'current state'}; {hint}")
     assert sha is not None and rel is not None
+    fields = approval_fields(rec)
+    extra = {"commit": sha, "digest": _record_digest(rec), "who": fields["who"],
+             "when": fields["when"], "yes": fields["yes"], "recorded_at": fields["recorded_at"],
+             "legacy": fields["legacy"], "method": rec.get("method")}
+    if fields["legacy"]:
+        # A record with no `approval` block (v1/v2: signed, unsigned,
+        # Telegram, chat) holds no verbatim yes. It is not a chat-yes
+        # approval: it never prints as one, never passes a gate, and is
+        # never RECORDED — re-record it under v3 or fail closed (§4.5).
+        return fail(ApprovalState.MALFORMED,
+                    f"{rel} is a pre chat-yes record with no approval block (who, when, and the "
+                    f"exact words): it is not an approval under §4.5. Re-record it with "
+                    f'`dda approve {kind} ... --yes "<Brad\'s words>"`', **extra)
     if not _git_ok(wd, "merge-base", "--is-ancestor", sha, "HEAD"):
         return fail(ApprovalState.UNCOMMITTED,
                     f"{rel} is committed as {sha[:12]} but that commit is not on this branch "
-                    "(approvals must be git commits on this branch, §4.5)",
-                    commit=sha, digest=_record_digest(rec))
+                    "(approvals must be git commits on this branch, §4.5)", **extra)
     path = wd.root / rel
     if not path.is_file():
         return fail(ApprovalState.MISSING,
                     f"{rel} was approved in {sha[:12]} but is deleted from the workdir; "
-                    "restore it or re-approve",
-                    commit=sha, digest=_record_digest(rec))
+                    "restore it or re-approve", **extra)
     try:
         committed = _show_blob(wd, sha, rel).stdout
         live = path.read_text(encoding="utf-8")
     except OSError as exc:
-        return fail(ApprovalState.MISSING, f"{rel} is unreadable ({exc})",
-                    commit=sha, digest=_record_digest(rec))
+        return fail(ApprovalState.MISSING, f"{rel} is unreadable ({exc})", **extra)
     digest = _record_digest(rec)
     if live != committed:
         return fail(ApprovalState.UNCOMMITTED,
                     f"{rel} has uncommitted changes after {sha[:12]}; the committed copy governs "
-                    "(commit the change or restore the file)",
-                    commit=sha, digest=digest)
+                    "(commit the change or restore the file)", **extra)
     if _only_added_file(wd, sha) != rel:
-        return fail(ApprovalState.BAD_SIG,
-                    f"{rel} is committed as {sha[:12]} but that commit touches more than {rel}; an approval commit adds exactly one approval file",
-                    commit=sha, digest=digest)
-    # Coverage: the approved digest must equal the current digest. A v1
-    # record carries no payload — v1 correction/definition records cannot
-    # prove coverage and never verify (re-approve under v2); other v1
-    # kinds fall back to the legacy artifact comparison.
+        return fail(ApprovalState.MALFORMED,
+                    f"{rel} is committed as {sha[:12]} but that commit touches more than {rel}; "
+                    "an approval commit adds exactly one approval file", **extra)
+    # Coverage: the approved digest must equal the current digest. Only a
+    # v3 record carries an embedded payload; a record without one cannot
+    # bind content and fails closed (re-record under v3).
     current = current_digest(wd, kind, rec.get("selector"))
     if current is None:
         # Verified read: the coverage digest is recomputed from workdir
@@ -1039,126 +821,35 @@ def verify_approval(wd: Workdir, kind: str, artifact: str | None = None) -> dict
         if chain_problems:
             return fail(ApprovalState.STALE,
                         f"cannot recompute the current {kind} digest: evidence chains do not verify "
-                        f"({chain_problems[0][:120]}); restore the workdir before re-approval",
-                        commit=sha, digest=digest)
-    if rec.get("format") != FORMAT or rec.get("payload") is None:
-        if kind in ("correction", "definition"):
-            return fail(ApprovalState.STALE,
-                        f"{rel} is a v1 approval with no embedded payload and cannot bind content; re-approve",
-                        commit=sha, digest=digest)
-        legacy = current_artifact(wd, kind)
-        if legacy is not None and digest != legacy:
-            current = legacy  # force the stale branch below
+                        f"({chain_problems[0][:120]}); restore the workdir before re-approval", **extra)
+    if rec.get("format") != FORMAT or not isinstance(rec.get("payload"), str) or not rec["payload"]:
+        return fail(ApprovalState.MALFORMED,
+                    f"{rel} is not a {FORMAT} record with an embedded payload; re-record the "
+                    f'chat yes with `dda approve {kind} ... --yes "..."`', **extra)
     if current is not None and digest != current:
         return fail(ApprovalState.STALE,
                     f"approval covers {(digest or '?')[:12]} but the current {kind} is "
                     f"{current[:12]} (an approval of an older version does not cover this one)",
-                    commit=sha, digest=digest)
-    sig_ok, fields = _signer_fields(wd, sha)
-    unsigned = not sig_ok and not fields
+                    **extra)
     if isinstance(rec.get("payload"), str) and rec["payload"]:
-        # A v2 record whose embedded payload does not hash to its own
-        # digest is forged or corrupted (the digest was copied onto
-        # different content): it covers nothing. STALE forces
-        # re-approval, and this check runs before any signature
-        # reasoning so a forged payload can never verify.
+        # A record whose embedded payload does not hash to its own digest
+        # is forged or corrupted (the digest was copied onto different
+        # content): it covers nothing. STALE forces re-approval, and this
+        # check runs before any state reasoning so a forged payload can
+        # never count.
         if hashlib.sha256(rec["payload"].encode("utf-8")).hexdigest() != digest:
             return fail(ApprovalState.STALE,
                         f"{rel} embeds a payload that does not hash to its approval digest "
-                        f"{(digest or '?')[:12]} (forged or corrupted; re-approve)",
-                        commit=sha, digest=digest, sig_ok=sig_ok)
-    try:
-        approvers = load_config(wd).get("approvers") or []
-    except DdaError as exc:
-        return fail(ApprovalState.UNKNOWN_SIGNER,
-                    f"config.yaml does not parse, so no signer can match ({exc})",
-                    commit=sha, digest=digest, sig_ok=sig_ok)
-    signer = approver_matches(approvers, *fields)
-    chain_note = ""
-    chd = _channel_desc(str(rec.get("method") or ""))
-    if chd:
-        problem = _channel_problem(wd, rec, sha, digest, chd)
-        blk_raw = rec.get(chd["block"])
-        blk = blk_raw if isinstance(blk_raw, dict) else {}
-        extra = {"commit": sha, "digest": digest, "sig_ok": sig_ok,
-                 "method": chd["method"], chd["block"]: blk_raw if isinstance(blk_raw, dict) else None}
-        if problem:
-            return fail(ApprovalState.BAD_SIG, f"{rel}: malformed {chd['label']} confirmation ({problem})",
-                        **extra)
-        uid, mid = blk["user_id"], blk["message_id"]
-        # Replay at verify time: the same message id confirming a
-        # different digest is a replayed yes — BAD_SIG, even when the
-        # record and trailers are otherwise well-formed (probe-B shape:
-        # hand-made records bypass do_approve's refusal).
-        spent = _channel_spent_on(wd, chd["method"], uid, mid, digest)
-        if spent is not None:
-            return fail(ApprovalState.BAD_SIG,
-                        f"{rel}: {chd['label']} message {mid} already confirms {spent[:16]} "
-                        f"(one confirming message confirms one digest; a replayed yes is a forgery)",
-                        **extra)
-        if kind == "config":
-            by_digest, problems = _config_chain(wd)
-            entry = by_digest.get(digest or "")
-            if entry is None or not entry["verified"]:
-                detail = "; ".join(problems[-2:]) if problems else "chain walk failed"
-                return fail(ApprovalState.UNKNOWN_SIGNER,
-                            f"config approver chain does not verify ({detail})", **extra)
-            who = entry["signer"]
-        else:
-            who = channel_approver(approvers, chd["cfg"], uid, chd["numeric"])
-        if not who:
-            return fail(ApprovalState.UNKNOWN_SIGNER,
-                        f"{chd['label']} user {uid} matches no approver {chd['cfg']} in config.yaml",
-                        **extra)
-        # No doctor key checks: they guard keys an agent could borrow, and
-        # this path uses no key (the signed-in account is the proof).
-        return {**base, **extra, "state": ApprovalState.CONFIRMED.value, "verified": True,
-                "signer": who,
-                "reason": (f"confirmed: {kind} {(digest or '')[:12]} by {who} via {chd['label']} user "
-                           f"{uid}, message {mid} at {blk.get('confirmed_at')}")}
-    if unsigned:
-        # SPEC §4.5: an unsigned approval file is recorded as unverified,
-        # whether or not the config names approvers — the agent could have
-        # produced it. This precedes every signer/chain check: there is no
-        # cryptographic claim to evaluate.
-        return fail(ApprovalState.UNVERIFIED,
-                    f"commit {sha[:12]} is unsigned (agent could have produced it); "
-                    f"a human must sign from a trusted key or confirm over Telegram or chat (§4.5)",
-                    commit=sha, digest=digest, signer=signer, sig_ok=sig_ok,
-                    method=METHOD_UNSIGNED)
-    if kind == "config":
-        by_digest, problems = _config_chain(wd)
-        entry = by_digest.get(digest or "")
-        if entry is None or not entry["verified"]:
-            detail = "; ".join(problems[-2:]) if problems else "chain walk failed"
-            return fail(ApprovalState.BAD_SIG if not sig_ok else ApprovalState.UNKNOWN_SIGNER,
-                        f"config approver chain does not verify ({detail})",
-                        commit=sha, digest=digest, signer=signer, sig_ok=sig_ok)
-        signer = entry["signer"] or signer
-        if problems:
-            chain_note = f" (earlier chain notes: {'; '.join(problems[-2:])})"
-    elif not approvers:
-        return fail(ApprovalState.UNKNOWN_SIGNER,
-                    "config.yaml lists no approvers, so no signer can be matched",
-                    commit=sha, digest=digest, sig_ok=sig_ok)
-    elif not sig_ok:
-        return fail(ApprovalState.BAD_SIG, f"bad signature on commit {sha[:12]}{chain_note}",
-                    commit=sha, digest=digest, signer=signer, sig_ok=sig_ok)
-    elif not signer:
-        return fail(ApprovalState.UNKNOWN_SIGNER,
-                    f"signer matches no approver in config.yaml{chain_note}",
-                    commit=sha, digest=digest, signer=signer, sig_ok=sig_ok)
-    key_failures = [c for c in _doctor.key_checks(wd) if c["status"] == "fail"]
-    if key_failures:
-        return fail(ApprovalState.DOWNGRADED,
-                    "dda doctor key checks fail now (" +
-                    "; ".join(c["name"] for c in key_failures) +
-                    "); every approval downgrades to unverified until fixed (§4.5)",
-                    commit=sha, digest=digest, signer=signer, sig_ok=sig_ok)
+                        f"{(digest or '?')[:12]} (forged or corrupted; re-approve)", **extra)
+    if not fields["who"] or not fields["when"] or not fields["yes"]:
+        return fail(ApprovalState.MALFORMED,
+                    f"{rel} has no complete chat-yes record (who, when, and the exact words are "
+                    "all required); re-record it", **extra)
     short = (digest or "")[:12]
-    return {**base, "state": ApprovalState.VERIFIED.value, "verified": True, "commit": sha,
-            "digest": digest, "signer": signer, "sig_ok": sig_ok, "method": METHOD_SIGNED,
-            "reason": f"verified: {kind} {short} signed by {signer or 'an approver'}{chain_note}"}
+    reason = (f"recorded yes: {kind} {short} — {fields['who']} at {fields['when']}: "
+              f"\"{fields['yes']}\"")
+    return {**base, **extra, "state": ApprovalState.RECORDED.value, "recorded": True,
+            "signer": fields["who"] or None, "reason": reason}
 
 
 def approved_payload(wd: Workdir, kind: str, ref: str | None = None) -> tuple[dict, str]:
@@ -1182,6 +873,9 @@ def approved_payload(wd: Workdir, kind: str, ref: str | None = None) -> tuple[di
     payload = record.get("payload")
     if not isinstance(payload, str) or not payload:
         raise DdaError(f"{kind} approval {sha[:12]} embeds no canonical payload (v1 record; re-approve)")
+    if approval_fields(record)["legacy"]:
+        raise DdaError(f"{kind} approval {sha[:12]} has no approval block (pre chat-yes record); "
+                       "re-record it with --yes (§4.5)")
     return record, payload
 
 
@@ -1214,7 +908,7 @@ def list_approvals(wd: Workdir, kind: str) -> list[dict]:
 
 
 def do_approved(wd: Workdir, kind: str, artifact: str | None = None) -> dict:
-    """Verify an approval and record the verdict in approvals.index.jsonl."""
+    """Re-read a recorded yes and record the verdict in approvals.index.jsonl."""
     from . import ledger
     check_kind_artifact(kind)
     if artifact is None and kind in ("correction", "definition"):
@@ -1223,10 +917,9 @@ def do_approved(wd: Workdir, kind: str, artifact: str | None = None) -> dict:
     index_rec = {
         "type": "approval", "kind": kind, "artifact": verdict.get("digest") or artifact,
         "digest": verdict.get("digest"), "commit": verdict.get("commit"),
-        "signer": verdict.get("signer"), "sig_ok": verdict.get("sig_ok"),
-        "verified": verdict["verified"], "state": verdict["state"],
-        "method": verdict.get("method"), "telegram": verdict.get("telegram"),
-        "chat": verdict.get("chat"),
+        "who": verdict.get("who"), "when": verdict.get("when"), "yes": verdict.get("yes"),
+        "recorded": verdict["recorded"], "state": verdict["state"],
+        "method": verdict.get("method"),
         "reason": verdict["reason"],
     }
     # N7: embed the canonical payload so a later history rewrite (`git
@@ -1261,26 +954,22 @@ def index_approvals(wd: Workdir, kind: str) -> list[dict]:
             if isinstance(r, dict) and r.get("type") == "approval" and r.get("kind") == kind]
 
 
-def confirmed_channels(wd: Workdir) -> list[str]:
-    """Channel labels behind LIVE CONFIRMED verdicts (re-verified now).
+def recorded_approvals(wd: Workdir) -> list[dict]:
+    """LIVE recorded-yes verdicts, one per kind that has one (re-checked now).
 
-    Rebuilt from `verify_approval` per kind, never from the verdict
-    index: a stale CONFIRMED row (approval superseded, state drifted)
-    must not keep rendering as confirmed (probe-E). A kind whose
-    verification errors is skipped — verification truth, honestly read.
-    The footer names the channel per approval from this, so a Chat yes
-    never renders as Telegram and vice versa (§4.5).
+    Rebuilt from `verify_approval` per kind, never from the verdict index: a
+    stale row (approval superseded, state drifted) must not keep rendering
+    as approved. A kind whose check errors is skipped. The footer reads
+    who/when from here (§4.5).
     """
-    out: list[str] = []
+    out: list[dict] = []
     for kind in KINDS:
         try:
             v = verify_approval(wd, kind)
         except (DdaError, OSError):
             continue
-        if v.get("state") == ApprovalState.CONFIRMED.value and v.get("verified"):
-            chd = _channel_desc(str(v.get("method") or ""))
-            if chd and chd["label"] not in out:
-                out.append(chd["label"])
+        if v.get("state") == ApprovalState.RECORDED.value and v.get("recorded"):
+            out.append(v)
     return out
 
 
@@ -1305,16 +994,17 @@ def config_status(wd: Workdir) -> dict:
     except (DdaError, OSError) as exc:
         return {"state": "unknown", "detail": str(exc)}
     try:
-        approvers = load_config(wd).get("approvers") or []
+        cfg = load_config(wd)
     except DdaError as exc:
         return {"state": "unknown", "config_hash": ch, "detail": str(exc)}
-    fps = fingerprints_of(approvers)
-    base = {"config_hash": ch, "approvers": approvers, "fingerprints": fps}
+    base = {"config_hash": ch, "approvers": cfg.get("approvers") or [],
+            "approver_names": _approver_names(cfg)}
     verdict = verify_approval(wd, "config", ch)
     state = verdict["state"]
     if state in HUMAN_STATES:
         return {**base, "state": state,
                 "detail": f"commit {str(verdict.get('commit') or '')[:12]}; {method_label(verdict)}",
+                "who": verdict.get("who"), "when": verdict.get("when"), "yes": verdict.get("yes"),
                 "record": latest_record(wd, "config", ch)}
     if state == ApprovalState.MISSING.value:
         return {**base, "state": state, "detail": "no config approval for this config hash"}
@@ -1322,9 +1012,9 @@ def config_status(wd: Workdir) -> dict:
             "record": latest_record(wd, "config", ch)}
 
 
-__all__ = ["KINDS", "ApprovalState", "HUMAN_STATES", "is_human", "method_label", "telegram_approver", "chat_approver",
-           "channel_approver", "METHOD_CHAT", "approvals_dir", "approval_rel", "approval_path",
+__all__ = ["KINDS", "ApprovalState", "HUMAN_STATES", "is_human", "method_label",
+           "METHOD_CHAT_YES", "approvals_dir", "approval_rel", "approval_path",
            "check_kind_artifact", "current_artifact", "current_digest", "canonical_payload",
            "canonical_case", "release_reports", "approved_payload", "list_approvals",
            "do_approve", "do_approved", "verify_approval", "latest_record",
-           "config_status", "approver_matches", "fingerprints_of", "confirmed_channels"]
+           "config_status", "approval_fields", "recorded_approvals"]

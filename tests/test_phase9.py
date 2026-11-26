@@ -91,7 +91,7 @@ class TestEvalsMatchRun(P9Setup):
         if question:
             body += f"\nReview question: {question}\n"
         (d / "case.md").write_text(body, encoding="utf-8")
-        self.assertEqual(self.cli("approve", "correction", nnn, "--no-sign")[0], 0)
+        self.assertEqual(self.cli("approve", "correction", nnn, "--yes", "yes, ship it", "--who", "brad")[0], 0)
         self.assertEqual(self.cli("approved", "correction", nnn)[0], 0)
 
     def test_match_selects_binding_case(self):
@@ -156,7 +156,8 @@ class TestPacketMatchedOnly(P9Setup):
         (base / "001" / "case.md").write_text(
             "# Matched\n\nTrigger keys: alias:sales\n\nReview question: Did the grain fan out?\n",
             encoding="utf-8")
-        self.assertEqual(self.cli("approve", "correction", "001", "--no-sign")[0], 0)
+        self.assertEqual(self.cli("approve", "correction", "001", "--yes", "yes, ship it",
+                                  "--who", "brad")[0], 0)
         self.assertEqual(self.cli("approved", "correction", "001")[0], 0)
         (base / "002").mkdir(parents=True, exist_ok=True)
         (base / "002" / "case.md").write_text(

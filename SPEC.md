@@ -1,8 +1,8 @@
 ---
 name: disciplined-data-analysis
 status: spec draft, second reshape after blind re-review; build phases 0–5 implemented (see README)
-version: 0.3.0-spec
-date: 2026-10-27
+version: 0.4.0-spec
+date: 2026-11-25
 sibling: C:\Users\bmtrn\disciplined-vibe-coding (v0.2.0)
 sources: Turing pipeline structure (disciplined-vibe-coding), Elephant-Goldfish Model (Google, Apache 2.0), ponytail economy (DietrichGebert/ponytail, MIT), gap survey deleg_6fc04e39, blind review deleg_1df92e5a (22 findings, all addressed — see Appendix A), blind re-review deleg_37619031 (8 blockers, all addressed — see Appendix B)
 ---
@@ -64,8 +64,8 @@ to defeat the plugin.
   assumptions and story-fitting.
 - **Human** — owns definitions and `config.yaml`, confirms tier at DECIDE+,
   approves the spec and the config at DECIDE+, signs off at PUBLISH, and
-  is the only source of corrections. Human acts are recorded as artifacts the agent
-  cannot produce (§4.5).
+  is the only source of corrections. Human acts are his yeses in chat,
+  recorded verbatim — who, when, and the exact digest (§4.5).
 - **`dda` CLI** — the plugin's deterministic scripts. Besides the hooks,
   it is the only writer of evidence files under `.analysis/`.
 
@@ -160,12 +160,12 @@ judgment), G (goldfish), H (human artifact, §4.5), K (hook).
 | 0 | Intake | `intake` | intake block | G0: question stated as one sentence; decision it informs named (or "none — EXPLORE") | A |
 | 1 | Define | `define`, `definitions` | `.analysis/spec.md` | G1: every Metrics line matches the pins-only grammar (one registry pin `name@version#hash`, hash recomputes, optional alias reference and formula-free prose); sources named by config alias; hypotheses, "what would change the answer", exclusions, and prior exposure stated; prose formulas elsewhere warn, never fail | S, K |
 | 2 | Economy+Tier | `define` | two sentences in spec | G2: rung and tier declared; overrides and tier triggers applied (§2.2); human tier confirmation present when required | S, H |
-| 3 | Teardown (pre-data) | `goldfish-review` | `.analysis/reviews/goldfish/teardown.md` | G3: tier-scaled rounds recorded from `dda review run` calls (§5.0); at DECIDE, a human spec approval for this spec hash (verified, or unverified and disclosed); at PUBLISH, verified or Telegram-confirmed only (§4.5) | S, G, H |
-| 4 | Lock | `lock` | `specs/vN.md`, `spec.lock`, ledger entry, git commit | G4: lock hash recomputes (spec + definition pins + config hash + source aliases); a `config` approval exists for this config hash, signed through the approver chain (§4.5; verified required at DECIDE+, unapproved config disclosed at EXPLORE); evidence chains verify; `runs.log`, the audit log, and the unbound-access log (§6.0) show no non-metadata reads of these aliases before this lock, otherwise the lock is labelled post-data | S, K, H |
+| 3 | Teardown (pre-data) | `goldfish-review` | `.analysis/reviews/goldfish/teardown.md` | G3: tier-scaled rounds recorded from `dda review run` calls (§5.0); at DECIDE and PUBLISH, a recorded chat yes (who, when, exact spec digest) for this spec hash (§4.5) | S, G, H |
+| 4 | Lock | `lock` | `specs/vN.md`, `spec.lock`, ledger entry, git commit | G4: lock hash recomputes (spec + definition pins + config hash + source aliases); a recorded chat yes exists for this config hash (§4.5; required at DECIDE+, unapproved config disclosed at EXPLORE); evidence chains verify; `runs.log`, the audit log, and the unbound-access log (§6.0) show no non-metadata reads of these aliases before this lock, otherwise the lock is labelled post-data | S, K, H |
 | 5 | Profile (first data contact) | `profile` | `.analysis/profile.md` | G5: snapshot or fingerprint recorded per source (§10.3); schema compared with declared expectations; mismatch filed as amendment | S, A |
 | 6 | Analyze | `analyze` | variant scripts, outputs, `runs.log`, `specs-tried.jsonl` | G6: every data-touching run maps to a variant id (no orphan runs); every kernel record is IPC-imported with a policy hash bound to the run's lock hash and pairs with a parent-appended `kernel-start`; every variant beyond the locked one has a ledger entry with a reason; hook heartbeat complete (§6.8) | S, K |
 | 7 | Verify | `verify`, `goldfish-review`, `correct` | `.analysis/verify.md` | G7: locked variant reproduces from its saved script in a fresh kernel within declared tolerance against the snapshot; source drift recorded separately (§10.3); matched correction evals pass; post-result goldfish rounds recorded (§5.2) | S, G |
-| 8 | Report | `report` | `reports/<slug>.md` or `.analysis/answer.md` | G8: footer values recompute from lock, ledgers, runs, profile, reviews, approvals (§8); `exploratory` and `post-data-locked` labels present at point of claim; at PUBLISH, verified human sign-off for this report hash | S, K, H |
+| 8 | Report | `report` | `reports/<slug>.md` or `.analysis/answer.md` | G8: footer values recompute from lock, ledgers, runs, profile, reviews, approvals (§8); `exploratory` and `post-data-locked` labels present at point of claim; at PUBLISH, a recorded chat yes for this report hash | S, K, H |
 | 9 | Archive | `report` | ledger closed, commit, push | G9: spec, lock, ledger, verify, report committed together; `dda gitcheck` finds no data or secrets staged (§11); every committed file is on the allowlist (agent-writable work paths, or a dda control file matched by exact path with its hash in the G9 manifest); evidence chains verify; Wayfinder closed; `dda release` unbinds every session and deregisters the workdir's roots (§6.0) | S |
 
 ### 3.1 Amendments (the honest loop back)
@@ -187,7 +187,7 @@ editing the spec is not.
 - Review of a post-data amendment:
   - EXPLORE: the agent amends and continues.
   - DECIDE: goldfish rounds 1 (zoom-out) and 3 (design critique), plus
-    a verified human approval of the new version.
+    a recorded chat yes for the new version.
   - PUBLISH: same as DECIDE, plus the second goldfish on round 3.
 - Amendment cap: a third post-data amendment at DECIDE+ triggers a full
   teardown re-run, and the footer flags "spec moved after data N times".
@@ -208,11 +208,11 @@ editing the spec is not.
    pass.
 8. An evidence chain fails to verify (§4.4) or a hook fault is detected
    (§6.8).
-9. A PUBLISH gate (G3 or G8) has only an unverified approval (§4.5).
-   Signed (VERIFIED) and Telegram-confirmed (CONFIRMED) approvals both
-   satisfy it.
-10. The approver chain fails to verify, or `dda doctor` downgrades
-    approvals because a signing key is reachable from the agent (§4.5).
+9. A gate (G3, G4, or G8) has no recorded chat yes for the exact digest it
+   covers: the record is missing, uncommitted, stale, or malformed (§4.5).
+   An approval of an older digest does not count; ask Brad and record the
+   yes.
+10. An evidence chain or the approvals index fails to verify (§4.4).
 
 Everything else proceeds with stated assumptions, recorded in the spec.
 
@@ -242,7 +242,7 @@ Workdir layout. `C` = committed, `X` = never committed (§11).
 
 ```text
 .analysis/                    guarded: agent writes allowed only on the paths marked `agent` in §6.2
-  config.yaml          C  data-root aliases, kernel policy, PII columns, default tier, publish channels, approver keys (human-owned)
+  config.yaml          C  data-root aliases, kernel policy, PII columns, default tier, publish channels, approver names (human-owned)
   spec.md              C  current spec (working copy, agent-editable)
   specs/vN.md          C  every locked version, written only by `dda lock`
   spec.lock            C  version, lock hash, timestamp, definition pins, config hash, tier, rung, label
@@ -252,8 +252,8 @@ Workdir layout. `C` = committed, `X` = never committed (§11).
   runs/blobs/<hash>    C  exact code/query text of each run, secrets scrubbed
   variants/<id>.py|sql C  runnable script per variant (what Verify replays)
   audit.log            C  kernel audit and reader-wrapper events, hash-chained, aliases only (§10.1)
-  approvals/           C  one signed file per human approval, committed by the human (§4.5)
-  approvals.index.jsonl C verified-approval index written by `dda approved`, hash-chained
+  approvals/           C  one record per approval: Brad's chat yes, verbatim, for one exact digest (§4.5)
+  approvals.index.jsonl C recorded-yes index written by `dda approved`, hash-chained
   profile.md           C  aggregate snapshot facts only, written by `dda profile` — no rows, no samples
   reviews/goldfish/    C  goldfish outputs, written by `dda review run`
   reviews/self/        C  EXPLORE self re-reads, written by the agent, labelled `self`
@@ -382,164 +382,92 @@ roots.
 
 ### 4.5 Human approval artifacts
 
-An approval must be something the agent cannot produce.
+An approval is Brad's yes in chat, recorded verbatim. That is the whole
+mechanism: no password, no signing key, no passphrase, no Telegram message
+id, no approver chain, and no verification step.
 
-- **Format.** An approval is a git commit, made by an approver in their
-  own terminal with `dda approve <kind> <artifact>`, that adds exactly one
-  file, `.analysis/approvals/<kind>-<artifact-hash>.json`, and carries a
-  human proof of presence: a **signature** (desktop) or a **Telegram
-  confirmation** (phone), see "Two approval methods" below. Kinds: `tier`, `spec`, `amendment`, `signoff`,
-  `definition`, `correction`, `config`. These files are not a hash chain.
-  When `dda approved` verifies one, it appends the commit sha, signer
-  fingerprint, kind, and artifact hash to the chained
-  `approvals.index.jsonl` (§4.4), so a later deletion is visible.
-- **Two approval methods.** Both are a human's own approval and count the
-  same at every tier, PUBLISH included. `dda approved` always prints which
-  one was used, so the record says how it was approved.
+- **What an approval is.** Brad says yes in chat. The yes is recorded —
+  the exact words, who said them, when he said them, and the exact digest
+  approved — with `dda approve <kind> --yes "<words>" [--who brad]
+  [--when 2026-11-22]`. That record **is** the approval, full stop. No gate
+  asks for proof of who typed it: the chat holds that, and the record
+  points at what was said, by whom, and when.
+- **Accepted consequence.** A record cannot prove who made it. Anyone who
+  can run `dda approve` can write one, and DDA does not pretend otherwise.
+  The owner accepted this on 2026-11-25: proof of *who* approved is gone in
+  exchange for an approval with no friction. What survives is the trail —
+  the words, the speaker, the date, the digest, the commit, and the
+  hash-chained index line.
+- **Format.** An approval is a git commit by `dda approve` that adds
+  exactly one file, `.analysis/approvals/<kind>-<digest16>.json`, format
+  `dda-approval-v3`, carrying: `kind`, `digest`, `artifact` (alias),
+  `selector` (correction case id or definition name), `payload` (the
+  canonical content the digest covers), `workdir_id`, `config_hash`,
+  `spec_hash`, `approval {who, when, yes, recorded_at}`, `method:
+  "chat-yes"`, and an optional `note`. `when` is when the yes was said
+  (it may predate the record); `recorded_at` is when the record was
+  written. A `--when` later than `recorded_at` is refused — a yes cannot
+  be said after the record capturing it exists. When `dda approved` reads
+  one, it appends the kind, digest, commit, who, when, and the words to the
+  chained `approvals.index.jsonl` (§4.4), so a later deletion is visible.
+- **Kinds.** `tier`, `spec`, `amendment`, `signoff`, `definition`,
+  `correction`, `config`. Digests are computed only by `dda` (never typed
+  by an agent): config hash, normalized-spec hash, amendment hash (previous
+  lock hash + new spec hash + teardown review-history digest), canonical
+  case hash, normalized definition hash, and the signoff release hash
+  (report bytes incl. footer + lock hash + `verify.md` hash + gate-verdict
+  digest).
+- **Running it.** `dda approve` is human-only: Brad runs it in his own
+  terminal. The agent never runs it, not even when Brad's chat message
+  orders the record — the agent shows him the exact command and digest and
+  waits, and the words Brad said are what get quoted. The hooks enforce
+  that one rule: `hookentry` refuses `dda approve` from any agent tool call
+  (it is never passed through as a clean `dda` invocation), and
+  `lockguard`/`evidenceguard` also block agent signing commands and agent
+  commits of `approvals/`. Those guards keep approval a human act; they
+  are slips-prevention, not proof (§0.1).
+- **`dda approved` prints the record.** One line — `RECORDED - chat yes
+  from brad at 2026-11-22` — then the exact words, the digest, and the
+  commit. It distinguishes only these states:
 
-  | Where Brad is | Command | Proof of presence | State |
-  |---|---|---|---|
-  | Desktop | `dda approve <kind> [--key K]` | the key passphrase (or FIDO touch) for a signed commit | **VERIFIED** — `VERIFIED - signed by brad` |
-  | Telegram | `dda approve <kind> --telegram <user_id> <message_id>` | his signed-in Telegram account; no passphrase | **CONFIRMED** — `CONFIRMED - Telegram user 8919091876, message 8441` |
-  | Regular chat | `dda approve <kind> --chat <user_id> <message_id>` | his signed-in chat account; no passphrase | **CONFIRMED** — `CONFIRMED - Chat user brad, message <id>` |
+  | State | Meaning | Gates |
+  |---|---|---|
+  | `RECORDED` | a chat yes is on record for exactly this content | passes at every tier, PUBLISH included |
+  | `MISSING` | no record covers this content | fails |
+  | `UNCOMMITTED` | the record exists but is not committed on this branch, or the file changed after the commit | fails |
+  | `STALE` | the record covers older content (the spec/config/report changed after the yes), or its embedded payload does not hash to its digest | fails; ask again |
+  | `MALFORMED` | the approval commit adds more than one file, the record has no `approval` block (v1/v2 legacy), it lacks an embedded payload, or it is missing its who/when/yes | fails |
 
-  - The Telegram path never asks for a passphrase. Brad sees the kind and
-    digest in the chat and replies to confirm; `--telegram` records the
-    approval with his Telegram user id, the confirming message id
-    **verbatim** (so it can be checked against the chat afterwards), the
-    confirmation timestamp, the kind, and the exact digest confirmed. The
-    commit repeats the ids as `Dda-Approval-Method`, `Dda-Telegram-User`
-    and `Dda-Telegram-Message` trailers.
-  - The user id must equal an approver's `telegram_user_id` in
-    `config.yaml` (Brad: `8919091876`), so a Telegram approver is added the
-    same way as a key: through an approved config (approver chain below).
-    An unknown id is refused at `dda approve` and reads UNKNOWN_SIGNER at
-    `dda approved`. A record claiming the Telegram method without matching
-    ids, kind, digest, timestamp and commit trailers is BAD_SIG.
-  - `dda doctor`'s key checks guard keys an agent could borrow; they do
-    not downgrade a CONFIRMED approval, which uses no key.
-  - `--telegram` is not `--no-sign`. The two cannot be combined, and
-    `--no-sign` remains the agent's own claim (see "Unverified approvals").
-    The agent never runs `dda approve` either way (`lockguard` blocks it);
-    the Telegram path is run by whatever relays Brad's confirmation, with
-    the message id taken from Brad's own message. The relay is
-    `scripts/dda_relay.py` on the workdir host (decision 2026-11-06):
-    Brad runs it in his own terminal (or a poller acting for him), never
-    an agent session. Placement judged on four rules — only his identity
-    can trigger it, nothing the agent can fire on its own, the audit
-    handle stays verbatim, failure closes the gate:
-    - Manual command (status quo): passes all four today, but Brad copies
-      ids by hand — transcription risk, no live capture.
-    - Relay script on the workdir host (winner): the sender id must
-      exactly equal the approver's configured id or the relay refuses
-      before writing anything; the ids come from Brad's
-      platform-authenticated message (Telegram API sender, gateway
-      session user); the relay requires the digest Brad confirmed
-      (`--digest`, 16+ hex) and refuses when it no longer matches the
-      canonical payload — his yes binds that exact state; one confirming
-      message confirms one digest, so a reused message id is refused at
-      `dda approve` and reads BAD_SIG at `dda approved`; approval notes
-      must not contain `Dda-...:` lines (they would forge commit
-      trailers); `lockguard` blocks agent-run relay the same as
-      agent-run approve; the relay exits non-zero unless `dda approved`
-      walks back human. Same trust as the manual command, minus the
-      copying, plus live capture (`fetch` peeks the update stream
-      read-only, without consuming; it polls the same endpoint as the
-      gateway, so a 409 while the gateway polls is polling contention —
-      long term the relay reads from the gateway store).
-    - Gateway hook on his authenticated messages (rejected for now): a
-      bare "yes" fires on ordinary conversation — safe auto-fire needs a
-      pending-prompt correlation (match the yes to the digest just
-      asked for) that nobody has built or asked for.
-    - Scheduled watcher / desktop-side helper (deferred): same trigger
-      rule as the script but new always-on pieces (token handling,
-      offset management, desktop build). Built only if approval volume
-      justifies it; the script stays the recording path either way.
-    The message id is the
-    audit handle: the record carries the user id, the message id
-    verbatim, the kind, the digest, and the confirmation time, so the
-    yes is checkable against the chat afterwards.
-  - The regular-chat path mirrors the Telegram path: `--chat` records
-    the approval with his chat sender id and the confirming message id
-    **verbatim**, the commit repeats the ids as `Dda-Approval-Method:
-    chat`, `Dda-Chat-User` and `Dda-Chat-Message` trailers, and the user
-    id must equal an approver's `chat_user_id` in `config.yaml` (added
-    the same way as a key: through an approved config). Chat ids are
-    platform tokens, not Telegram numerics, so `--chat` accepts Brad's
-    sender handle and a single-line message id instead of digits. The
-    footer names the channel per approval (`confirmed (Telegram)`,
-    `confirmed (Chat)`), so a Chat yes never renders as Telegram.
-  - Config: approvers take `telegram_user_id` alongside (or instead of)
-    `fingerprint`/`key`/`key_id`:
-
-    ```yaml
-    approvers:
-      - name: brad
-        fingerprint: SHA256:...
-        telegram_user_id: "8919091876"
-        chat_user_id: "brad"
-    ```
-- **Approver chain (root of trust).** Approver keys live in
-  `config.yaml` under `approvers`, which only a string-match hook guards,
-  so the key list is never trusted on its own:
-  - The first `config` approval is trust-on-first-use. `dda init` prints
-    the approver fingerprints, Brad confirms them, and he signs that
-    first config approval himself. The fingerprints also go in every
-    footer, so a foreign key shows up where Brad reads.
-  - Every later config whose `approvers` block differs must be approved
-    by a key from the **previous** approved set. `dda approved` walks the
-    chain from the first config approval to the current config hash; a
-    key added without a signature from an earlier key fails the walk.
-  - G4 requires a `config` approval for the exact config hash being
-    locked (§3). A slipped config edit changes the hash, so data reads
-    block until a human approves the new config.
-  - Kernel package additions (§10.1a) live in `kernel.yaml`, outside the
-    config hash, so adding a library needs neither a config approval nor
-    a re-lock. The kernel environment hash still goes in the footer.
-- **Keys the agent cannot use.** A verified approval needs a signing key
-  that the agent cannot drive. Preferred: an SSH `ed25519-sk` (FIDO2)
-  key that needs a physical touch for every signature. Otherwise a GPG
-  key with a passphrase and no cache. `dda doctor` checks this and,
-  where it fails, **downgrades every approval to unverified** (a fail,
-  not a warning) until fixed:
-  - `gpg-agent`: the effective config (`gpgconf --list-options
-    gpg-agent`) must have `ignore-cache-for-signing`, or
-    `default-cache-ttl 0` and `max-cache-ttl 0`. The default 600-second
-    cache fails.
-  - `ssh-agent`: `ssh-add -l` (fingerprints, with `-L` as fallback) must
-    not list a non-`-sk` approver key — matched exact-only against the
-    approver fingerprints — on any agent the Hermes shell can reach: `SSH_AUTH_SOCK`, the Windows
-    OpenSSH agent service (`\\.\pipe\openssh-ssh-agent`), Pageant, and
-    1Password's agent. A running Windows `ssh-agent` service holding the
-    key fails.
-  - Git signing config: `commit.gpgsign` and `tag.gpgSign` must be
-    false (or unset) in every scope that applies to the workdir, and
-    `user.signingkey` must not name an approver key in those scopes.
-    Auto-signing would sign agent commits without `-S`, which `lockguard`
-    cannot see. `dda approve` passes `-S` and the key explicitly, so the
-    human loses nothing.
-- **`dda`'s own commits** (`dda lock`, G9) always run as
-  `git -c commit.gpgsign=false -c tag.gpgSign=false commit …`, so they
-  never prompt, never hang under cron, and never borrow an approver key.
-- `dda approved <kind> <artifact>` checks: the signature
-  (`git verify-commit`) — or, for a Telegram confirmation, the recorded
-  user id, message id, kind, digest and trailers; the signer (or Telegram
-  user) against the approver chain; that the
-  commit adds only that one approval file; that it is reachable from the
-  current branch; that the artifact hash matches the current artifact
-  (an approval of spec v2 does not cover v3); and that `dda doctor`'s
-  key checks pass now (signed approvals only).
-- `lockguard` blocks agent runs of `git commit -S`, `git tag -s`,
-  `git -c commit.gpgsign=true`, and `dda approve`, and `evidenceguard`
-  blocks agent writes to `approvals/` and `approvals.index.jsonl`.
-- **Unverified approvals.** With no key, or after a doctor downgrade,
-  an approval file can be committed unsigned (`--no-sign`, no Telegram
-  confirmation). It is recorded as **unverified** and the footer says
-  "human approval unverified (agent could have produced it)". Unverified
-  satisfies G3 and G4 at DECIDE, with that disclosure. It **never**
-  satisfies any gate at PUBLISH: a PUBLISH analysis with only unverified
-  approvals parks (§3.2, case 9). A CONFIRMED (Telegram) approval is not
-  unverified and does satisfy PUBLISH.
+  There is no weaker passing state and no "verified vs unverified" split:
+  an approval either has a recorded yes for this exact content or it does
+  not.
+- **What `dda approved` still checks (content binding, not identity).**
+  That a committed record resolves for the current digest; that the commit
+  is reachable from the current branch; that the worktree copy equals the
+  committed copy; that the commit adds only that one approval file; that
+  the embedded payload hashes to its own digest; and that the digest equals
+  the current state's digest (an approval of spec v2 does not cover v3).
+  It reads no signature, key, channel, or account, and none exists to read.
+- **Approvers in `config.yaml`.** `approvers:` is a display list and the
+  `--who` default: `- name: brad`. When the list is non-empty, `--who` must
+  name one of its entries (case-insensitive; the configured spelling is
+  recorded), so a record cannot attribute a yes to someone who is not an
+  approver. No fingerprints, keys, or channel ids are configured, stored,
+  or required. The block is human-owned and guarded only by a string-match
+  hook, like the rest of the config. A config change changes the config
+  hash, so G4 needs a new recorded yes; at EXPLORE an unapproved config is
+  disclosed rather than blocked.
+- **Legacy records.** Records written before this change (v1/v2 — signed,
+  unsigned, Telegram, or chat) carry no `approval` block and therefore no
+  verbatim yes. They are **MALFORMED**: `dda approved` never prints them as
+  a chat yes, and no gate — PUBLISH included — passes on one. `dda approve`
+  retires such a file in its own commit and records the chat yes in a
+  second commit, so the exact content ends up with a verbatim yes on file;
+  until that happens the content fails closed.
+- **No fallback.** There is no unsigned-but-passes path, no downgrade, and
+  no relay: if the record is missing, stale, or malformed, the gate fails
+  and the analysis parks (§3.2, case 9). A chat yes is cheap to record; a
+  gate that guesses is not.
 
 ## 5. Review rounds (elephant / goldfish)
 
@@ -633,9 +561,9 @@ eval (§9) to the round list.
 | Tier | Rung | Pre-data | Post-result | Human |
 |---|---|---|---|---|
 | EXPLORE | any | rounds 1 and 3, self cold re-read | rounds 1 and 2, self | none |
-| DECIDE | glance | rounds 1 and 3, one goldfish call | rounds 1 and 2, one goldfish call | tier + spec approval (one signed commit) |
+| DECIDE | glance | rounds 1 and 3, one goldfish call | rounds 1 and 2, one goldfish call | tier + spec approval (one recorded chat yes) |
 | DECIDE | quick-cut and up | all 5 rounds, goldfish call | all 5 rounds, goldfish call | tier + spec + config approval before lock |
-| PUBLISH | quick-cut and up | all 5, goldfish + second goldfish on round 3 | all 5, two goldfish calls | tier + spec + config approval; signed report sign-off (all verified) |
+| PUBLISH | quick-cut and up | all 5, goldfish + second goldfish on round 3 | all 5, two goldfish calls | tier + spec + config approval; report sign-off (all recorded chat yeses) |
 
 Self re-reads are written to `reviews/self/` by the agent (the one
 `reviews/` path `evidenceguard` allows) and labelled `self` in the footer.
@@ -764,8 +692,8 @@ plugin must not block any of that.
 - Applies to bound sessions only (§6.0). It never computes the lock hash
   on the hot path; it reads the cached lock state (§6.9).
 - The block message names the fix: "Lock the spec (`dda lock`)",
-  "Re-lock after your spec edit", "Use `dda run`", or "Approve the
-  config (`dda approve config`)".
+  "Re-lock after your spec edit", "Use `dda run`", or "Record Brad's
+  chat yes for the config (`dda approve config --yes "..."`)".
 
 ### 6.2 `evidenceguard` — pre_tool_call, BLOCKS
 
@@ -794,9 +722,9 @@ plugin must not block any of that.
 | `audit.log` | `dda run` (parent, importing the kernel's IPC events) | chain (§4.4) |
 | `spec.lock`, `specs/`, `ledger.md` | `dda lock` | lock commit, chain |
 | `specs-tried.jsonl` | `dda variant`, `dda run` | chain |
-| `approvals/` | human, via `dda approve` in their own terminal | signature (§4.5) |
+| `approvals/` | human, via `dda approve` in their own terminal | Brad's chat yes, verbatim (§4.5) |
 | `approvals.index.jsonl` | `dda approved` | chain |
-| `config.yaml` | human | config approval chain (§4.5) |
+| `config.yaml` | human | recorded config yes for this hash (§4.5) |
 | `~/.hermes-home/dda/**` | `dda`, hooks | heads mirror, session bindings |
 
 - `dda` subcommands pass through; they enforce their own rules.
@@ -804,7 +732,7 @@ plugin must not block any of that.
   an active workdir's `.analysis/` is logged to the unbound-access log
   and fails the next chain or gate check.
 - Detection backstop: chain verification (§4.4), lock commits (§4.2),
-  the config approval chain (§4.5), and the G9 committed-file allowlist
+  the recorded config yes (§4.5), and the G9 committed-file allowlist
   (every committed file is agent-writable work or an exact-path dda
   control file with its hash in the G9 manifest, §11).
 
@@ -832,11 +760,11 @@ plugin must not block any of that.
   slug, lock hash, or file path). An ordinary vault note in an unbound
   session, or an unrelated note in a bound one, is never touched.
 - In a bound session, a publish-channel call carrying the workdir's
-  report is also blocked when the tier is below PUBLISH or the verified
+  report is also blocked when the tier is below PUBLISH or the recorded
   sign-off is missing ("raise the tier and get sign-off first").
 - Blocks when the footer is missing, a field is empty, or a recomputable
   field is wrong: lock hash, spec version, lock label, N/K counts,
-  definition pins, snapshot hashes, approval status. It calls
+  definition pins, snapshot hashes, recorded approvals. It calls
   `dda footer --check`, which recomputes these from the evidence files.
 - Chat cannot be checked by a hook. A chat answer is disclosure only; the
   checked copy is `answer.md` (glance) or the report.
@@ -917,9 +845,9 @@ point `hooks/dda_hook.py <hook-name>` that shares code with `dda`.
   lock. An unbound session with no root match exits after two small file
   reads (§6.0).
 
-`dda doctor` checks hook registration, the interpreter path, approver
-key setup (§4.5), the active-workdir list, and that the heartbeat is
-live.
+`dda doctor` checks hook registration, the interpreter path, the
+active-workdir list, and that the heartbeat is live. It checks no keys:
+approvals carry none (§4.5).
 
 ## 7. Human-owned definitions
 
@@ -933,7 +861,7 @@ live.
   changed without a version bump fails.
 - The agent may read and cite, and may only **propose** new or changed
   definitions in `definitions/proposals/`. A human merges, bumps the
-  version, and records a signed `definition` approval (§4.5).
+  version, and records a `definition` approval — the chat yes, verbatim (§4.5).
 - Specs cite pins only, one pin per Metrics line (pins-only grammar — an
   optional alias reference, then the pin, then optional formula-free
   prose). A Metrics line that computes fails G1; a formula in prose
@@ -949,7 +877,7 @@ An empty or wrong field fails G8 and is blocked by `footercheck`.
 
 | Field | Checked against |
 |---|---|
-| Question and tier/rung; tier confirmed by (agent / human-verified / human-unverified) | spec, approvals |
+| Question and tier/rung; tier confirmed by (agent / Brad's recorded yes) | spec, approvals |
 | Spec version, lock hash (short), lock timestamp, lock label (pre-data / pre-data prior exposure / post-data) | `spec.lock`, ledger |
 | Amendments: count, post-data count | ledger |
 | Variants: N tried (incl. spec versions), K reported, locked variant id; labels present | specs-tried, report text |
@@ -957,8 +885,8 @@ An empty or wrong field fails G8 and is blocked by `footercheck`.
 | Data: source alias, as-of, row count, snapshot hash or fingerprint per source; drift since snapshot | profile, verify |
 | Kernel: environment lock hash, seed, network policy (enforced or detect-only, per library), audit-hook and wrapper status | kernel record |
 | Reproduce: one `dda` command that regenerates outputs from the locked variant | variants/ |
-| Review: rounds run, by whom (self / every goldfish round's request id and model / human), approver fingerprints, config approval status | reviews/, approvals.index.jsonl |
-| Approvals: kinds present, verified or unverified | approvals/ |
+| Review: rounds run, by whom (self / every goldfish round's request id and model / human), config approval status | reviews/, approvals.index.jsonl |
+| Approvals: kinds present, each with who said yes, when, and the exact digest | approvals/ |
 | Correction evals: matched, run, passed | verify.md |
 | Hook faults and chain status | heartbeat, verify-chain |
 | Caveats: known limits in one or two lines | not checked (human-readable) |
@@ -983,7 +911,7 @@ timezone error, wrong denominator), the `correct` skill drafts a case in
 
 Rules:
 
-- A case becomes binding only with a signed `correction` approval (§4.5).
+- A case becomes binding only with a recorded chat yes for that exact case (§4.5).
 - **Matching is mechanical and typed.** `dda evals match` selects every
   binding case whose trigger keys intersect the spec side by set
   intersection: `alias:` keys against the locked source aliases, `def:`
@@ -1242,11 +1170,11 @@ References: `economy-tier-ladder.md`, `review-rounds.md`,
 | No data before lock | `lockguard` (all tools, bound sessions), kernel audit hook, native lockdown and wrappers (§10.1b) | G4 scan of `runs.log`, `audit.log`, unbound-access log | lock label, prior exposure |
 | Spec edits after lock are amendments | `lockguard` hash match, `driftnudge` | G4 recompute, lock commits | amendment and post-data counts |
 | Evidence not edited | `evidenceguard` | chain verify against mirrored heads | chain status |
-| Config not edited to dodge rules | `evidenceguard` | config hash in lock; G4 config approval through the approver chain | config approval status, approver fingerprints |
+| Config not edited to dodge rules | `evidenceguard` | config hash in lock; G4 recorded config yes for that hash | config approval status, who and when |
 | All variants logged | `runlog`, kernel-only data path | G6 orphan-run check | N tried / K reported |
 | Definitions human-owned | `defguard` | content-hash pins at G1/G4/G8; G7 round 4 (G) | pins, provisional flag |
 | Raw data immutable | `rawguard`, audit hook, duckdb/polars/pyarrow write refusals | G7 snapshot re-check | snapshot hashes |
-| Approvals genuine | `lockguard` and `evidenceguard` on signing and `approvals/`; `dda doctor` key checks downgrade on failure | `dda approved` signature, approver chain, reachability | verified / unverified |
+| Approvals recorded | `dda approve` is human-only: `hookentry` refuses it from any agent tool call, and `lockguard`/`evidenceguard` block agent signing and agent commits of `approvals/` | `dda approved` resolves a committed record for the exact digest, on this branch, one added file, payload hashes to digest | who said yes, when, the words, the digest |
 | Tier honest | G2 triggers | human tier approval (H) | tier confirmed by |
 | Goldfish isolated | one-shot call with no tools, packet inlined, templated brief built by `dda` | every call recorded with request, packet, and brief hashes; G3/G7 count all calls | goldfish request ids, models |
 | Reports carry true provenance | `footercheck` (reports, `answer.md`, publish channels) | G8 value recompute | the footer itself |
@@ -1276,9 +1204,8 @@ hook false-positive blocks left unfixed.
    `terminal`, `execute_code`, `read_file`, `search_files`, `web_extract`,
    `tool_call`, the browser, a kernel variable path, and a `config.yaml`
    edit; editing `runs.log` and `spec.lock`; forging an approval file and
-   an unsigned approval commit; an approval signed through a cached
-   `gpg-agent` passphrase, a loaded `ssh-agent` key, and global
-   `commit.gpgsign=true`; a config edit that adds an approver key. It
+   committing it from the agent; an approval claimed with no chat yes
+   behind it. It
    also checks whether hooks fire in subagent sessions, whether
    `tool_call` exposes the inner tool name to hooks, and whether the
    payload carries parent-session or compression lineage. Added for
@@ -1309,8 +1236,8 @@ hook false-positive blocks left unfixed.
 3. Kernel runner with audit hook, native lockdown and reader wrappers,
    `dda meta`, variants with freeze-on-first-run, specs-tried ledger, and
    the orphan check.
-4. Approvals (`dda approve` / `dda approved`, approver chain, config
-   approval at G4, key checks in `dda doctor`).
+4. Approvals (`dda approve --yes` / `dda approved`: the chat yes recorded
+   verbatim, config approval at G4).
 5. `footercheck`, `dda footer --check`, `report`, and `dda gitcheck`.
 6. `definitions`, `defguard`, and content-hashed pins.
 7. `goldfish-review` (packet, `dda review run` one-shot call, recording).
@@ -1345,21 +1272,17 @@ hook false-positive blocks left unfixed.
    packet inlined and no tools (§5.0). It keeps the intent of the
    original decision (a fresh, context-free reviewer) without the tool
    surface. **Needs Brad's confirmation.**
-7. **Approval mechanism: DECIDED 2026-11-06 — signed approver commits.**
-   Brad generated an SSH `ed25519` key with a passphrase
-   (`C:\Users\bmtrn\.ssh\dda_signing`, fingerprint
-   `SHA256:4ntXMUfsddmYgfM8kddKrKTq2nTdB3Qy/cSUPR0kJWw`); the private
-   key and passphrase stay with Brad alone. Signing cache is off
-   (`~/.gnupg/gpg-agent.conf`: `ignore-cache-for-signing`,
-   `default-cache-ttl 0`, `max-cache-ttl 0`), no approver key sits in
-   any reachable agent, and `commit.gpgsign` stays unset so `dda`'s own
-   commits are unsigned (§4.5). A Telegram confirmation from Brad's
-   signed-in account counts the same at every tier, PUBLISH included
-   (CONFIRMED vs VERIFIED, the record shows which). Without a key,
-   DECIDE runs with disclosed unverified approvals and PUBLISH parks.
-   Redirect 2026-11-06 (Brad): no passphrase — Telegram CONFIRMED is the
-   primary path (§4.5; equal at every tier, PUBLISH included). The
-   signed-key path stays wired as optional/reserve; nothing blocks on it.
+7. **Approval mechanism: DECIDED 2026-11-25 (Brad) — the chat yes, recorded
+   verbatim.** An approval is Brad saying yes in chat, recorded with the
+   exact words, who said them, when he said them, and the exact digest
+   (§4.5). All verification machinery is removed: no signing keys, no
+   key passphrases, no Telegram message ids, no approver chain, no
+   `dda doctor` key checks. Accepted consequence, on the record: a record
+   cannot prove who typed it, so cryptographic proof of *who* approved is
+   gone; the record shows what was said and when. This supersedes and
+   withdraws the 2026-11-06 signed-commit decision and its Telegram
+   CONFIRMED redirect; both paths are deleted from the build, not kept as
+   a reserve.
 8. **Second-goldfish model: DECIDED 2026-11-06 — reviewer independence,
    not a model pick.** The rule is different model families when
    available, resolved at runtime through config `goldfish_models`
@@ -1379,7 +1302,7 @@ hook false-positive blocks left unfixed.
 | 2 | Jupyter with full tool access contradicts §10 | Threat model (§0.1); kernel-only data path, audit hook, display masking (§10); decision 4 revised |
 | 3 | `lockguard` matcher incomplete | All tools incl. `search_files`, `web_extract`, `tool_call`, browser; URL and tool-pattern roots (§6.1) |
 | 4 | Goldfish isolation broken | Read-only packet tools, templated brief, output recorded from session state, different models (§5.0); decision 6 revised |
-| 5 | Approvals forgeable; no-human contexts undefined | Signed approval commits (§4.5); stop-and-park (§3.2) |
+| 5 | Approvals forgeable; no-human contexts undefined | Owner decision 2026-11-25: the chat yes, recorded verbatim, is the approval; the chat holds the identity claim, the record shows words and time (§4.5); stop-and-park (§3.2) |
 | 6 | Post-data amendment launders exploratory results | `post-data-locked` label; rounds 1+3 plus human at DECIDE+; cap; spec versions count as variants (§3.1) |
 | 7 | Agent sets its own tier | Mechanical triggers, human confirmation, raise/lower rules; tier stored only in spec (§2.2) |
 | 8 | Pre-lock boundary undefined | Metadata-only allowance via `dda meta` (§3.3) |
@@ -1410,18 +1333,18 @@ noted.
 | 1 | `delegate_task` cannot restrict subagent tools, so the goldfish inherits terminal, web, `tool_call`, chat history, RAG; packet scoping and brief hash unenforced | Goldfish is a one-shot provider call by `dda review run` with no tools and the packet inlined; brief hash is of the bytes sent; every call recorded and counted (closes "goldfish shopping"); packets committed, not in scratch (§1, §5.0, decision 6) |
 | 2 | duckdb, polars, pyarrow do native I/O the audit hook never sees; `audit-enforced` footer would be false | Kernel bootstrap: duckdb `allowed_directories`, extension autoinstall/autoload off, `enable_external_access=false`, `lock_configuration=true`, COPY/EXPORT/ATTACH refusals; polars/pyarrow reader and writer wrappers; footer downgrades to `detect-only` for any path that escapes phase 0 (§10.1, §10.1b, §14) |
 | 3 | `evidenceguard` blocks variants, `answer.md`, `profile.md`, `verify.md`, self reviews | Writer table: every `.analysis/` path has one named writer; agent paths are `spec.md`, `wayfinder.md`, variants until first run, `answer.md`, `reviews/self/`, `notes/`; `profile.md`/`verify.md` written by `dda` (§4, §4.3, §6.2) |
-| 4 | Approver keys and config hash sit in a hook-guarded file; no gate needs a config approval | G4 needs a `config` approval for the exact config hash; approver chain (TOFU root, later key changes signed by a previous key); fingerprints in every footer; kernel packages moved to `kernel.yaml` outside the config hash (§3, §4.5, §10.1a) |
-| 5 | `gpg-agent` cache, Windows `ssh-agent`, global `commit.gpgsign`, contradictory approvals format, unverified at PUBLISH unspecified | Doctor key checks downgrade approvals (fail, not warn); `ed25519-sk` preferred; `dda` commits with signing forced off; `lockguard` blocks `-c commit.gpgsign=true`; per-approval files plus a chained index; unverified ok at DECIDE with disclosure, never at PUBLISH (§4.4, §4.5, §3.2) |
+| 4 | Approver names and config hash sit in a hook-guarded file; no gate needs a config approval | G4 needs a recorded config yes for the exact config hash; `approvers:` is a display list of names only, with no key material to protect; the config approval appears in every footer; kernel packages moved to `kernel.yaml` outside the config hash (§3, §4.5, §10.1a) |
+| 5 | signing-agent cache, Windows `ssh-agent`, global `commit.gpgsign`, contradictory approvals format, weak approvals at PUBLISH unspecified | Verification machinery removed by owner decision 2026-11-25: one approvals format (`dda-approval-v3`, the chat yes verbatim); no keys or agents to borrow; `dda` commits with signing forced off and `lockguard` still blocks `-c commit.gpgsign=true`; per-approval files plus a chained index; one passing state at every tier, PUBLISH included (§4.4, §4.5, §3.2) |
 | 6 | Hooks can't be dependency-free shell; interpreter unnamed; `python3` missing here; 5 s timeout | Python hooks in one entry point, absolute interpreter path into the plugin's own uv venv, fail-closed catch-all for bound sessions, lock-state cache keyed on mtime/size, 300 ms target (§6.9) |
 | 7 | Concurrent hooks fork the hash chain (the kernel never appends: the parent imports its IPC events after exit) | One locked appender (`msvcrt.locking`/`flock`), `seq` assigned under the lock, spill files on timeout merged by `dda`, kernel traffic via parent IPC import; phase 0 concurrency test (§4.4, §14) |
 | 8 | Profile-wide hooks block Brad's everyday sessions; no workdir release; vault matcher too broad | Hooks no-op for unbound sessions; unbound reads of active roots logged and labelled post-data at G4 (also catches workdir hopping); `dda release` at G9; `footercheck` matches publish calls only when they carry the bound workdir's report; rebinding logged (§6.0, §6.5, §3) |
 
 Folded in from the partial/smaller lists: goldfish shopping (#4),
 workdir hopping and rebinding (#6/9), publish-channel tier check (#7),
-variant body-hash freeze (#18), stop-and-ask additions for unverified
-PUBLISH approvals (#16), config-hash churn from kernel packages, heads
+variant body-hash freeze (#18), stop-and-ask additions for missing or
+stale approvals (#16), config-hash churn from kernel packages, heads
 mirror overclaim, wayfinder gate lines recomputed, packet pruning.
-Still open from the re-review: definition pins tied to signed approval
+Still open from the re-review: definition pins tied to approval
 hashes (#11), as-of-bounded replay and float/row-order tolerance (#12),
 connector `tool_call` variant ids and masking (#15, #18), PII scrubbing
 of blobs, history-rewrite blocking before push, tier triggers that rely

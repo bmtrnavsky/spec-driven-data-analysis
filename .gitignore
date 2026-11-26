@@ -2,3 +2,10 @@
 __pycache__/
 *.pyc
 redteam/out/
+
+# DDA hand-test run dirs: raw data, never committed (SPEC §11)
+runs/
+
+# Local scratch: pre-change file backups and Turing progress notes
+backups/
+.turing/

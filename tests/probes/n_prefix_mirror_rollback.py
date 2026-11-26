@@ -48,9 +48,9 @@ try:
     assert f.cli("profile")[0] == 0, "re-profile failed"
     (f.wd.analysis / "answer.md").write_text(
         "# Answer\n\nConversion rose.\n", encoding="utf-8")
-    assert f.cli("approve", "spec", "--no-sign")[0] == 0
+    assert f.cli("approve", "spec", "--yes", "yes, ship it", "--who", "brad")[0] == 0
     assert f.cli("approved", "spec")[0] == 0
-    assert f.cli("approve", "signoff", "--no-sign")[0] == 0
+    assert f.cli("approve", "signoff", "--yes", "yes, ship it", "--who", "brad")[0] == 0
     assert f.cli("approved", "signoff")[0] == 0
     assert _lin.lineage(f.wd).get("results_seen_before_profile"), \
         "fixture must start EXPOSED"

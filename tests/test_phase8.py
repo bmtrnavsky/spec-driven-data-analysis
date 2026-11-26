@@ -345,7 +345,7 @@ class TestG2(P8Setup):
         self.lock()
         rc, out = self.cli("gate", "G2")
         self.assertNotEqual(rc, 0, f"G2 passed DECIDE with no tier approval: {out}")
-        self.assertEqual(self.cli("approve", "tier", "--no-sign")[0], 0)
+        self.assertEqual(self.cli("approve", "tier", "--yes", "yes, ship it", "--who", "brad")[0], 0)
         self.assertEqual(self.cli("approved", "tier")[0], 0)
         rc, out = self.cli("gate", "G2")
         self.assertEqual(rc, 0, f"G2 failed DECIDE with tier approval: {out}")

@@ -1,14 +1,14 @@
-"""The approval relay: Brad's chat yes in, CONFIRMED record out (§4.5).
+"""The approval record, end to end: Brad's chat yes in, RECORDED out (§4.5).
 
-Exercises scripts/dda_relay.py end to end on test ids: unknown senders
-are refused before anything is written, and a configured sender's ids come
-back as a CONFIRMED record the `dda approved` walk accepts. Live ids from
-Brad are never used here — the first live run is a supervised test on its
-own fixture (see the run report), not this suite.
+The relay is deleted. There is no `dda_relay`, no Telegram/chat channel, no
+signing passphrase, and no `--no-sign`: an approval IS the words Brad said,
+recorded verbatim with who and when, committed as exactly one approval file,
+and re-read by `dda approved`. This file keeps its historical name but
+exercises the chat-yes path from the CLI through the gate.
 
 Run: DDA_TEST_MODE=1 python -m unittest tests.test_approval_relay
 """
-import os
+import json
 import subprocess
 import sys
 import unittest
@@ -19,18 +19,21 @@ sys.path.insert(0, str(REPO / "scripts"))
 
 from tests.test_phase7 import P7Setup  # noqa: E402
 
-RELAY = str(REPO / "scripts" / "dda_relay.py")
-BRAD_TG = "3080738179"
+YES = "yes — ship it, the numbers check out"
+WHO = "brad"
 
 
-class _RelaySetup(P7Setup):
+class ChatYesSetup(P7Setup):
+    """A PUBLISH workdir with one configured approver, locked and reviewed."""
+
     TIER = "This is a PUBLISH analysis."
+    WHO = WHO
 
     def setUp(self):
         super().setUp()
         self.wd.config_path.write_text(
             self.wd.config_path.read_text(encoding="utf-8")
-            + f"approvers:\n  - name: brad\n    telegram_user_id: \"{BRAD_TG}\"\n",
+            + f"approvers:\n  - name: {self.WHO}\n",
             encoding="utf-8")
         rc, out = self.cli("lock")
         self.assertEqual(rc, 0, out)
@@ -38,183 +41,155 @@ class _RelaySetup(P7Setup):
         rc, out = self.cli("review", "run", "teardown", stub="pass")
         self.assertEqual(rc, 0, out)
 
-    def relay(self, *args):
-        env = dict(self.env)
-        p = subprocess.run([sys.executable, RELAY] + list(args),
-                           capture_output=True, text=True, env=env, cwd=str(self.wd.root))
-        return p.returncode, p.stdout + p.stderr
+    # --- actions -----------------------------------------------------
+    def record(self, kind="spec", *extra, yes=YES, who=None, when=None):
+        args = list(extra)
+        if who is not None:
+            args += ["--who", who]
+        if when is not None:
+            args += ["--when", when]
+        return self.cli("approve", kind, "--yes", yes, *args)
 
-    def digest(self, kind="spec"):
+    def approved(self, kind="spec", *extra):
+        return self.cli("approved", kind, *extra)
+
+    # --- reads -------------------------------------------------------
+    def verdict(self, kind="spec", artifact=None):
         from ddalib import approvals
         from ddalib.layout import Workdir
-        return approvals.current_digest(Workdir.at(self.wd.root), kind)
+        return approvals.verify_approval(Workdir.at(self.wd.root), kind, artifact)
+
+    def record_file(self, kind="spec"):
+        files = sorted((self.wd.analysis / "approvals").glob(f"{kind}-*.json"))
+        self.assertTrue(files, f"no {kind} approval file was written")
+        return files[-1]
+
+    def git(self, *args):
+        return subprocess.run(["git", "-C", str(self.wd.root), *args],
+                              capture_output=True, text=True, check=True).stdout
 
 
-class TestRelayRefusals(_RelaySetup):
-    def test_unknown_sender_refused_before_any_write(self):
-        before = subprocess.run(["git", "-C", str(self.wd.root), "rev-list", "--count", "HEAD"],
-                                capture_output=True, text=True).stdout.strip()
-        approvals_dir = self.wd.root / ".analysis" / "approvals"
-        before_files = set(approvals_dir.iterdir()) if approvals_dir.is_dir() else set()
-        rc, out = self.relay("relay", "--channel", "telegram",
-                             "--user-id", "1234567", "--message-id", "99",
-                             "--kind", "spec", str(self.wd.root))
-        print("\n[relay refuse] rc=%d\n%s" % (rc, out.strip()))
-        self.assertEqual(rc, 2, out)
-        self.assertIn("not a configured approver", out)
-        after = subprocess.run(["git", "-C", str(self.wd.root), "rev-list", "--count", "HEAD"],
-                               capture_output=True, text=True).stdout.strip()
-        self.assertEqual(before, after)  # no commit written
-        after_files = set(approvals_dir.iterdir()) if approvals_dir.is_dir() else set()
-        self.assertEqual(before_files, after_files)  # no approval file written
-
-    def test_unknown_channel_refused(self):
-        rc, out = self.relay("relay", "--channel", "smoke", "--user-id", BRAD_TG,
-                             "--message-id", "99", "--kind", "spec", str(self.wd.root))
-        self.assertEqual(rc, 2, out)
-
-    def test_malformed_ids_refused(self):
-        rc, out = self.relay("relay", "--channel", "telegram", "--user-id", BRAD_TG,
-                             "--message-id", "not-a-number", "--digest", self.digest(),
-                             "--kind", "spec", str(self.wd.root))
-        self.assertNotEqual(rc, 0, out)
-        self.assertIn("numeric id", out)
-
-    def test_fetch_without_token_refuses(self):
-        env = {k: v for k, v in os.environ.items() if k != "TELEGRAM_BOT_TOKEN"}
-        env["DDA_HOME"] = str(self.tmp / "home")
-        p = subprocess.run([sys.executable, RELAY, "fetch",
-                            "--chat-id", "-5534695543", "--user-id", BRAD_TG],
-                           capture_output=True, text=True, env=env)
-        self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
-        self.assertIn("TELEGRAM_BOT_TOKEN is not set", p.stdout + p.stderr)
-
-
-class TestRelayHappyPath(_RelaySetup):
-    def test_test_ids_in_confirmed_record_out(self):
-        rc, out = self.relay("relay", "--channel", "telegram",
-                             "--user-id", BRAD_TG, "--message-id", "7000001",
-                             "--digest", self.digest(),
-                             "--kind", "spec", str(self.wd.root))
-        print("\n[relay happy] rc=%d\n%s" % (rc, out.strip()))
+class TestRecordWalks(ChatYesSetup):
+    def test_recording_writes_one_committed_v3_record(self):
+        rc, out = self.record()
+        print("\n[approve] rc=%d\n%s" % (rc, out.strip()))
         self.assertEqual(rc, 0, out)
-        self.assertIn(f"CONFIRMED via telegram user {BRAD_TG}, message 7000001", out)
-        self.assertIn("CONFIRMED - Telegram user 3080738179, message 7000001", out)
-        rc, out = self.cli("approved", "spec")
+        self.assertIn("recorded spec", out)
+        self.assertIn(f"chat yes from {WHO} at", out)
+        self.assertIn(YES, out)
+
+        path = self.record_file()
+        rec = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(rec["format"], "dda-approval-v3")
+        self.assertEqual(rec["kind"], "spec")
+        self.assertEqual(rec["method"], "chat-yes")
+        self.assertEqual(rec["approval"]["who"], WHO)
+        self.assertEqual(rec["approval"]["yes"], YES)
+        self.assertTrue(rec["approval"]["when"])
+        self.assertTrue(rec["digest"])
+        self.assertEqual(rec["digest"], rec["artifact"])
+        # No channel, signature, or message id survives in the record.
+        for gone in ("telegram", "chat", "keyid", "signature", "unsigned"):
+            self.assertNotIn(gone, rec)
+        # The commit adds exactly the one approval file.
+        sha = self.git("rev-parse", "HEAD").strip()
+        names = self.git("show", "--pretty=format:", "--name-status", sha).strip()
+        rel = path.relative_to(self.wd.root).as_posix()
+        self.assertEqual(names, f"A\t{rel}")
+        msg = self.git("log", "-1", "--format=%s").strip()
+        self.assertIn(f"chat yes from {WHO} at", msg)
+        # Nothing was signed: the yes is the approval, not a key.
+        self.assertEqual(self.git("log", "-1", "--format=%G?").strip(), "N")
+
+    def test_approved_reports_the_recorded_yes(self):
+        rc, out = self.record()
         self.assertEqual(rc, 0, out)
-        self.assertIn("CONFIRMED - Telegram user 3080738179, message 7000001", out)
-
-
-class TestRelayPinsAndReplays(_RelaySetup):
-    """Opus probe regressions: digest pin, replay, trailer, stale footer."""
-
-    def test_digest_required(self):
-        rc, out = self.relay("relay", "--channel", "telegram",
-                             "--user-id", BRAD_TG, "--message-id", "7000011",
-                             "--kind", "spec", str(self.wd.root))
-        self.assertNotEqual(rc, 0, out)
-        self.assertIn("--digest", out)
-
-    def test_digest_mismatch_refuses_before_any_write(self):
-        before = subprocess.run(["git", "-C", str(self.wd.root), "rev-list", "--count", "HEAD"],
-                                capture_output=True, text=True).stdout.strip()
-        rc, out = self.relay("relay", "--channel", "telegram",
-                             "--user-id", BRAD_TG, "--message-id", "7000012",
-                             "--digest", "0" * 64,
-                             "--kind", "spec", str(self.wd.root))
-        self.assertNotEqual(rc, 0, out)
-        self.assertIn("state moved since", out)
-        after = subprocess.run(["git", "-C", str(self.wd.root), "rev-list", "--count", "HEAD"],
-                               capture_output=True, text=True).stdout.strip()
-        self.assertEqual(before, after)
-
-    def test_short_artifact_refused(self):
-        # Probe-D2: a bare token where the digest goes does not write.
-        rc, out = self.relay("relay", "--channel", "telegram",
-                             "--user-id", BRAD_TG, "--message-id", "7000013",
-                             "--digest", self.digest(), "--artifact", "d",
-                             "--kind", "spec", str(self.wd.root))
-        self.assertNotEqual(rc, 0, out)
-        self.assertIn("16+", out)
-
-    def test_reused_message_id_refused(self):
-        # Probe-B: the same message id cannot confirm twice — after the
-        # state moves, relaying the old yes against the new digest fails.
-        rc, out = self.relay("relay", "--channel", "telegram",
-                             "--user-id", BRAD_TG, "--message-id", "7000055",
-                             "--digest", self.digest(),
-                             "--kind", "spec", str(self.wd.root))
+        rc, out = self.approved()
+        print("\n[approved] rc=%d\n%s" % (rc, out.strip()))
         self.assertEqual(rc, 0, out)
-        self.wd.spec_path.write_text(
-            self.wd.spec_path.read_text(encoding="utf-8") + "\nextra line\n", encoding="utf-8")
-        rc, out = self.relay("relay", "--channel", "telegram",
-                             "--user-id", BRAD_TG, "--message-id", "7000055",
-                             "--digest", self.digest(),
-                             "--kind", "spec", str(self.wd.root))
-        self.assertNotEqual(rc, 0, out)
-        self.assertIn("already confirms", out)
+        self.assertRegex(out, r"spec [0-9a-f]{16}: RECORDED - chat yes from brad at \S+")
+        self.assertIn(YES, out)
+        v = self.verdict()
+        self.assertEqual(v["state"], "recorded", v)
+        self.assertTrue(v["recorded"], v)
+        self.assertEqual(v["who"], WHO)
+        self.assertEqual(v["yes"], YES)
+        self.assertEqual(v["method"], "chat-yes")
 
-    def test_replayed_record_reads_bad_sig(self):
-        # Probe-B shape, hand-made: the same message id committed against
-        # a different digest verifies BAD_SIG, not CONFIRMED.
-        import json
+    def test_approved_indexes_the_verdict(self):
         from ddalib import approvals
         from ddalib.layout import Workdir
-        wd = Workdir.at(self.wd.root)
-        rc, out = self.relay("relay", "--channel", "telegram",
-                             "--user-id", BRAD_TG, "--message-id", "7000077",
-                             "--digest", self.digest(),
-                             "--kind", "spec", str(self.wd.root))
-        self.assertEqual(rc, 0, out)
-        self.wd.spec_path.write_text(
-            self.wd.spec_path.read_text(encoding="utf-8") + "\nTarnish.\n", encoding="utf-8")
-        d2, payload2 = approvals.canonical_payload(wd, "spec")
-        f = sorted((self.wd.analysis / "approvals").glob("spec-*.json"))[0]
-        rec = json.loads(f.read_text(encoding="utf-8"))
-        rec["digest"] = d2
-        rec["payload"] = payload2
-        rec["telegram"]["digest"] = d2
-        g = self.wd.analysis / "approvals" / f"spec-{d2[:16]}.json"
-        g.write_text(json.dumps(rec, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        subprocess.run(["git", "-C", str(self.wd.root), "add", "--", str(g)], check=True)
-        subprocess.run(["git", "-C", str(self.wd.root), "-c", "commit.gpgsign=false", "commit",
-                        "-q", "-m", "re-confirm spec",
-                        "-m", "Dda-Approval-Method: telegram",
-                        "-m", f"Dda-Telegram-User: {BRAD_TG}",
-                        "-m", "Dda-Telegram-Message: 7000077"], check=True)
-        v = approvals.verify_approval(wd, "spec")
-        self.assertEqual(v["state"], "bad_sig", v)
-        self.assertIn("already confirms", v["reason"])
+        self.assertEqual(self.record()[0], 0)
+        self.assertEqual(self.approved()[0], 0)
+        rows = approvals.index_approvals(Workdir.at(self.wd.root), "spec")
+        self.assertTrue(rows, "`dda approved` wrote no verdict to the index")
+        row = rows[-1]
+        self.assertEqual(row["state"], "recorded")
+        self.assertTrue(row["recorded"])
+        self.assertEqual((row["who"], row["yes"]), (WHO, YES))
 
-    def test_trailer_planting_note_refused(self):
-        # Probe-F: a note smuggling a Dda- trailer never reaches a commit.
-        rc, out = self.relay("relay", "--channel", "telegram",
-                             "--user-id", BRAD_TG, "--message-id", "7000088",
-                             "--digest", self.digest(), "-m", "ok\n\nDda-Chain-Head: x",
-                             "--kind", "spec", str(self.wd.root))
-        self.assertNotEqual(rc, 0, out)
-        self.assertIn("Dda-", out)
+    def test_recorded_yes_passes_the_publish_gate(self):
+        self.assertEqual(self.record()[0], 0)
+        rc, out = self.cli("gate", "G3")
+        print("\n[gate G3 @PUBLISH] rc=%d\n%s" % (rc, out.strip()))
+        self.assertEqual(rc, 0, f"G3 refused a recorded chat yes at PUBLISH: {out}")
 
-    def test_stale_confirmation_renders_no_channel(self):
-        # Probe-E: after the state moves, no live CONFIRMED approval
-        # remains, so the footer names no channel.
-        from ddalib import approvals
+    def test_requirements_table_accepts_recorded_at_publish(self):
+        from ddalib import requirements
         from ddalib.layout import Workdir
-        wd = Workdir.at(self.wd.root)
-        rc, out = self.relay("relay", "--channel", "telegram",
-                             "--user-id", BRAD_TG, "--message-id", "7000099",
-                             "--digest", self.digest(),
-                             "--kind", "spec", str(self.wd.root))
+        self.assertEqual(self.record()[0], 0)
+        ok, notes, info = requirements.require(Workdir.at(self.wd.root), "G3")
+        self.assertEqual(info["tier"], "PUBLISH")
+        self.assertTrue(ok, notes)
+        self.assertTrue(any("chat yes from brad" in n for n in notes), notes)
+
+
+class TestNoYesNoApproval(ChatYesSetup):
+    def test_no_record_is_missing_and_the_gate_refuses(self):
+        rc, out = self.approved()
+        print("\n[approved, nothing recorded] rc=%d\n%s" % (rc, out.strip()))
         self.assertEqual(rc, 0, out)
-        self.assertEqual(self.cli("approved", "spec")[0], 0)
-        self.assertEqual(approvals.confirmed_channels(wd), ["Telegram"])
-        self.wd.spec_path.write_text(
-            self.wd.spec_path.read_text(encoding="utf-8") + "\nTarnish.\n", encoding="utf-8")
-        self.assertEqual(approvals.confirmed_channels(wd), [])
-        v = approvals.verify_approval(wd, "spec")
-        self.assertNotEqual(v["state"], "confirmed", v)
-        from ddalib import footer
-        self.assertNotIn("confirmed (Telegram)", footer.skeleton(wd))
+        self.assertRegex(out, r"spec spec: MISSING - no chat yes on record")
+        self.assertIn("dda approve spec --yes", out)
+        self.assertEqual(self.verdict()["state"], "missing")
+        rc, out = self.cli("gate", "G3")
+        self.assertNotEqual(rc, 0, f"G3 passed PUBLISH with no recorded yes: {out}")
+
+    def test_changing_content_needs_a_new_yes(self):
+        self.assertEqual(self.record()[0], 0)
+        self.assertEqual(self.cli("gate", "G3")[0], 0)
+        old = json.loads(self.record_file().read_text(encoding="utf-8"))["digest"]
+        # The state moves: the recorded yes covers the old spec, not this one.
+        # A spec edit invalidates the lock, so the workdir is amended — the
+        # approvals still have to be said again for the new content, which is
+        # the point.
+        self.write_spec(hypotheses="v2 raises conversion by 3 points.")
+        self.assertEqual(self.cli("lock", "--amend", "hypothesis tightened")[0], 0)
+        rc, out = self.approved()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("MISSING", out)
+        self.assertFalse(self.verdict()["recorded"])
+        rc, out = self.cli("gate", "G3")
+        self.assertNotEqual(rc, 0, f"G3 passed an approval of an older spec: {out}")
+        # The old digest still reads as a record of the content it covered.
+        self.assertEqual(self.verdict("spec", old)["state"], "stale")
+        # A yes for the new content restores the gate (tier and spec both
+        # cover the new spec, so both are said again).
+        rc, out = self.record("tier", yes="yes, the tier still holds")
+        self.assertEqual(rc, 0, out)
+        rc, out = self.record(yes="yes, the 3pt hypothesis is right")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.verdict()["state"], "recorded")
+        rc, out = self.cli("gate", "G3")
+        print("\n[gate after re-approve] rc=%d\n%s" % (rc, out.strip()))
+        self.assertEqual(rc, 0, out)
+
+    def test_a_second_yes_for_the_same_digest_is_refused(self):
+        self.assertEqual(self.record()[0], 0)
+        rc, out = self.record(yes="yes again")
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("already carries a recorded chat yes", out)
+        self.assertIn(".analysis/approvals/spec-", out)
 
 
 if __name__ == "__main__":

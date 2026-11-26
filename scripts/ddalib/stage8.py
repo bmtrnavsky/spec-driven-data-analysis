@@ -566,6 +566,8 @@ def match_evals(wd: Workdir) -> list[dict]:
         payload = rec.get("payload")
         if not isinstance(payload, str) or not payload:
             continue  # v1 record: no embedded payload, cannot bind (re-approve)
+        if _approvals.approval_fields(rec)["legacy"]:
+            continue  # pre chat-yes record: no approval block, cannot bind (re-approve)
         case_id = rec.get("selector") or entry["rel"]
         triggers = _case_triggers(payload)
         if not triggers:
@@ -577,8 +579,10 @@ def match_evals(wd: Workdir) -> list[dict]:
         verdict = _approvals.verify_approval(wd, "correction", digest)
         state = _approvals.ApprovalState(verdict.get("state", "missing"))
         V = _approvals.ApprovalState
-        bound = state in (V.VERIFIED, V.CONFIRMED) or (comp.tier != "PUBLISH"
-                                        and state in (V.UNVERIFIED, V.DOWNGRADED, V.STALE))
+        # A correction binds only with a recorded chat yes for the exact
+        # canonical case (§4.5). No weaker state exists: STALE means the case
+        # changed after the yes, and an unbound case is reported, not applied.
+        bound = state is V.RECORDED
         matched.append({"case": case_id, "triggers": hit, "bound": bound,
                         "verified": bool(verdict.get("verified")),
                         "approval_reason": verdict.get("reason", ""),
@@ -664,8 +668,8 @@ def match_evals(wd: Workdir) -> list[dict]:
         reason = str(verdict.get("reason", ""))
         state = _approvals.ApprovalState(verdict.get("state", "missing"))
         V = _approvals.ApprovalState
-        bound = state in (V.VERIFIED, V.CONFIRMED) or (comp.tier != "PUBLISH"
-                                        and state in (V.UNVERIFIED, V.DOWNGRADED, V.STALE))
+        # Only a recorded chat yes for the exact canonical case binds (§4.5).
+        bound = state is V.RECORDED
         matched.append({"case": d.name, "triggers": hit, "bound": bound,
                         "verified": bool(verdict.get("verified")),
                         "approval_reason": reason,

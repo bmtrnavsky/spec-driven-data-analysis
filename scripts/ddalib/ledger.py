@@ -1254,8 +1254,9 @@ def gate_g4(wd: Workdir) -> tuple[bool, str, dict]:
     if found["session_history"] or found["rebind"]:
         notes.append("workdir hopping: " + ", ".join(sorted({f['session'] for f in found['session_history'] + found['rebind']
                                                              if f.get('session')})))
-    # Config approval (§4.5): a `config` approval for the exact config hash,
-    # checked through the one requirements table with typed states (M1).
+    # Config approval (§4.5): a recorded config yes for the exact config
+    # hash, checked through the one requirements table (M1). There is one
+    # human state — RECORDED — and it passes at every tier.
     from . import approvals as _approvals
     from . import requirements as _requirements
     comp_hash = lockhash.config_hash(wd)
@@ -1265,15 +1266,9 @@ def gate_g4(wd: Workdir) -> tuple[bool, str, dict]:
     V = _approvals.ApprovalState
     if st in _approvals.HUMAN_STATES:
         notes.append(f"config approval {st} ({status.get('detail')})")
-        st = V.VERIFIED.value  # CONFIRMED counts the same as a signature (§4.5)
-    elif st == V.DOWNGRADED.value:
-        notes.append(f"config approval DOWNGRADED to unverified: {status.get('detail')}")
-        st = V.UNVERIFIED.value
-    elif st == V.UNVERIFIED.value:
-        notes.append(f"config approval unverified (agent could have produced it): {status.get('detail')}")
     elif st == V.MISSING.value:
         notes.append(f"no config approval for config {comp_hash[:12]}")
-    elif st in (V.UNCOMMITTED.value, V.STALE.value, V.BAD_SIG.value, V.UNKNOWN_SIGNER.value):
+    elif st in (V.UNCOMMITTED.value, V.STALE.value, V.MALFORMED.value):
         notes.append(f"config approval {st} (covers no current config): {status.get('detail')}")
         st = V.MISSING.value
     else:
@@ -1282,18 +1277,13 @@ def gate_g4(wd: Workdir) -> tuple[bool, str, dict]:
     # The pass/fail itself comes from the requirements table (M1); the
     # branches below only add the human-readable disclosure notes.
     passed = ok
-    if tier == "EXPLORE":
-        if st == V.MISSING.value:
-            notes.append("unapproved config disclosed at EXPLORE")
-    elif st == V.VERIFIED.value:
-        pass
-    elif st == V.UNVERIFIED.value:
-        notes.append("human approval unverified (agent could have produced it)")
-        if tier == "PUBLISH":
-            notes.append("PUBLISH needs a verified config approval: parked (§3.2 case 9)")
+    if tier == "EXPLORE" and st == V.MISSING.value:
+        notes.append("unapproved config disclosed at EXPLORE")
     elif st != V.MISSING.value or not ok:
-        notes.append(f"data reads block at {tier or 'undeclared tier'} until a human approves the new config "
-                     f"(`dda approve config` in their own terminal, then `dda approved config`)")
+        if not ok:
+            notes.append(f"data reads block at {tier or 'undeclared tier'} until Brad's chat yes is "
+                         f"recorded for the new config (`dda approve config --yes \"...\"`, "
+                         f"then `dda approved config`)")
     return passed, "; ".join(notes), {"label": eff, "exposure": found, "config_approval": st}
 
 

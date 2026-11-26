@@ -278,7 +278,7 @@ def _g9_allowlist_check(wd) -> tuple[list[str], dict]:
                 kind, _, artifact = stem.partition("-")
                 verdict = _approvals.verify_approval(wd, kind, artifact or None)
                 state = str(verdict.get("state", "missing"))
-                if state in ("missing", "uncommitted", "bad_sig", "unknown_signer"):
+                if state != "recorded":
                     problems.append(f"{norm} (approval {state}: {verdict.get('reason', '')[:80]})")
             continue
         problems.append(f"{norm} (not on the committed-file allowlist, §11)")
