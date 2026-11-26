@@ -206,6 +206,7 @@ guessing.
 ## Layout
 
     SPEC.md               the design, the checkpoint table, and the reasoning behind each rule
+    __init__.py           the plugin entry point: registers every skills/*/SKILL.md
     scripts/dda.py        the CLI; Python >= 3.11, standard library only
     scripts/ddalib/       gates, chains, the runner, reviews, approvals
     scripts/dda.cmd       the same commands on Windows

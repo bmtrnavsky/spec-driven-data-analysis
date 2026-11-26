@@ -1,3 +1,8 @@
+---
+name: correct
+description: Turn a human correction into a binding eval that must replay.
+---
+
 # correct
 
 Capture a human correction as a binding eval, then prove it replays.

@@ -21,6 +21,10 @@ closed.
   quotes, so `g""it clean -fdx` is still git.
 - **README in plain language.** What it does comes first, jargon is defined where
   it appears, and the approval section matches the new model.
+- **The correction skill now loads.** The pack shipped `skills/correct/` but had
+  no entry point, so the host never registered it. A 15-line root `__init__.py`
+  registers every `skills/*/SKILL.md`, and the plugin is loadable for catalog
+  admission.
 - Tests: 425 green on the full run, redteam GREEN, probe certifications
   re-minted.
 
