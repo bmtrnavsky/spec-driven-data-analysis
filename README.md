@@ -4,7 +4,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Hermes Plugin](https://img.shields.io/badge/Hermes-Plugin-teal.svg)](https://hermes-agent.nousresearch.com/docs)
-[![Version](https://img.shields.io/badge/version-0.9.4-orange.svg)](docs/CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.9.6-orange.svg)](docs/CHANGELOG.md)
 
 ## What it does
 

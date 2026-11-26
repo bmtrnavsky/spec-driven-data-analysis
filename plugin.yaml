@@ -1,5 +1,5 @@
 name: spec-driven-data-analysis
-version: 0.9.4
+version: 0.9.6
 description: Makes an AI's data analysis checkable. Write the question down first, then prove every number can be re-run.
 author: Brad Trnavsky
 license: MIT

@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.9.6 - 2026-11-26
+
+Every version number now says the same thing.
+
+- The plugin manifest, the CLI version string, the README badge, this changelog,
+  and the git tag all read 0.9.6. Before this, the manifest and the CLI still
+  said 0.9.4 after the 0.9.5 license fix shipped, so anyone who read the version
+  from the manifest, or from a pin taken off it, named a release that was no
+  longer current.
+- No behavior changed. Nothing in the analysis path moved.
+
+## 0.9.5 - 2026-11-26
+
+The license is plain MIT again.
+
+- `LICENSE` is the standard MIT text with one copyright line. Earlier drafts
+  pointed at attribution files that were never in the repo, which made the
+  license unreadable on its own. Nothing else changed.
+
 ## 0.9.4 - 2026-11-26
 
 Approval got simpler by owner decision, and three ways around the checks were
